@@ -31,6 +31,44 @@ Open the [latest release page](https://github.com/julyx10/lap/releases/latest), 
 | **Windows 10/11 (ARM64)** | `_arm64_en-US.msi` | Currently unsigned (SmartScreen warning may appear) |
 | **Ubuntu/Debian (amd64)** | `_amd64.deb` | For better video playback support, see the Linux note below. |
 
+## Windows Installation
+
+### Option 1: Download Prebuilt Installer (Recommended for End Users)
+Download the Windows MSI from the [latest release](https://github.com/julyx10/lap/releases/latest):
+- For x64 systems: `_x64_en-US.msi`
+- For ARM64 systems: `_arm64_en-US.msi`
+Run the MSI installer and launch Lap from your Start menu.
+
+### Option 2: Build from Source (For Developers)
+Ensure prerequisites: Node.js 20+, pnpm, Rust stable.
+
+```powershell
+# Update submodules
+Why do I need to run this - To initialize and update Git submodules, which contain the source code for dependencies like LibRaw (for RAW image decoding) and libheif (for HEIC/HEIF decoding). These submodules are required for building Lap, as the project depends on their code rather than precompiled libraries. Without this step, the Rust build will fail due to missing submodule sources.
+Run: 
+  git submodule update --init --recursive
+
+# Install Tauri CLI
+Install Rust first, as cargo is the Rust package manager. On Windows, download and run the installer from https://rustup.rs/ or use PowerShell: Invoke-WebRequest -Uri https://win.rustup.rs -OutFile rustup-init.exe; .\rustup-init.exe -y. After installation, restart your terminal and run the cargo command.
+
+Run: 
+  cargo install tauri-cli --version "^2.0.0" --locked
+
+# Download models and FFmpeg
+.\scripts\download_models.ps1
+.\scripts\download_ffmpeg_sidecar.ps1
+
+# Install frontend dependencies
+cd src-vite
+pnpm install
+cd ..
+
+# Run in development mode
+cargo tauri dev
+```
+
+To build a release installer: `cargo tauri build` (outputs MSI in `src-tauri\target\release\bundle\msi\`).
+
 ### Linux Video Playback Notes
 
 On Ubuntu/Debian/Linux Mint, install these packages for better video playback support:
