@@ -63,6 +63,14 @@ cd src-vite
 pnpm install
 cd ..
 
+## Check Chocolatey Version and if it is installed
+choco --version
+2.4.3
+
+Run:
+   choco install cmake --yes
+
+
 # Run in development mode
 cargo tauri dev
 ```

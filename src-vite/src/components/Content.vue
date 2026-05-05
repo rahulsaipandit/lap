@@ -142,6 +142,12 @@
             :selected="isDedupPanelOpen"
             @click="toggleDedupPanel"
           />
+          <TButton
+            :icon="IconStack"
+            :tooltip="'Find duplicates (new)'"
+            :selected="isDedup2PanelOpen"
+            @click="toggleDedup2Panel"
+          />
 
           <!-- toggle info panel -->
           <TButton
@@ -384,6 +390,18 @@
             @compare-group="handleDedupCompareGroup"
             @trash-selected-duplicates="handleDedupTrashSelectedDuplicates"
           />
+          <DedupPane2
+            v-else-if="isDedup2PanelOpen"
+            :file-list="fileList"
+            :selected-file-id="fileList[selectedItemIndex]?.id"
+            :dedup-scan-key="dedupScanKey"
+            :dedup-query-params="dedupQueryParams"
+            @close="config.rightPanel.show = false"
+            @select-file="handleDedupSelectFile"
+            @preview-file="handleDedupPreviewFile"
+            @compare-group="handleDedupCompareGroup"
+            @trash-selected-duplicates="handleDedupTrashSelectedDuplicates"
+          />
           <SelectionPanel
             v-else-if="selectMode"
             :file-count="fileList.length"
@@ -594,6 +612,7 @@ import TaggingDialog from '@/components/TaggingDialog.vue';
 import EditImage from '@/components/EditImage.vue';
 import FileInfo from '@/components/FileInfo.vue';
 import DedupPane from '@/components/DedupPane.vue';
+import DedupPane2 from '@/components/DedupPane_2.vue';
 import SelectionPanel from '@/components/SelectionPanel.vue';
 import ScrollBar from '@/components/ScrollBar.vue';
 import SliderInput from '@/components/SliderInput.vue';
@@ -601,6 +620,7 @@ import StatusBar from '@/components/StatusBar.vue';
 
 import {
   IconPhotoAll,
+  IconStack,
   IconClose,
   IconCheckAll,
   IconCheckNone,
@@ -885,6 +905,7 @@ const showUnsavedChangesMsgbox = ref(false);
 const pendingAction = ref<(() => void) | null>(null);
 const fileInfoRef = ref<any>(null);
 const isDedupPanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'dedup');
+const isDedup2PanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'dedup2');
 const isInfoPanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'info');
 const RIGHT_PANEL_MIN_WIDTH = 160; // Keep aligned with left panel minimum width.
 const activeRightPanelWidth = computed(() => Number(config.rightPanel.width || 360));
@@ -3808,7 +3829,7 @@ const onTrashFile = async () => {
   const affectedAlbumIds = new Set<number>();
   let failedDeleteCount = 0;
   const shouldAdvanceDedup =
-    isDedupPanelOpen.value &&
+    (isDedupPanelOpen.value || isDedup2PanelOpen.value) &&
     !!dedupTrashGroupKey.value;
   const preDeleteGroups = shouldAdvanceDedup ? buildDuplicateGroups(fileList.value) : [];
   const currentDedupGroupKey = dedupTrashGroupKey.value;
@@ -4398,6 +4419,19 @@ const toggleDedupPanel = () => {
     handleSelectMode(false);
     disablePreviewModes();
     config.rightPanel.mode = 'dedup';
+    config.rightPanel.show = true;
+  });
+};
+
+const toggleDedup2Panel = () => {
+  checkUnsavedChanges(() => {
+    if (isDedup2PanelOpen.value) {
+      config.rightPanel.show = false;
+      return;
+    }
+    handleSelectMode(false);
+    disablePreviewModes();
+    config.rightPanel.mode = 'dedup2';
     config.rightPanel.show = true;
   });
 };
