@@ -15,6 +15,12 @@ Key features:
 - Album-specific duplicate selection and deletion
 - Keep/protect mechanism for files
 - Batch deletion with reclaimable space calculation
+- Folder comparison: Compare two arbitrary directories (source vs. target) instead of library-based scanning
+- Custom ignore patterns with wildcard support and pre-loaded defaults
+- Multiple comparison criteria (name, size, timestamp with tolerance, binary content)
+- Dual tree views for hierarchical folder comparison
+- Manual folder selection via browse dialogs
+- Target-specific deletion with confirmation and recycle bin usage
 
 ## UI Structure
 
@@ -115,6 +121,48 @@ The component uses color-coded backgrounds and icons to provide clear visual fee
 - **Base/Content Colors**: Used for neutral states and text
 
 This color coding provides immediate visual feedback, helping users understand which files will be preserved, which will be deleted, and which are protected from modification.
+
+## Folder Comparison Features
+
+In addition to library-based duplicate detection, the component supports comparing two arbitrary directories, providing a more general-purpose folder comparison tool.
+
+### Folder Comparison Mode
+- **Directory Selection**: Manual browse dialogs for selecting source and target folders
+- **Comparison Scope**: Compares entire directory trees recursively, rather than being limited to a single photo library
+- **Obsolete Library Mode**: When folder comparison is enabled, album-based filtering becomes obsolete as the focus shifts to direct folder-to-folder matching
+
+### Custom Ignore Patterns
+- **User-Defined Patterns**: Input field for adding wildcard patterns (e.g., *.txt, temp*, .git)
+- **Pre-Loaded Defaults**: Common exclusions like *.pyc, __pycache__, .git, .svn, .DS_Store, Thumbs.db, node_modules
+- **Pattern Matching**: Applies to filenames and directory paths, allowing entire branches to be filtered
+- **Management**: Add/remove patterns via buttons, with scrollable list display
+
+### Multiple Comparison Criteria
+- **Name Comparison**: Exact filename matching (default enabled)
+- **Size Comparison**: Byte-for-byte size equality (default enabled)
+- **Timestamp Comparison**: Modification date matching with 1-second tolerance
+- **Content Comparison**: Binary file content comparison for thorough validation
+- **Flexible Configuration**: Mix and match criteria; at least one must be enabled
+
+### Dual Tree Views
+- **Side-by-Side Layout**: Hierarchical views mirroring source (left) and target (right) folder structures
+- **Columns**: Name, Size, Modified (YYYY-MM-DD HH:MM:SS format), Similar (checkboxes)
+- **Expansion/Collapse**: Full navigation of nested directories
+- **Similarity Indicators**: Automatic checkbox selection for matching files based on criteria
+- **Manual Overrides**: Users can check/uncheck for custom selection
+
+### Target-Specific Deletion
+- **Selective Removal**: Deletes only from the target folder, preserving source folder integrity
+- **Confirmation Dialog**: "Are you sure you want to move checked items from the target folder to the recycle bin?"
+- **Recycle Bin Usage**: Safe deletion with recovery options, not permanent erasure
+- **Error Handling**: Collects and displays errors (e.g., permission issues) without halting the process
+- **Post-Deletion Refresh**: Automatic UI update to reflect changes
+
+### Integration with Existing Features
+The folder comparison features complement the existing duplicate detection while retaining core visual cues:
+- **Set Keep Button**: Allows designating preferred files (not in WinMerge)
+- **Delete Button**: Platform-specific labeling (Trash on macOS, Delete elsewhere)
+- **Color Coding**: Maintains blue for preserved/keep files, red for deletion candidates
 
 ## Data Structures
 
