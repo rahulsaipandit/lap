@@ -48,8 +48,8 @@ unsafe extern "C" {
         handle: *mut *mut HeifImageHandle,
     ) -> HeifError;
     fn heif_image_handle_release(handle: *mut HeifImageHandle);
-    // fn heif_image_handle_get_width(handle: *const HeifImageHandle) -> c_int;
-    // fn heif_image_handle_get_height(handle: *const HeifImageHandle) -> c_int;
+    fn heif_image_handle_get_width(handle: *const HeifImageHandle) -> c_int;
+    fn heif_image_handle_get_height(handle: *const HeifImageHandle) -> c_int;
     fn heif_image_handle_has_alpha_channel(handle: *const HeifImageHandle) -> c_int;
 
     fn heif_decode_image(
