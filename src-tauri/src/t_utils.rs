@@ -5,12 +5,12 @@
  * date:    2024-08-08
  */
 use crate::t_common;
-use crate::t_sqlite::{AFile, Album};
+use crate::t_sqlite::{AFile, AFolder, AThumb, Album, FolderScanState, FolderSubfolderState};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use pinyin::ToPinyin;
 use rstar::{AABB, PointDistance, RTree, RTreeObject};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 #[cfg(target_os = "windows")]
@@ -32,16 +32,109 @@ pub fn path_exists(path: &str) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
+pub fn directory_accessible(path: &str) -> bool {
+    if !fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    match fs::read_dir(path) {
+        Ok(mut entries) => !matches!(entries.next(), Some(Err(_))),
+        Err(_) => false,
+    }
+}
+
 pub fn trash_path(path: &str) -> Result<(), String> {
     if !path_exists(path) {
         return Err(format!("Path does not exist: {}", path));
     }
 
-    trash::delete(path).map_err(|e| e.to_string())?;
+    move_to_trash(path)?;
 
     if path_exists(path) {
         return Err(format!(
             "Failed to move path to Trash. The path still exists on disk: {}",
+            path
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn move_to_trash(path: &str) -> Result<(), String> {
+    use trash::macos::{DeleteMethod, TrashContextExtMacos};
+
+    // NsFileManager is fast but requires Automation permission that users may deny.
+    // When denied, Put Back metadata is lost. Fall back to Finder (AppleScript) which
+    // always preserves Put Back metadata and does not require special permissions.
+    let mut context = trash::TrashContext::default();
+    context.set_delete_method(DeleteMethod::NsFileManager);
+    if let Err(_error) = context.delete(path) {
+        let mut fallback = trash::TrashContext::default();
+        fallback.set_delete_method(DeleteMethod::Finder);
+        fallback.delete(path).map_err(|fallback_error| fallback_error.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(not(target_os = "macos")))]
+fn move_to_trash(path: &str) -> Result<(), String> {
+    trash::delete(path).map_err(|error| error.to_string())
+}
+
+pub fn delete_file_permanently(path: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "Failed to read metadata before permanent delete: {} ({})",
+            path, e
+        )
+    })?;
+
+    if metadata.is_dir() {
+        return Err(format!(
+            "Permanent delete only supports files, not directories: {}",
+            path
+        ));
+    }
+
+    fs::remove_file(path)
+        .map_err(|e| format!("Failed to permanently delete file: {} ({})", path, e))?;
+
+    if path_exists(path) {
+        return Err(format!(
+            "Failed to permanently delete file. The path still exists on disk: {}",
+            path
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn delete_folder_permanently(path: &str) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| {
+        format!(
+            "Failed to read metadata before permanent delete: {} ({})",
+            path, e
+        )
+    })?;
+
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Permanent folder delete only supports directories, not files: {}",
+            path
+        ));
+    }
+
+    fs::remove_dir_all(path)
+        .map_err(|e| format!("Failed to permanently delete folder: {} ({})", path, e))?;
+
+    if path_exists(path) {
+        return Err(format!(
+            "Failed to permanently delete folder. The path still exists on disk: {}",
             path
         ));
     }
@@ -118,14 +211,37 @@ impl ReverseGeocoder {
         }
     }
 
-    pub fn search(&self, loc: (f64, f64)) -> SearchResult<'_> {
+    pub fn search(&self, loc: (f64, f64)) -> Option<SearchResult<'_>> {
+        if self.tree.size() == 0 {
+            return None;
+        }
+        if loc.0.is_nan() || loc.1.is_nan() {
+            return None;
+        }
         let query = lat_lon_to_xyz(loc.0, loc.1);
-        let nearest = self
-            .tree
-            .nearest_neighbor(&query)
-            .expect("cities tree is empty");
-        SearchResult {
-            record: &self.records[nearest.idx as usize],
+        // rstar 0.12 has an internal unwrap that can panic on certain tree states;
+        // catch_unwind ensures the app survives even if the R-tree is corrupted.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.tree.nearest_neighbor(&query)
+        }));
+        match result {
+            Ok(Some(nearest)) => Some(SearchResult {
+                record: &self.records[nearest.idx as usize],
+            }),
+            Ok(None) => {
+                eprintln!(
+                    "Geocoder: no nearest neighbor found for ({}, {})",
+                    loc.0, loc.1
+                );
+                None
+            }
+            Err(_) => {
+                eprintln!(
+                    "Geocoder: rstar nearest_neighbor panicked for ({}, {})",
+                    loc.0, loc.1
+                );
+                None
+            }
         }
     }
 }
@@ -142,6 +258,7 @@ pub static GEOCODER: Lazy<ReverseGeocoder> = Lazy::new(|| {
 pub struct PackageInfo {
     name: String,
     version: String,
+    commit_hash: Option<String>,
     description: String,
     authors: Vec<String>,
     repository: Option<String>,
@@ -150,10 +267,11 @@ pub struct PackageInfo {
 }
 
 impl PackageInfo {
-    pub fn new() -> Self {
+    pub fn new(commit_hash: &str) -> Self {
         Self {
             name: env!("CARGO_PKG_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            commit_hash: (!commit_hash.is_empty()).then(|| commit_hash.to_string()),
             description: env!("CARGO_PKG_DESCRIPTION").to_string(),
             authors: env!("CARGO_PKG_AUTHORS")
                 .split(':')
@@ -176,6 +294,7 @@ pub struct FileNode {
     modified_at: Option<i64>,
     is_dir: bool, // is directory
     is_expanded: bool,
+    has_subfolders: bool,
     children: Option<Vec<Self>>,
 }
 
@@ -196,6 +315,7 @@ impl FileNode {
             modified_at,
             is_dir,
             is_expanded,
+            has_subfolders: false,
             children: None,
         }
     }
@@ -229,6 +349,10 @@ impl FileNode {
 
         // Recursively read subfolders and files
         root_node.children = Some(Self::recurse_nodes(root_path, is_recursive, sort)?);
+        root_node.has_subfolders = root_node
+            .children
+            .as_ref()
+            .is_some_and(|children| !children.is_empty());
 
         Ok(root_node)
     }
@@ -263,17 +387,24 @@ impl FileNode {
 
                 if is_recursive {
                     node.children = Some(Self::recurse_nodes(entry_path, is_recursive, sort)?);
+                    node.has_subfolders = node
+                        .children
+                        .as_ref()
+                        .is_some_and(|children| !children.is_empty());
                 }
 
                 nodes.push(node);
             }
         }
 
+        if !is_recursive {
+            Self::hydrate_subfolder_states(&mut nodes);
+        }
+
         match sort {
             1 => nodes.sort_by(|a, b| {
-                convert_to_pinyin(&b.name)
-                    .to_lowercase()
-                    .cmp(&convert_to_pinyin(&a.name).to_lowercase())
+                natural_sort_key(&b.name.to_lowercase())
+                    .cmp(&natural_sort_key(&a.name.to_lowercase()))
             }),
             2 => nodes.sort_by(|a, b| {
                 a.modified_at
@@ -288,22 +419,91 @@ impl FileNode {
                     .cmp(&a.modified_at.or(a.created_at).unwrap_or(0))
             }),
             _ => nodes.sort_by(|a, b| {
-                convert_to_pinyin(&a.name)
-                    .to_lowercase()
-                    .cmp(&convert_to_pinyin(&b.name).to_lowercase())
+                natural_sort_key(&a.name.to_lowercase())
+                    .cmp(&natural_sort_key(&b.name.to_lowercase()))
             }),
         }
         Ok(nodes)
     }
 
+    /// Resolve direct-child state from the cache in one database query.  A
+    /// shallow directory read is only needed when a folder has changed since
+    /// it was indexed (or has not yet been indexed).
+    fn hydrate_subfolder_states(nodes: &mut [Self]) {
+        let paths = nodes.iter().map(|node| node.path.clone()).collect::<Vec<_>>();
+        let cached = FolderSubfolderState::get_many(&paths).unwrap_or_else(|error| {
+            eprintln!("Failed to read folder subfolder-state cache: {}", error);
+            HashMap::new()
+        });
+        for node in nodes {
+            let cached_state = cached.get(&node.path);
+            if let (Some(current_mtime), Some(state)) = (node.modified_at, cached_state) {
+                if state.modified_at == Some(current_mtime) {
+                    node.has_subfolders = state.has_subfolders;
+                    continue;
+                }
+            }
+
+            // An unreadable directory is not known to be a leaf. Keep its
+            // expand control available so a transient permission or network
+            // error does not make the branch inaccessible from the sidebar.
+            node.has_subfolders = detect_visible_subfolder(Path::new(&node.path)).unwrap_or(true);
+        }
+    }
+}
+
+/// True when the file name starts with `.` (Unix dotfile convention).
+/// Non-UTF-8 names are silently treated as not-hidden.
+fn is_dotfile(name: &std::ffi::OsStr) -> bool {
+    name.to_str().map(|s| s.starts_with('.')).unwrap_or(false)
+}
+
+/// True on Windows when `FILE_ATTRIBUTE_HIDDEN` is set; always false on other platforms.
+#[cfg(target_os = "windows")]
+fn has_hidden_attribute(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    (metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_hidden_attribute(_metadata: &std::fs::Metadata) -> bool {
+    false
 }
 
 pub fn is_hidden(entry: &walkdir::DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+    is_dotfile(entry.file_name())
+        || entry
+            .metadata()
+            .ok()
+            .map_or(false, |m| has_hidden_attribute(&m))
+}
+
+/// Hidden-file check for `std::fs::DirEntry` (used by fs::read_dir callers).
+/// Note: `file_name()` returns an owned `OsString` (unlike `walkdir::DirEntry`'s `&OsStr`).
+pub fn is_fs_entry_hidden(entry: &std::fs::DirEntry) -> bool {
+    is_dotfile(&entry.file_name())
+        || entry
+            .metadata()
+            .ok()
+            .map_or(false, |m| has_hidden_attribute(&m))
+}
+
+/// Detect whether a directory contains a visible direct subdirectory.
+/// This is only used to fill a missing or stale cache entry.
+pub fn detect_visible_subfolder(path: &Path) -> std::io::Result<bool> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if entry
+            .file_type()
+            .map(|file_type| file_type.is_dir())
+            .unwrap_or(false)
+            && !is_fs_entry_hidden(&entry)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // file metadata struct
@@ -315,6 +515,7 @@ pub struct FileInfo {
     pub created: Option<i64>,
     pub modified: Option<i64>, // modified date as a timestamp
     pub file_size: i64,
+    pub inode: u64,
 }
 
 impl FileInfo {
@@ -324,6 +525,8 @@ impl FileInfo {
         let path = Path::new(file_path);
         let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
 
+        let inode = file_id(path).unwrap_or(0);
+
         Ok(FileInfo {
             file_path: file_path.to_string(),
             file_name: get_file_name(file_path),
@@ -331,7 +534,98 @@ impl FileInfo {
             created: systemtime_to_timestamp(metadata.created().ok()),
             modified: systemtime_to_timestamp(metadata.modified().ok()),
             file_size: metadata.len() as i64,
+            inode,
         })
+    }
+}
+
+/// Return a stable filesystem identifier for rename detection.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|m| m.ino())
+}
+
+#[cfg(windows)]
+fn file_id(path: &Path) -> Option<u64> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use win32_imports::*;
+
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let handle = CreateFileW(
+            path_wide.as_ptr(),
+            0,   // dwDesiredAccess — 0 is sufficient for metadata
+            0x7, // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            core::ptr::null_mut(),
+            3,           // OPEN_EXISTING
+            0x0200_0000, // FILE_FLAG_BACKUP_SEMANTICS (required for directories)
+            core::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info = core::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>();
+        let ok = GetFileInformationByHandle(handle, &mut info);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64))
+    }
+}
+
+#[cfg(windows)]
+mod win32_imports {
+    #![allow(non_camel_case_types, non_snake_case, unused)]
+
+    pub type HANDLE = isize;
+
+    #[repr(C)]
+    pub struct FILETIME {
+        pub dwLowDateTime: u32,
+        pub dwHighDateTime: u32,
+    }
+
+    #[repr(C)]
+    pub struct BY_HANDLE_FILE_INFORMATION {
+        pub dwFileAttributes: u32,
+        pub ftCreationTime: FILETIME,
+        pub ftLastAccessTime: FILETIME,
+        pub ftLastWriteTime: FILETIME,
+        pub dwVolumeSerialNumber: u32,
+        pub nFileSizeHigh: u32,
+        pub nFileSizeLow: u32,
+        pub nNumberOfLinks: u32,
+        pub nFileIndexHigh: u32,
+        pub nFileIndexLow: u32,
+    }
+
+    pub const INVALID_HANDLE_VALUE: HANDLE = -1isize;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn CreateFileW(
+            lpFileName: *const u16,
+            dwDesiredAccess: u32,
+            dwShareMode: u32,
+            lpSecurityAttributes: *mut core::ffi::c_void,
+            dwCreationDisposition: u32,
+            dwFlagsAndAttributes: u32,
+            hTemplateFile: *mut core::ffi::c_void,
+        ) -> HANDLE;
+
+        pub fn GetFileInformationByHandle(
+            hFile: HANDLE,
+            lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+        ) -> i32;
+
+        pub fn CloseHandle(hObject: HANDLE) -> i32;
     }
 }
 
@@ -591,160 +885,516 @@ fn get_unique_path(path: PathBuf) -> PathBuf {
     }
 }
 
-/// move a folder to a new location
-/// Returns the new folder path if successful
-pub fn move_folder(folder_path: &str, dest_folder: &str) -> Option<String> {
-    let path = Path::new(folder_path);
-    let mut destination = Path::new(dest_folder).to_path_buf();
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FileConflictPolicy {
+    KeepBoth,
+    Replace,
+}
 
-    // Ensure the source folder exists
-    if !path.exists() {
-        eprintln!("Folder does not exist: {}", folder_path);
-        return None;
+impl FileConflictPolicy {
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "replace" => Self::Replace,
+            _ => Self::KeepBoth,
+        }
     }
+}
 
-    // Append the folder name to the new folder path
-    if let Some(folder_name) = path.file_name() {
-        destination.push(folder_name);
-    } else {
-        eprintln!("Invalid folder name: {}", folder_path);
-        return None;
-    }
+fn transfer_temp_path(destination: &Path, label: &str) -> PathBuf {
+    let parent = destination.parent().unwrap_or_else(|| Path::new(""));
+    parent.join(format!(".lap-{}-{}", label, uuid::Uuid::new_v4()))
+}
 
-    let destination = get_unique_path(destination);
-
-    // Attempt to move the folder and return result
-    fs::rename(path, &destination).map_or_else(
-        |e| {
-            eprintln!("Failed to move folder: {}", e);
-            None
-        },
-        |_| {
-            println!("Folder moved to: {}", destination.display());
-            Some(destination.to_string_lossy().into_owned())
+fn resolve_transfer_destination(
+    source: &Path,
+    dest_folder: &str,
+    policy: FileConflictPolicy,
+) -> Result<PathBuf, String> {
+    let mut destination = PathBuf::from(dest_folder);
+    destination.push(
+        source
+            .file_name()
+            .ok_or_else(|| format!("Invalid source path: {}", source.display()))?,
+    );
+    Ok(
+        if destination.exists() && policy == FileConflictPolicy::KeepBoth {
+            get_unique_path(destination)
+        } else {
+            destination
         },
     )
 }
 
-/// Recursively copies a folder and all its contents to a new location.
-/// Returns Some(new_folder_path) if successful, or None on failure.
-pub fn copy_folder(folder_path: &str, dest_folder: &str) -> Option<String> {
-    let src = Path::new(folder_path);
-    let mut dst = Path::new(dest_folder).to_path_buf();
+pub fn resolve_file_transfer_destination(
+    file_path: &str,
+    dest_folder: &str,
+    policy: FileConflictPolicy,
+) -> Result<PathBuf, String> {
+    resolve_transfer_destination(Path::new(file_path), dest_folder, policy)
+}
 
-    // Check if the source folder exists and is a directory
+fn paths_refer_to_same_item(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[derive(Debug)]
+pub struct TransferResult {
+    pub path: String,
+    backup: Option<PathBuf>,
+}
+
+impl TransferResult {
+    fn new(destination: &Path, backup: Option<PathBuf>) -> Self {
+        Self {
+            path: destination.to_string_lossy().into_owned(),
+            backup,
+        }
+    }
+
+    pub fn finalize(self) -> Result<String, String> {
+        if let Some(backup) = self.backup {
+            let result = if backup.is_dir() {
+                fs::remove_dir_all(&backup)
+            } else {
+                fs::remove_file(&backup)
+            };
+            if let Err(error) = result {
+                eprintln!(
+                    "Transfer completed but backup cleanup failed for '{}': {}",
+                    backup.display(),
+                    error
+                );
+            }
+        }
+        Ok(self.path)
+    }
+
+    pub fn rollback_move(self, source: &Path) -> Result<(), String> {
+        let destination = PathBuf::from(&self.path);
+        if fs::rename(&destination, source).is_err() {
+            if destination.is_dir() {
+                copy_folder_to(&destination, source).map_err(|e| {
+                    format!(
+                        "Failed to restore source folder '{}' from '{}': {}",
+                        source.display(),
+                        destination.display(),
+                        e
+                    )
+                })?;
+                fs::remove_dir_all(&destination)
+                    .map_err(|e| format!("Failed to clean rollback source folder: {}", e))?;
+            } else {
+                copy_file_to_path(&destination, source).map_err(|e| {
+                    format!(
+                        "Failed to restore source file '{}' from '{}': {}",
+                        source.display(),
+                        destination.display(),
+                        e
+                    )
+                })?;
+                fs::remove_file(&destination)
+                    .map_err(|e| format!("Failed to clean rollback source file: {}", e))?;
+            }
+        }
+        self.restore_backup(&destination)
+    }
+
+    pub fn rollback_copy(self) -> Result<(), String> {
+        let destination = PathBuf::from(&self.path);
+        if destination.is_dir() {
+            fs::remove_dir_all(&destination)
+        } else {
+            fs::remove_file(&destination)
+        }
+        .map_err(|e| format!("Failed to remove copied destination: {}", e))?;
+        self.restore_backup(&destination)
+    }
+
+    fn restore_backup(self, destination: &Path) -> Result<(), String> {
+        if let Some(backup) = self.backup {
+            fs::rename(&backup, destination).map_err(|e| {
+                format!(
+                    "Failed to restore previous destination '{}' from '{}': {}",
+                    destination.display(),
+                    backup.display(),
+                    e
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn replace_path_with_staged(
+    staged: &Path,
+    destination: &Path,
+) -> Result<Option<PathBuf>, std::io::Error> {
+    if !destination.exists() {
+        fs::rename(staged, destination)?;
+        return Ok(None);
+    }
+
+    let backup = transfer_temp_path(destination, "backup");
+    fs::rename(destination, &backup)?;
+    if let Err(error) = fs::rename(staged, destination) {
+        let _ = fs::rename(&backup, destination);
+        return Err(error);
+    }
+    Ok(Some(backup))
+}
+
+pub fn move_folder_with_policy(
+    folder_path: &str,
+    dest_folder: &str,
+    policy: FileConflictPolicy,
+) -> Result<TransferResult, String> {
+    let path = Path::new(folder_path);
+    let destination_parent = Path::new(dest_folder);
+
+    // Ensure the source folder exists
+    if !path.exists() {
+        return Err(format!("Folder does not exist: {}", folder_path));
+    }
+    if destination_parent.starts_with(path) || path.parent() == Some(destination_parent) {
+        return Err(format!("Invalid folder move destination: {}", dest_folder));
+    }
+
+    let destination = resolve_transfer_destination(path, dest_folder, policy)?;
+    if paths_refer_to_same_item(path, &destination) {
+        return Err("Source and destination are the same folder".to_string());
+    }
+
+    if policy != FileConflictPolicy::Replace || !destination.exists() {
+        if fs::rename(path, &destination).is_ok() {
+            println!("Folder moved to: {}", destination.display());
+            return Ok(TransferResult::new(&destination, None));
+        }
+    }
+
+    let staged = transfer_temp_path(&destination, "move");
+    if let Err(copy_error) = copy_folder_to(path, &staged) {
+        let _ = fs::remove_dir_all(&staged);
+        return Err(format!("Failed to stage folder move: {}", copy_error));
+    }
+
+    let backup = replace_path_with_staged(&staged, &destination).map_err(|replace_error| {
+        let _ = fs::remove_dir_all(&staged);
+        format!("Failed to finalize folder move: {}", replace_error)
+    })?;
+
+    if let Err(remove_error) = fs::remove_dir_all(path) {
+        let rollback_error = TransferResult::new(&destination, backup)
+            .rollback_move(path)
+            .err();
+        return Err(match rollback_error {
+            Some(rollback_error) => format!(
+                "Folder source cleanup failed: {}; rollback also failed: {}",
+                remove_error, rollback_error
+            ),
+            None => format!(
+                "Folder source cleanup failed; move was rolled back: {}",
+                remove_error
+            ),
+        });
+    }
+
+    println!("Folder moved to: {}", destination.display());
+    Ok(TransferResult::new(&destination, backup))
+}
+
+fn copy_folder_to(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = dst.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_folder_to(&source_path, &destination_path)?;
+        } else if let Err(error) = fs::copy(&source_path, &destination_path) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn copy_folder_with_policy(
+    folder_path: &str,
+    dest_folder: &str,
+    policy: FileConflictPolicy,
+) -> Result<TransferResult, String> {
+    let src = Path::new(folder_path);
+    let destination_parent = Path::new(dest_folder);
+
     if !src.exists() || !src.is_dir() {
-        eprintln!(
+        return Err(format!(
             "Source folder does not exist or is not a directory: {}",
             folder_path
-        );
-        return None;
+        ));
+    }
+    if destination_parent.starts_with(src) {
+        return Err(format!("Invalid folder copy destination: {}", dest_folder));
     }
 
-    // Get the name of the folder from folder_path
-    if let Some(folder_name) = src.file_name() {
-        // Append the folder name to the new folder path
-        dst.push(folder_name);
-    } else {
-        eprintln!("Failed to get the folder name from path: {}", folder_path);
-        return None;
+    let destination = resolve_transfer_destination(src, dest_folder, policy)?;
+    if policy == FileConflictPolicy::Replace && paths_refer_to_same_item(src, &destination) {
+        return Err("Cannot replace a folder with itself".to_string());
+    }
+    let staged = transfer_temp_path(&destination, "copy");
+    if let Err(copy_error) = copy_folder_to(src, &staged) {
+        let _ = fs::remove_dir_all(&staged);
+        return Err(format!("Failed to copy folder: {}", copy_error));
     }
 
-    let dst = get_unique_path(dst);
+    let backup = replace_path_with_staged(&staged, &destination).map_err(|replace_error| {
+        let _ = fs::remove_dir_all(&staged);
+        format!("Failed to finalize folder copy: {}", replace_error)
+    })?;
 
-    // Create the destination folder if it does not exist
-    if let Err(e) = fs::create_dir_all(&dst) {
-        eprintln!(
-            "Failed to create destination folder '{}': {}",
-            dst.display(),
-            e
-        );
-        return None;
-    }
-
-    // Walk through the source folder and copy its contents
-    for entry in WalkDir::new(src) {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("Error reading entry: {}", e);
-                return None;
-            }
-        };
-
-        let relative_path = match entry.path().strip_prefix(src) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Error computing relative path: {}", e);
-                return None;
-            }
-        };
-
-        let dest_path = dst.join(relative_path);
-
-        if entry.file_type().is_dir() {
-            if let Err(e) = fs::create_dir_all(&dest_path) {
-                eprintln!(
-                    "Failed to create directory '{}': {}",
-                    dest_path.display(),
-                    e
-                );
-                return None;
-            }
-        } else if let Err(e) = fs::copy(entry.path(), &dest_path) {
-            eprintln!("Failed to copy file to '{}': {}", dest_path.display(), e);
-            return None;
-        }
-    }
-
-    println!("Folder copied successfully to: {}", dst.display());
-    Some(dst.to_string_lossy().into_owned())
+    println!("Folder copied successfully to: {}", destination.display());
+    Ok(TransferResult::new(&destination, backup))
 }
 
-/// move file to dest folder, if dest file already exists, find a new name
-/// Returns the new file path if successful, or None on failure.
-pub fn move_file(file_path: &str, dest_folder: &str) -> Option<String> {
+fn copy_file_to_path(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    if let Err(error) = fs::copy(source, destination) {
+        let _ = fs::remove_file(destination);
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn move_file_to_path_with_policy(
+    file_path: &str,
+    destination: &Path,
+    policy: FileConflictPolicy,
+) -> Result<TransferResult, String> {
     let source = Path::new(file_path);
-    let file_name = source.file_name()?;
-    let mut destination = PathBuf::from(dest_folder);
-    destination.push(file_name);
+    if paths_refer_to_same_item(source, destination) {
+        return Err("Source and destination are the same file".to_string());
+    }
+    if policy != FileConflictPolicy::Replace && destination.exists() {
+        return Err(format!(
+            "Destination file already exists: {}",
+            destination.display()
+        ));
+    }
 
-    let destination = get_unique_path(destination);
-
-    // Try to move the file
-    match fs::rename(source, &destination) {
-        Ok(_) => {
+    if policy != FileConflictPolicy::Replace || !destination.exists() {
+        if fs::rename(source, &destination).is_ok() {
             println!("File moved successfully: {}", destination.display());
-            destination.to_str().map(|s| s.to_string())
-        }
-        Err(e) => {
-            eprintln!("Failed to move file: {}", e);
-            None
+            return Ok(TransferResult::new(&destination, None));
         }
     }
+
+    let staged = transfer_temp_path(&destination, "move");
+    if let Err(copy_error) = copy_file_to_path(source, &staged) {
+        return Err(format!("Failed to stage file move: {}", copy_error));
+    }
+    let backup = replace_path_with_staged(&staged, &destination).map_err(|replace_error| {
+        let _ = fs::remove_file(&staged);
+        format!("Failed to finalize file move: {}", replace_error)
+    })?;
+    if let Err(remove_error) = fs::remove_file(source) {
+        let rollback_error = TransferResult::new(&destination, backup)
+            .rollback_move(source)
+            .err();
+        return Err(match rollback_error {
+            Some(rollback_error) => format!(
+                "File source cleanup failed: {}; rollback also failed: {}",
+                remove_error, rollback_error
+            ),
+            None => format!(
+                "File source cleanup failed; move was rolled back: {}",
+                remove_error
+            ),
+        });
+    }
+
+    println!("File moved successfully: {}", destination.display());
+    Ok(TransferResult::new(&destination, backup))
 }
 
-/// copy file to dest folder, if dest file already exists, find a new name
-/// Returns the new file path if successful, or None on failure.
-pub fn copy_file(file_path: &str, dest_folder: &str) -> Option<String> {
+pub fn copy_file_to_path_with_policy(
+    file_path: &str,
+    destination: &Path,
+    policy: FileConflictPolicy,
+) -> Result<TransferResult, String> {
     let source = Path::new(file_path);
-    let file_name = source.file_name()?;
-    let mut destination = PathBuf::from(dest_folder);
-    destination.push(file_name);
+    if policy == FileConflictPolicy::Replace && paths_refer_to_same_item(source, destination) {
+        return Err("Cannot replace a file with itself".to_string());
+    }
+    if policy != FileConflictPolicy::Replace && destination.exists() {
+        return Err(format!(
+            "Destination file already exists: {}",
+            destination.display()
+        ));
+    }
+    let staged = transfer_temp_path(&destination, "copy");
+    if let Err(copy_error) = copy_file_to_path(source, &staged) {
+        return Err(format!("Failed to copy file: {}", copy_error));
+    }
+    let backup = replace_path_with_staged(&staged, &destination).map_err(|replace_error| {
+        let _ = fs::remove_file(&staged);
+        format!("Failed to finalize file copy: {}", replace_error)
+    })?;
 
+    println!("File copied successfully: {}", destination.display());
+    Ok(TransferResult::new(&destination, backup))
+}
+
+/// Import a file into a destination folder preserving the original file name.
+/// If the target already exists, append a numeric suffix like `(1)`.
+pub fn import_file(source_path: &str, dest_folder: &str) -> Option<String> {
+    let source = Path::new(source_path);
+    let mut destination = PathBuf::from(dest_folder);
+    destination.push(source.file_name()?);
     let destination = get_unique_path(destination);
 
-    // Try to copy the file
     match fs::copy(source, &destination) {
         Ok(_) => {
-            println!("File copied successfully: {}", destination.display());
+            println!("File imported successfully: {}", destination.display());
             destination.to_str().map(|s| s.to_string())
         }
         Err(e) => {
-            eprintln!("Failed to copy file: {}", e);
+            eprintln!("Failed to import file: {}", e);
             None
         }
     }
+}
+
+/// Map an image MIME type to the canonical file extension.
+/// Returns `None` for unsupported formats so callers can reject them
+/// before writing a file.
+pub fn image_mime_to_ext(content_type: &str) -> Option<&'static str> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    match mime {
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/avif" => Some("avif"),
+        "image/bmp" => Some("bmp"),
+        _ => None,
+    }
+}
+
+/// Validate that `bytes` starts with the expected magic bytes for `ext`.
+fn validate_image_bytes(ext: &str, bytes: &[u8]) -> bool {
+    match ext {
+        "jpg" => bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF,
+        "png" => bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n",
+        "gif" => bytes.len() >= 4 && (&bytes[..3] == b"GIF"),
+        "webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        "bmp" => bytes.len() >= 2 && &bytes[..2] == b"BM",
+        "avif" => {
+            // ISOBMFF: 4 bytes size, then 'ftyp' box with 'avif' or 'avis' brand
+            bytes.len() >= 12
+                && &bytes[4..8] == b"ftyp"
+                && (&bytes[8..12] == b"avif" || &bytes[8..12] == b"avis")
+        }
+        _ => false,
+    }
+}
+
+/// Save bytes to a folder preserving the original file name.
+/// If the target already exists, append a numeric suffix like `(1)`.
+pub fn save_bytes_with_name(bytes: &[u8], name: &str, dest_folder: &str) -> Option<String> {
+    let filename = Path::new(name)
+        .file_name()
+        .and_then(|item| item.to_str())
+        .filter(|item| !item.trim().is_empty())?;
+    let mut destination = PathBuf::from(dest_folder);
+    destination.push(filename);
+    let destination = get_unique_path(destination);
+
+    let mut file = fs::File::create(&destination)
+        .map_err(|e| eprintln!("Failed to create file: {}", e))
+        .ok()?;
+    std::io::Write::write_all(&mut file, bytes)
+        .map_err(|e| eprintln!("Failed to write file: {}", e))
+        .ok()?;
+    println!("File saved with name: {}", destination.display());
+    destination.to_str().map(|s| s.to_string())
+}
+
+/// Save downloaded bytes to a folder preserving the original file name when possible.
+/// MIME and magic-byte validation are performed before writing.
+pub fn save_downloaded_bytes_with_name(
+    bytes: &[u8],
+    content_type: &str,
+    name: &str,
+    dest_folder: &str,
+) -> Option<String> {
+    let ext = image_mime_to_ext(content_type)?;
+    if !validate_image_bytes(ext, bytes) {
+        eprintln!("Downloaded bytes do not match expected format for .{}", ext);
+        return None;
+    }
+
+    let filename = Path::new(name)
+        .file_name()
+        .and_then(|item| item.to_str())
+        .filter(|item| !item.trim().is_empty())?;
+    let filename_path = Path::new(filename);
+    let filename = match filename_path.extension().and_then(|item| item.to_str()) {
+        Some(file_ext) if !file_ext.trim().is_empty() && get_file_type(filename).is_some() => {
+            filename.to_string()
+        }
+        Some(_) => {
+            let stem = filename_path
+                .file_stem()
+                .and_then(|item| item.to_str())
+                .filter(|item| !item.trim().is_empty())
+                .unwrap_or("image");
+            format!("{}.{}", stem, ext)
+        }
+        _ => format!("{}.{}", filename, ext),
+    };
+
+    let mut destination = PathBuf::from(dest_folder);
+    destination.push(filename);
+    let destination = get_unique_path(destination);
+
+    let mut file = fs::File::create(&destination)
+        .map_err(|e| eprintln!("Failed to create file: {}", e))
+        .ok()?;
+    std::io::Write::write_all(&mut file, bytes)
+        .map_err(|e| eprintln!("Failed to write file: {}", e))
+        .ok()?;
+    println!("File saved from URL: {}", destination.display());
+    destination.to_str().map(|s| s.to_string())
+}
+
+/// Save downloaded bytes to a folder with auto-generated name.
+/// Content type is used to determine the file extension.
+/// Byte-level magic-number validation is performed before writing.
+pub fn save_bytes_to_folder(bytes: &[u8], content_type: &str, dest_folder: &str) -> Option<String> {
+    let ext = image_mime_to_ext(content_type)?;
+    if !validate_image_bytes(ext, bytes) {
+        eprintln!("Downloaded bytes do not match expected format for .{}", ext);
+        return None;
+    }
+
+    let now = chrono::Local::now();
+    let name = format!("IMG_{}.{}", now.format("%Y%m%d_%H%M%S"), ext);
+    let mut destination = PathBuf::from(dest_folder);
+    destination.push(&name);
+    let destination = get_unique_path(destination);
+
+    let mut file = fs::File::create(&destination)
+        .map_err(|e| eprintln!("Failed to create file: {}", e))
+        .ok()?;
+    std::io::Write::write_all(&mut file, bytes)
+        .map_err(|e| eprintln!("Failed to write file: {}", e))
+        .ok()?;
+    println!("File saved from URL: {}", destination.display());
+    destination.to_str().map(|s| s.to_string())
 }
 
 /// rename a file
@@ -793,22 +1443,26 @@ pub fn reveal_path(path: &str) -> Result<(), String> {
         return Err("Missing path".to_string());
     }
 
+    let is_dir = Path::new(path).is_dir();
+
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = Command::new("open");
+        if !is_dir {
+            cmd.arg("-R");
+        }
+        cmd.arg(path).spawn().map_err(|e| e.to_string())?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
-            .arg("/select,")
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let mut cmd = Command::new("explorer");
+        if is_dir {
+            cmd.arg(path);
+        } else {
+            cmd.arg("/select,").arg(path);
+        }
+        cmd.spawn().map_err(|e| e.to_string())?;
     }
 
     #[cfg(target_os = "linux")]
@@ -855,17 +1509,45 @@ pub fn get_folder_files(
         bit > 0 && (filter & bit) == bit
     }
 
+    fn hide_live_photo_companion_videos(files: Vec<AFile>) -> Vec<AFile> {
+        let companion_ids: HashSet<i64> = files
+            .iter()
+            .filter_map(|file| file.live_photo_video_id)
+            .collect();
+
+        if companion_ids.is_empty() {
+            return files;
+        }
+
+        files
+            .into_iter()
+            .filter(|file| {
+                file.id
+                    .map(|id| !companion_ids.contains(&id))
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
     let mut new_count = 0;
     let mut updated_count = 0;
+    let resolved_folder_id = match AFolder::fetch(folder_path) {
+        Ok(Some(folder)) => {
+            let database_folder_id = folder.id.unwrap_or(folder_id);
+            if database_folder_id != folder_id {
+                eprintln!(
+                    "get_folder_files: using folder id {} from DB for path {} instead of stale id {}",
+                    database_folder_id, folder_path, folder_id
+                );
+            }
+            database_folder_id
+        }
+        _ => folder_id,
+    };
 
     let mut files: Vec<AFile> = if from_db_only {
-        match AFile::get_files_by_folder_id(folder_id) {
-            Ok(files) => files
-                .into_iter()
-                .filter(|file| {
-                    matches_file_type_filter(file_type, file.file_type.unwrap_or_default())
-                })
-                .collect(),
+        match AFile::get_files_by_folder_id(resolved_folder_id) {
+            Ok(files) => files,
             Err(e) => {
                 eprintln!("Failed to get files from DB: {}", e);
                 Vec::new()
@@ -888,20 +1570,20 @@ pub fn get_folder_files(
             };
 
             if let Some(ftype) = get_file_type(file_path_str) {
-                if matches_file_type_filter(file_type, ftype) {
-                    let now = Utc::now().timestamp_millis();
-                    match AFile::add_to_db(folder_id, file_path_str, ftype, now) {
-                        Ok((file, status)) => {
-                            if status == 1 {
-                                new_count += 1;
-                            } else if status == 2 {
-                                updated_count += 1;
-                            }
+                let now = Utc::now().timestamp_millis();
+                match AFile::add_to_db(resolved_folder_id, file_path_str, ftype, now) {
+                    Ok((file, status)) => {
+                        if status == 1 {
+                            new_count += 1;
+                        } else if status == 2 {
+                            updated_count += 1;
+                        }
+                        if matches_file_type_filter(file_type, ftype) {
                             file_list.push(file);
                         }
-                        Err(e) => {
-                            eprintln!("Failed to add file to DB: {} ({})", file_path_str, e);
-                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to add file to DB: {} ({})", file_path_str, e);
                     }
                 }
             }
@@ -909,40 +1591,868 @@ pub fn get_folder_files(
         file_list
     };
 
-    // sort
-    if sort_type == 6 {
-        // random
-        use rand::seq::SliceRandom;
-        let mut rng = rand::thread_rng();
-        files.shuffle(&mut rng);
-    } else {
-        files.sort_by(|a, b| {
-            let ordering = match sort_type {
-                0 => a.taken_date.cmp(&b.taken_date), // Taken Date
-                1 => a.created_at.cmp(&b.created_at), // Created Date
-                2 => a.modified_at.cmp(&b.modified_at), // Modified Date
-                3 => convert_to_pinyin(&a.name.to_lowercase()) // name
-                    .cmp(&convert_to_pinyin(&b.name.to_lowercase())), // support pinyin
-                4 => a.size.cmp(&b.size),             // size
-                5 => {
-                    if a.width == b.width {
-                        a.height.cmp(&b.height)
-                    } else {
-                        a.width.cmp(&b.width)
-                    }
-                } // dimension
-                7 => a.id.cmp(&b.id),                 // ID sort
-                _ => a.taken_date.cmp(&b.taken_date), // Default to taken date
-            };
-            if sort_order == 1 {
-                ordering.reverse()
-            } else {
-                ordering
+    files = hide_live_photo_companion_videos(files);
+    files.retain(|file| matches_file_type_filter(file_type, file.file_type.unwrap_or_default()));
+
+    files.sort_by(|a, b| {
+        let ordering = match sort_type {
+            0 => a.taken_date.cmp(&b.taken_date),   // Taken Date
+            1 => a.created_at.cmp(&b.created_at),   // Created Date
+            2 => a.modified_at.cmp(&b.modified_at), // Modified Date
+            3 => natural_sort_key(&a.name.to_lowercase()) // name
+                .cmp(&natural_sort_key(&b.name.to_lowercase())), // support pinyin
+            4 => a.size.cmp(&b.size),               // size
+            5 => {
+                if a.width == b.width {
+                    a.height.cmp(&b.height)
+                } else {
+                    a.width.cmp(&b.width)
+                }
+            } // dimension
+            6 => a.duration.cmp(&b.duration),       // duration
+            9 => a.id.cmp(&b.id),                   // ID sort
+            _ => a.taken_date.cmp(&b.taken_date),   // Default to taken date
+        };
+        if sort_order == 1 {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+
+    (files, new_count, updated_count)
+}
+
+#[derive(serde::Serialize, Default)]
+pub struct FolderMtimeSyncResult {
+    pub dirty_folder_count: u32,
+    pub new_folder_count: u32,
+    pub new_file_count: u32,
+    pub updated_file_count: u32,
+    pub deleted_file_count: u32,
+    pub rename_count: u32,
+    pub deleted_folder_count: u32,
+}
+
+struct SyncedFileTask {
+    file_id: i64,
+    file_path: String,
+    file_type: i64,
+    orientation: i32,
+    album_id: i64,
+}
+
+#[derive(Default)]
+struct FolderSyncOutcome {
+    new_file_count: u32,
+    updated_file_count: u32,
+    deleted_file_count: u32,
+    rename_count: u32,
+    tasks: Vec<SyncedFileTask>,
+}
+
+const FOLDER_SYNC_THUMBNAIL_SIZE: u32 = 512;
+
+fn is_path_not_found(err: &str) -> bool {
+    err.contains("No such file or directory")
+        || err.contains("The system cannot find the file specified")
+}
+
+fn remove_missing_folder(folder: &AFolder) -> Result<(), String> {
+    eprintln!("Removing missing folder from DB: {}", folder.path);
+
+    // Clean up thumbnails for all files in this folder before cascading delete.
+    if let Ok(files) = AFile::get_files_by_folder_id(folder.id.unwrap_or(0)) {
+        for file in files {
+            if let Some(id) = file.id {
+                let _ = AThumb::delete(id);
             }
+        }
+    }
+
+    AFolder::delete_folder(&folder.path)?;
+    Ok(())
+}
+
+/// Guard to ensure only one folder sync runs at a time. When a new sync
+/// starts the previous one is cancelled (its generation is invalidated).
+static FOLDER_SYNC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVE_ALBUM_SCANS: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+struct AlbumScanGuard {
+    album_id: i64,
+}
+
+impl AlbumScanGuard {
+    fn acquire(album_id: i64) -> Result<Self, String> {
+        let mut active = ACTIVE_ALBUM_SCANS.lock().unwrap();
+        if !active.insert(album_id) {
+            return Err(format!("Album {} is already being scanned", album_id));
+        }
+        Ok(Self { album_id })
+    }
+}
+
+impl Drop for AlbumScanGuard {
+    fn drop(&mut self) {
+        ACTIVE_ALBUM_SCANS.lock().unwrap().remove(&self.album_id);
+    }
+}
+
+fn album_scan_active(album_id: i64) -> bool {
+    ACTIVE_ALBUM_SCANS.lock().unwrap().contains(&album_id)
+}
+
+fn sync_generation_valid(generation: u64) -> bool {
+    FOLDER_SYNC_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
+}
+
+pub fn start_folder_mtime_sync(app_handle: tauri::AppHandle) {
+    let generation = FOLDER_SYNC_GENERATION
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+
+    tauri::async_runtime::spawn(async move {
+        match sync_dirty_folders_by_mtime(generation) {
+            Ok((result, tasks)) => {
+                if !sync_generation_valid(generation) {
+                    return;
+                }
+                for task in tasks {
+                    schedule_synced_file_processing(app_handle.clone(), task);
+                }
+                if result.dirty_folder_count > 0 || result.new_folder_count > 0 {
+                    let _ = app_handle.emit("library-folder-sync-finished", &result);
+                    let _ = app_handle.emit("library-total-refreshed", ());
+                }
+            }
+            Err(e) => eprintln!("folder mtime sync failed: {}", e),
+        }
+    });
+}
+
+/// Check every known folder in the current library using directory mtime.
+/// Dirty folders are synced in the background without touching unrelated views.
+fn sync_dirty_folders_by_mtime(
+    generation: u64,
+) -> Result<(FolderMtimeSyncResult, Vec<SyncedFileTask>), String> {
+    let mut dirty_folder_count = 0u32;
+    let mut new_folder_count = 0u32;
+    let mut new_file_count = 0u32;
+    let mut updated_file_count = 0u32;
+    let mut deleted_file_count = 0u32;
+    let mut rename_count = 0u32;
+    let mut deleted_folder_count = 0u32;
+    let mut tasks = Vec::new();
+    let mut queue = Vec::new();
+    let mut album_accessibility = HashMap::new();
+    let pending_live_photo_folders = FolderScanState::folders_needing_version(
+        FolderScanState::LIVE_PHOTO_PAIRING,
+        FolderScanState::LIVE_PHOTO_PAIRING_VERSION,
+    )?;
+
+    for folder in AFolder::get_all()? {
+        if !sync_generation_valid(generation) {
+            return Ok((FolderMtimeSyncResult::default(), Vec::new()));
+        }
+        if album_scan_active(folder.album_id) {
+            continue;
+        }
+        let root_accessible = *album_accessibility
+            .entry(folder.album_id)
+            .or_insert_with(|| {
+                Album::get_album_by_id(folder.album_id)
+                    .map(|album| directory_accessible(&album.path))
+                    .unwrap_or(false)
+            });
+        if !root_accessible {
+            continue;
+        }
+        let info = match FileInfo::new(&folder.path) {
+            Ok(info) => info,
+            Err(e) => {
+                if is_path_not_found(&e) {
+                    let can_remove = Album::get_album_by_id(folder.album_id)
+                        .map(|album| folder.path != album.path && directory_accessible(&album.path))
+                        .unwrap_or(false);
+                    if can_remove {
+                        if let Err(e2) = remove_missing_folder(&folder) {
+                            eprintln!(
+                                "sync_dirty_folders_by_mtime: failed to remove missing folder {}: {}",
+                                folder.path, e2
+                            );
+                        } else {
+                            deleted_folder_count += 1;
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "sync_dirty_folders_by_mtime: failed to stat {} ({})",
+                        folder.path, e
+                    );
+                }
+                continue;
+            }
+        };
+        let needs_live_photo_reindex = folder
+            .id
+            .map(|id| pending_live_photo_folders.contains(&id))
+            .unwrap_or(true);
+        if info.modified != folder.modified_at || needs_live_photo_reindex {
+            queue.push((folder, info.modified, needs_live_photo_reindex));
+        }
+    }
+
+    while let Some((folder, latest_mtime, needs_live_photo_reindex)) = queue.pop() {
+        if !sync_generation_valid(generation) {
+            return Ok((FolderMtimeSyncResult::default(), Vec::new()));
+        }
+        if album_scan_active(folder.album_id) {
+            continue;
+        }
+        let folder_id = match folder.id {
+            Some(id) => id,
+            None => continue,
+        };
+        dirty_folder_count += 1;
+
+        let child_scan = scan_new_child_folders(folder.album_id, &folder.path, false)?;
+        new_folder_count += child_scan.folders.len() as u32;
+        deleted_folder_count += child_scan.deleted_folder_count;
+        for child in child_scan.folders {
+            queue.push((child, None, true));
+        }
+
+        let outcome = sync_folder_direct_files(
+            folder_id,
+            folder.album_id,
+            &folder.path,
+            generation,
+            needs_live_photo_reindex,
+        )?;
+        new_file_count += outcome.new_file_count;
+        updated_file_count += outcome.updated_file_count;
+        deleted_file_count += outcome.deleted_file_count;
+        rename_count += outcome.rename_count;
+        tasks.extend(outcome.tasks);
+
+        let modified_at = latest_mtime.or_else(|| {
+            FileInfo::new(&folder.path)
+                .ok()
+                .and_then(|info| info.modified)
+        });
+        let _ = FolderSubfolderState::update_after_scan(folder.album_id, &[FolderSubfolderState {
+            path: folder.path,
+            created_at: None,
+            modified_at,
+            inode: None,
+            has_subfolders: child_scan.has_subfolders,
+        }]);
+    }
+
+    Ok((
+        FolderMtimeSyncResult {
+            dirty_folder_count,
+            new_folder_count,
+            new_file_count,
+            updated_file_count,
+            deleted_file_count,
+            rename_count,
+            deleted_folder_count,
+        },
+        tasks,
+    ))
+}
+
+struct ChildFolderScan {
+    folders: Vec<AFolder>,
+    has_subfolders: bool,
+    deleted_folder_count: u32,
+}
+
+fn scan_new_child_folders(
+    album_id: i64,
+    folder_path: &str,
+    reconcile_removed_children: bool,
+) -> Result<ChildFolderScan, String> {
+    let entries = fs::read_dir(folder_path).map_err(|e| e.to_string())?;
+    let mut has_subfolders = false;
+    let mut seen_paths = HashSet::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if is_fs_entry_hidden(&entry) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        has_subfolders = true;
+
+        let child_path = entry.path().to_string_lossy().to_string();
+        seen_paths.insert(child_path.clone());
+    }
+
+    // A manual parent refresh must preserve a renamed child's folder id and
+    // its files' metadata before treating unseen paths as deleted.
+    if reconcile_removed_children {
+        let child_states = seen_paths
+            .iter()
+            .map(|path| FolderSubfolderState {
+                path: path.clone(),
+                created_at: None,
+                modified_at: None,
+                inode: FileInfo::new(path)
+                    .ok()
+                    .map(|info| info.inode as i64)
+                    .filter(|inode| *inode != 0),
+                has_subfolders: false,
+            })
+            .collect::<Vec<_>>();
+        AFolder::migrate_paths_by_inode(album_id, &child_states)?;
+    }
+
+    let mut new_folders = Vec::new();
+    for child_path in &seen_paths {
+        if AFolder::fetch(&child_path)?.is_some() {
+            continue;
+        }
+        new_folders.push(AFolder::add_to_db(album_id, child_path)?);
+    }
+
+    // The background mtime sync already visits every known folder and removes
+    // missing paths itself. Avoid loading every album path once per dirty
+    // folder there; this reconciliation is needed only for an explicit
+    // foreground refresh of the selected folder.
+    let deleted_folder_count = if reconcile_removed_children {
+        AFolder::delete_unseen_direct_children(album_id, folder_path, &seen_paths)? as u32
+    } else {
+        0
+    };
+
+    Ok(ChildFolderScan {
+        folders: new_folders,
+        has_subfolders,
+        deleted_folder_count,
+    })
+}
+
+fn is_live_photo_candidate_name(name: &str) -> bool {
+    matches!(
+        Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "heic" | "heif" | "hif" | "jpg" | "jpeg" | "mov"
+    )
+}
+
+fn sync_folder_direct_files(
+    folder_id: i64,
+    album_id: i64,
+    folder_path: &str,
+    generation: u64,
+    full_live_photo_reindex: bool,
+) -> Result<FolderSyncOutcome, String> {
+    let scan_time = Utc::now().timestamp_millis();
+    let mut seen_names = HashSet::new();
+    let mut seen_inodes = HashSet::new();
+    let mut new_count = 0u32;
+    let mut updated_count = 0u32;
+    let mut rename_count = 0u32;
+    let mut tasks = Vec::new();
+    let mut live_photo_affected_names = HashSet::new();
+
+    // Helper to check background cancellation (generation 0 = foreground, never cancels).
+    let is_cancelled =
+        || generation != 0 && (!sync_generation_valid(generation) || album_scan_active(album_id));
+
+    // Build a map of file_id → (db_id, db_name) for rename detection.
+    // Use the stored inode from the DB record — this works even when the
+    // file has been renamed and the old path no longer exists on disk.
+    let db_inodes: HashMap<u64, (i64, String)> = {
+        let mut map = HashMap::new();
+        if let Ok(files) = AFile::get_files_by_folder_id(folder_id) {
+            for file in files {
+                if let (Some(id), Some(inode)) = (file.id, file.inode) {
+                    if inode > 0 {
+                        map.insert(inode as u64, (id, file.name.clone()));
+                    }
+                }
+            }
+        }
+        map
+    };
+
+    for entry in WalkDir::new(folder_path)
+        .min_depth(1)
+        .max_depth(1)
+        .into_iter()
+        .filter_entry(|e| !is_hidden(e))
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let file_path_str = match path.to_str() {
+            Some(p) => p,
+            None => continue,
+        };
+        let file_name = get_file_name(file_path_str);
+        seen_names.insert(file_name.clone());
+
+        // Record file_id for rename detection.
+        if let Some(fid) = file_id(path) {
+            seen_inodes.insert(fid);
+        }
+
+        if let Some(ftype) = get_file_type(file_path_str) {
+            // Check for rename: a file whose file_id matches a known DB record
+            // with a different name.
+            let renamed: Option<(i64, String)> = file_id(path).and_then(|fid| {
+                if fid > 0 {
+                    db_inodes.get(&fid).and_then(|(db_id, db_name)| {
+                        if db_name != &file_name {
+                            Some((*db_id, db_name.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            });
+
+            if let Some((db_id, old_file_name)) = renamed {
+                if is_cancelled() {
+                    return Ok(FolderSyncOutcome::default());
+                }
+                // Update the existing DB record to point to the new name/path.
+                if let Ok(Some(updated_file)) =
+                    AFile::update_file_info(db_id, file_path_str, scan_time)
+                {
+                    rename_count += 1;
+                    if is_live_photo_candidate_name(&file_name) {
+                        live_photo_affected_names.insert(file_name.clone());
+                    }
+                    if is_live_photo_candidate_name(&old_file_name) {
+                        live_photo_affected_names.insert(old_file_name);
+                    }
+                    if should_process_synced_file(&updated_file, ftype) {
+                        tasks.push(SyncedFileTask {
+                            file_id: db_id,
+                            file_path: file_path_str.to_string(),
+                            file_type: ftype,
+                            orientation: updated_file.e_orientation.unwrap_or(1) as i32,
+                            album_id,
+                        });
+                    }
+                }
+            } else {
+                if is_cancelled() {
+                    return Ok(FolderSyncOutcome::default());
+                }
+                match AFile::add_to_db(folder_id, file_path_str, ftype, scan_time) {
+                    Ok((file, status)) => {
+                        if status == 1 {
+                            new_count += 1;
+                            if is_live_photo_candidate_name(&file_name) {
+                                live_photo_affected_names.insert(file_name.clone());
+                            }
+                        } else if status == 2 {
+                            updated_count += 1;
+                            if is_live_photo_candidate_name(&file_name) {
+                                live_photo_affected_names.insert(file_name.clone());
+                            }
+                        }
+                        if should_process_synced_file(&file, ftype) {
+                            if let Some(file_id) = file.id {
+                                tasks.push(SyncedFileTask {
+                                    file_id,
+                                    file_path: file_path_str.to_string(),
+                                    file_type: ftype,
+                                    orientation: file.e_orientation.unwrap_or(1) as i32,
+                                    album_id,
+                                });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "sync_folder: failed to add file to DB: {} ({})",
+                            file_path_str, e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete DB records that are truly gone (name not on disk AND file_id not seen).
+    // Uses the stored inode so rename detection works even when the old path
+    // no longer exists on disk.
+    if is_cancelled() {
+        return Ok(FolderSyncOutcome::default());
+    }
+    let album = Album::get_album_by_id(album_id).map_err(|e| e.to_string())?;
+    if !directory_accessible(&album.path) || !directory_accessible(folder_path) {
+        return Err(format!(
+            "Folder became inaccessible during sync: {}",
+            folder_path
+        ));
+    }
+    let deleted_count: u32 = {
+        let mut count = 0u32;
+        if let Ok(files) = AFile::get_files_by_folder_id(folder_id) {
+            for file in files {
+                if seen_names.contains(&file.name) {
+                    continue;
+                }
+                let still_exists = file
+                    .inode
+                    .map(|ino| ino > 0 && seen_inodes.contains(&(ino as u64)))
+                    .unwrap_or(false);
+                if still_exists {
+                    continue;
+                }
+                if let Some(id) = file.id {
+                    if is_cancelled() {
+                        return Ok(FolderSyncOutcome::default());
+                    }
+                    if AFile::delete(id).is_ok() {
+                        count += 1;
+                        if is_live_photo_candidate_name(&file.name) {
+                            live_photo_affected_names.insert(file.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        count
+    };
+
+    if full_live_photo_reindex {
+        let files = AFile::get_files_by_folder_id(folder_id).map_err(|error| {
+            format!(
+                "Failed to load Live Photo reindex candidates for folder {}: {}",
+                folder_path, error
+            )
+        })?;
+        for file in files {
+            if is_live_photo_candidate_name(&file.name) {
+                live_photo_affected_names.insert(file.name);
+            }
+        }
+    }
+
+    let pairing_result =
+        AFile::pair_live_photos_in_folder(
+            folder_id,
+            &live_photo_affected_names,
+            full_live_photo_reindex,
+        );
+    if full_live_photo_reindex {
+        pairing_result.map_err(|error| {
+            format!(
+                "Failed to complete Live Photo reindex for folder {}: {}",
+                folder_path, error
+            )
+        })?;
+        FolderScanState::mark_completed(
+            folder_id,
+            FolderScanState::LIVE_PHOTO_PAIRING,
+            FolderScanState::LIVE_PHOTO_PAIRING_VERSION,
+        )
+        .map_err(|error| {
+            format!(
+                "Failed to mark Live Photo reindex complete for folder {}: {}",
+                folder_path, error
+            )
+        })?;
+    } else if let Err(error) = pairing_result {
+        eprintln!(
+            "Failed to pair Live Photos in folder {}: {}",
+            folder_path, error
+        );
+    }
+
+    Ok(FolderSyncOutcome {
+        new_file_count: new_count,
+        updated_file_count: updated_count,
+        deleted_file_count: deleted_count,
+        rename_count,
+        tasks,
+    })
+}
+
+fn pair_live_photos_after_album_index(album_id: i64) -> Result<(), String> {
+    for folder in AFolder::get_all()?.into_iter().filter(|folder| folder.album_id == album_id) {
+        let folder_id = folder
+            .id
+            .ok_or_else(|| format!("Folder has no id: {}", folder.path))?;
+
+        // A Live Photo always has a MOV companion. Avoid loading every file
+        // and constructing pairing candidates for ordinary folders, while
+        // still clearing associations whose companion MOV was removed.
+        let (has_mov, has_live_photo_pairs) = AFile::live_photo_folder_state(folder_id)?;
+        if !has_mov {
+            if has_live_photo_pairs {
+                AFile::clear_live_photo_pairs_in_folder(folder_id)?;
+            }
+            continue;
+        }
+
+        let files = AFile::get_files_by_folder_id(folder_id)?;
+        let affected_names = files
+            .into_iter()
+            .filter_map(|file| is_live_photo_candidate_name(&file.name).then_some(file.name))
+            .collect::<HashSet<_>>();
+
+        let refresh_missing_identifiers = FolderScanState::needs_version(
+            folder_id,
+            FolderScanState::LIVE_PHOTO_PAIRING,
+            FolderScanState::LIVE_PHOTO_PAIRING_VERSION,
+        )?;
+        AFile::pair_live_photos_in_folder(
+            folder_id,
+            &affected_names,
+            refresh_missing_identifiers,
+        )?;
+        FolderScanState::mark_completed(
+            folder_id,
+            FolderScanState::LIVE_PHOTO_PAIRING,
+            FolderScanState::LIVE_PHOTO_PAIRING_VERSION,
+        )?;
+    }
+    Ok(())
+}
+
+/// RAW+JPEG pairing is derived from the complete folder index, just like Live
+/// Photo pairing.  Doing this after an album scan covers files which already
+/// existed before grouping was enabled and folders not touched by an
+/// incremental mtime sync.
+fn reconcile_raw_jpeg_pairs_after_album_index(
+    album_id: i64,
+    group_raw_jpeg_pairs: bool,
+) -> Result<(), String> {
+    if !group_raw_jpeg_pairs {
+        AFile::clear_raw_jpeg_pairs_in_album(album_id)?;
+        return Ok(());
+    }
+    for folder in AFolder::get_all()?
+        .into_iter()
+        .filter(|folder| folder.album_id == album_id)
+    {
+        let folder_id = folder
+            .id
+            .ok_or_else(|| format!("Folder has no id: {}", folder.path))?;
+        AFile::pair_raw_jpeg_in_folder(folder_id)?;
+    }
+    Ok(())
+}
+
+/// Sync a single folder if its directory mtime has changed since the last scan.
+/// Returns counts and schedules thumbnail/embedding generation.
+pub fn sync_single_folder(
+    app_handle: &tauri::AppHandle,
+    album_id: i64,
+    folder_id: i64,
+    folder_path: &str,
+    group_raw_jpeg_pairs: bool,
+) -> Result<FolderMtimeSyncResult, String> {
+    // A complete album scan owns folder and file reconciliation for this
+    // album. Skip foreground refreshes until it finishes to avoid concurrent
+    // writes based on different filesystem snapshots.
+    if album_scan_active(album_id) {
+        return Ok(FolderMtimeSyncResult::default());
+    }
+
+    let album = Album::get_album_by_id(album_id).map_err(|e| e.to_string())?;
+    if !directory_accessible(&album.path) {
+        return Err(format!("Album folder is not accessible: {}", album.path));
+    }
+
+    let info = match FileInfo::new(folder_path) {
+        Ok(info) => info,
+        Err(e) => {
+            if is_path_not_found(&e) {
+                // Only clean up a missing child while the album root is still
+                // readable. A missing root may be a disconnected external disk.
+                let mut removed = false;
+                if folder_path != album.path && directory_accessible(&album.path) {
+                    if let Ok(Some(folder)) = AFolder::fetch(folder_path) {
+                        removed = remove_missing_folder(&folder).is_ok();
+                    }
+                }
+                return Ok(FolderMtimeSyncResult {
+                    dirty_folder_count: 0,
+                    new_folder_count: 0,
+                    new_file_count: 0,
+                    updated_file_count: 0,
+                    deleted_file_count: 0,
+                    rename_count: 0,
+                    deleted_folder_count: u32::from(removed),
+                });
+            }
+            return Err(e);
+        }
+    };
+    let folder =
+        AFolder::fetch(folder_path)?.ok_or_else(|| format!("Folder not found: {}", folder_path))?;
+
+    let resolved_folder_id = folder
+        .id
+        .ok_or_else(|| format!("Folder has no id: {}", folder_path))?;
+    if resolved_folder_id != folder_id {
+        eprintln!(
+            "sync_single_folder: using DB folder id {} for path {} instead of stale id {}",
+            resolved_folder_id, folder_path, folder_id
+        );
+    }
+    if folder.album_id != album_id {
+        return Err(format!(
+            "Folder album_id mismatch: expected {}, found {}",
+            album_id, folder.album_id
+        ));
+    }
+
+    // Reconcile direct children even when the mtime is unchanged. A manual
+    // refresh must remove a deleted child from the database, and some
+    // filesystems expose directory mtimes at a coarser resolution.
+    let child_scan = scan_new_child_folders(album_id, folder_path, true)?;
+    let new_folder_count = child_scan.folders.len() as u32;
+
+    let needs_live_photo_reindex = FolderScanState::needs_version(
+        resolved_folder_id,
+        FolderScanState::LIVE_PHOTO_PAIRING,
+        FolderScanState::LIVE_PHOTO_PAIRING_VERSION,
+    )?;
+    if info.modified == folder.modified_at && !needs_live_photo_reindex {
+        // A manual folder refresh also reconciles the existing pair state.
+        // This is intentionally the only incremental path that receives the
+        // setting; changing Settings alone does not mutate the database.
+        let raw_pairing_changed = if group_raw_jpeg_pairs {
+            AFile::pair_raw_jpeg_in_folder(resolved_folder_id)? > 0
+        } else {
+            AFile::clear_raw_jpeg_pairs_in_folder(resolved_folder_id)? > 0
+        };
+        let folder_layout_changed = new_folder_count > 0 || child_scan.deleted_folder_count > 0;
+        let _ = FolderSubfolderState::update_after_scan(album_id, &[FolderSubfolderState {
+            path: folder_path.to_string(),
+            created_at: None,
+            modified_at: info.modified,
+            inode: None,
+            has_subfolders: child_scan.has_subfolders,
+        }]);
+        return Ok(FolderMtimeSyncResult {
+            // The frontend uses this to decide whether it needs to reload the
+            // current list.  A newly created or cleared association changes
+            // which companion rows are visible.
+            dirty_folder_count: u32::from(raw_pairing_changed || folder_layout_changed),
+            new_folder_count,
+            new_file_count: 0,
+            updated_file_count: 0,
+            deleted_file_count: 0,
+            rename_count: 0,
+            deleted_folder_count: child_scan.deleted_folder_count,
         });
     }
 
-    (files, new_count, updated_count)
+    let outcome = sync_folder_direct_files(
+        resolved_folder_id,
+        album_id,
+        folder_path,
+        0,
+        needs_live_photo_reindex,
+    )?; // 0 = foreground, never cancel
+    if group_raw_jpeg_pairs {
+        AFile::pair_raw_jpeg_in_folder(resolved_folder_id)?;
+    } else {
+        AFile::clear_raw_jpeg_pairs_in_folder(resolved_folder_id)?;
+    }
+    for task in outcome.tasks {
+        schedule_synced_file_processing(app_handle.clone(), task);
+    }
+
+    let mtime = info.modified;
+    let _ = FolderSubfolderState::update_after_scan(album_id, &[FolderSubfolderState {
+        path: folder_path.to_string(),
+        created_at: None,
+        modified_at: mtime,
+        inode: None,
+        has_subfolders: child_scan.has_subfolders,
+    }]);
+
+    Ok(FolderMtimeSyncResult {
+        dirty_folder_count: 1,
+        new_folder_count,
+        new_file_count: outcome.new_file_count,
+        updated_file_count: outcome.updated_file_count,
+        deleted_file_count: outcome.deleted_file_count,
+        rename_count: outcome.rename_count,
+        deleted_folder_count: child_scan.deleted_folder_count,
+    })
+}
+
+fn should_process_synced_file(file: &AFile, file_type: i64) -> bool {
+    if !file.has_thumbnail.unwrap_or(false) {
+        return true;
+    }
+    matches!(file_type, 1 | 3) && !file.has_embedding.unwrap_or(false)
+}
+
+fn schedule_synced_file_processing(app_handle: tauri::AppHandle, task: SyncedFileTask) {
+    tauri::async_runtime::spawn(async move {
+        let file_path_for_thumb = task.file_path.clone();
+        let file_type = task.file_type;
+        let orientation = task.orientation;
+        let file_id = task.file_id;
+        let thumb_result = tauri::async_runtime::spawn_blocking(move || {
+            AThumb::get_or_create_thumb(
+                file_id,
+                &file_path_for_thumb,
+                file_type,
+                orientation,
+                FOLDER_SYNC_THUMBNAIL_SIZE,
+                false,
+                None,
+                None,
+            )
+        })
+        .await;
+
+        if !matches!(thumb_result, Ok(Ok(Some(_)))) {
+            return;
+        }
+
+        let _ = app_handle.emit(
+            "thumbnail_ready",
+            serde_json::json!({
+                "album_id": task.album_id,
+                "file_ids": [task.file_id],
+            }),
+        );
+
+        if !matches!(task.file_type, 1 | 3) {
+            return;
+        }
+
+        let app_handle_for_embedding = app_handle.clone();
+        let file_path = task.file_path.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let ai_state: tauri::State<crate::t_ai::AiState> = app_handle_for_embedding.state();
+            if let Err(e) = AFile::generate_embedding(&ai_state, task.file_id) {
+                eprintln!("Failed to generate embedding for {}: {}", file_path, e);
+            }
+        })
+        .await;
+    });
 }
 
 /// get folder and file count and total file size (include all sub-folders)
@@ -1005,7 +2515,7 @@ pub fn get_file_type(file_path: &str) -> Option<i64> {
         .and_then(|ext| ext.to_str())?;
     let contains_ext = |exts: &[&str]| exts.iter().any(|item| item.eq_ignore_ascii_case(ext));
 
-    if contains_ext(t_common::NORMAL_IMGS) {
+    if contains_ext(t_common::NORMAL_IMGS) || contains_ext(t_common::FFMPEG_BACKED_IMGS) {
         return Some(1);
     }
 
@@ -1030,7 +2540,7 @@ fn normalize_format_label(label: &str) -> String {
     }
 }
 
-fn detect_label_from_header(header: &[u8], file_type: i64) -> Option<String> {
+pub(crate) fn detect_label_from_header(header: &[u8], file_type: i64) -> Option<String> {
     // JPEG
     if header.len() >= 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
         return Some("JPG".to_string());
@@ -1149,13 +2659,38 @@ pub fn get_file_path(path: &str, name: &str) -> String {
     file_path.to_string_lossy().to_string() // Convert PathBuf to String
 }
 
-pub fn convert_to_pinyin(s: &str) -> String {
-    s.chars()
+/// Convert to pinyin and zero-pad ALL digit sequences for natural sort order.
+/// Every group of digits is padded to 10 digits so "Page_2" < "Page_10".
+pub fn natural_sort_key(s: &str) -> String {
+    use std::fmt::Write;
+
+    let pinyin: String = s
+        .chars()
         .flat_map(|c| match c.to_pinyin() {
             Some(p) => p.plain().chars().collect::<Vec<_>>(),
             None => vec![c],
         })
-        .collect()
+        .collect();
+
+    let mut result = String::with_capacity(pinyin.len() + 32);
+    let mut digits = String::new();
+
+    for c in pinyin.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else {
+            if !digits.is_empty() {
+                let _ = write!(result, "{:0>10}", digits);
+                digits.clear();
+            }
+            result.push(c);
+        }
+    }
+    if !digits.is_empty() {
+        let _ = write!(result, "{:0>10}", digits);
+    }
+
+    result
 }
 
 /// Convert a SystemTime to a i64 timestamp (in seconds since UNIX_EPOCH)
@@ -1182,6 +2717,12 @@ pub fn systemtime_to_timestamp(time: Option<SystemTime>) -> Option<i64> {
 pub fn meta_date_to_timestamp(date: &str) -> Option<i64> {
     // Try to parse as ISO 8601 (RFC 3339) first, which video metadata often uses
     if let Ok(datetime) = DateTime::parse_from_rfc3339(date) {
+        return Some(datetime.timestamp());
+    }
+
+    // QuickTime commonly stores a numeric UTC offset without a colon, such as
+    // `2025-12-31T13:36:26+0100`.
+    if let Ok(datetime) = DateTime::parse_from_str(date, "%Y-%m-%dT%H:%M:%S%z") {
         return Some(datetime.timestamp());
     }
 
@@ -1467,10 +3008,7 @@ impl ProgressTracker {
     }
 }
 
-fn with_progress_tracker<T, F>(
-    tracker: &Arc<Mutex<ProgressTracker>>,
-    update: F,
-) -> T
+fn with_progress_tracker<T, F>(tracker: &Arc<Mutex<ProgressTracker>>, update: F) -> T
 where
     F: FnOnce(&mut ProgressTracker) -> T,
 {
@@ -1489,10 +3027,17 @@ fn should_use_heavy_lane(
         return true;
     }
 
-    if let Some(ext) = Path::new(file_path).extension().and_then(|ext| ext.to_str()) {
+    if crate::t_image::is_ffmpeg_backed_image_path(file_path) {
+        return true;
+    }
+
+    if let Some(ext) = Path::new(file_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+    {
         return matches!(
             ext.to_ascii_lowercase().as_str(),
-            "heic" | "heif" | "tif" | "tiff" | "psd" | "jxl"
+            "heic" | "heif" | "tif" | "tiff" | "jxl"
         );
     }
 
@@ -1615,6 +3160,7 @@ async fn process_thumbnail_task(
             task_for_thumb.thumbnail_size,
             false,
             task_for_thumb.duration,
+            None,
         ) {
             Ok(Some(thumb)) if thumb.error_code == 0 => true,
             Ok(Some(_)) => false,
@@ -1709,12 +3255,35 @@ pub async fn index_album_worker(
     album_id: i64,
     thumbnail_size: u32,
     skip_file_path: Option<String>,
+    group_raw_jpeg_pairs: bool,
 ) -> Result<(), String> {
+    let _album_scan_guard = AlbumScanGuard::acquire(album_id)?;
+    let scan_start = std::time::Instant::now();
     // Generate a unique scan time for this session (current timestamp)
     let current_scan_time = Utc::now().timestamp_millis();
     let processing_budget = ProcessingBudget::new();
     // 1. Get album info
     let album = Album::get_album_by_id(album_id).map_err(|e| e.to_string())?;
+    let previous_indexed = album.indexed.unwrap_or(0).max(0) as u64;
+    let previous_total = album.total.unwrap_or(0).max(0) as u64;
+    if !directory_accessible(&album.path) {
+        app_handle
+            .emit(
+                "index_finished",
+                FinishedPayload {
+                    album_id,
+                    phase: "complete".to_string(),
+                    indexed: previous_indexed,
+                    processed: previous_indexed,
+                    search_ready: previous_indexed,
+                    total: previous_total,
+                    search_total: previous_total,
+                    failed: 1,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
 
     // 2. Count total files
     let (_folders, image_count, _image_size, video_count, _video_size) =
@@ -1724,8 +3293,6 @@ pub async fn index_album_worker(
 
     // Resume only when totals match and previous indexed is a valid in-progress value.
     // This avoids breaking normal re-scan behavior after a completed run.
-    let previous_indexed = album.indexed.unwrap_or(0);
-    let previous_total = album.total.unwrap_or(0);
     let resume_from = if previous_total == total_files
         && previous_indexed > 0
         && previous_indexed < total_files
@@ -1750,12 +3317,17 @@ pub async fn index_album_worker(
 
     // 4. Traverse and index
     let mut is_cancelled = false;
+    let mut traversal_failed = false;
     let mut traversed_count = 0u64;
+    // WalkDir already visits every directory during indexing.  Record the
+    // direct-parent relationship here so the sidebar never needs to rescan an
+    // unchanged directory just to decide whether to show its expand arrow.
+    let mut folder_subfolder_states: Vec<FolderSubfolderState> = Vec::new();
+    let mut directory_state_stack: Vec<usize> = Vec::new();
     let mut thumbnail_join_set: JoinSet<Result<bool, String>> = JoinSet::new();
     for entry in WalkDir::new(&album.path)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
-        .filter_map(Result::ok)
     {
         // Check cancellation
         if let Some(&true) = cancellation_token.lock().unwrap().get(&album_id) {
@@ -1763,6 +3335,54 @@ pub async fn index_album_worker(
             is_cancelled = true;
             thumbnail_join_set.abort_all();
             break;
+        }
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!("Album traversal failed for {}: {}", album.path, error);
+                traversal_failed = true;
+                thumbnail_join_set.abort_all();
+                break;
+            }
+        };
+
+        if entry.file_type().is_dir() {
+            let directory_path = entry.path().to_string_lossy().to_string();
+            let metadata = entry.metadata().ok();
+            let modified_at = metadata
+                .as_ref()
+                .and_then(|metadata| systemtime_to_timestamp(metadata.modified().ok()));
+            let created_at = metadata
+                .as_ref()
+                .and_then(|metadata| systemtime_to_timestamp(metadata.created().ok()));
+            #[cfg(unix)]
+            let inode = {
+                use std::os::unix::fs::MetadataExt;
+                metadata
+                    .as_ref()
+                    .map(|metadata| metadata.ino() as i64)
+                    .filter(|inode| *inode != 0)
+            };
+            #[cfg(windows)]
+            let inode = FileInfo::new(&directory_path)
+                .ok()
+                .map(|info| info.inode as i64)
+                .filter(|inode| *inode != 0);
+            AFolder::migrate_path_by_inode(album_id, &directory_path, inode)?;
+            let depth = entry.depth();
+            directory_state_stack.truncate(depth);
+            if let Some(&parent_index) = directory_state_stack.last() {
+                folder_subfolder_states[parent_index].has_subfolders = true;
+            }
+            directory_state_stack.push(folder_subfolder_states.len());
+            folder_subfolder_states.push(FolderSubfolderState {
+                path: directory_path,
+                created_at,
+                modified_at,
+                inode,
+                has_subfolders: false,
+            });
         }
 
         if entry.file_type().is_file() {
@@ -1831,8 +3451,10 @@ pub async fn index_album_worker(
                         });
                         tracker.maybe_emit();
                     });
-                    let processed_now = with_progress_tracker(&tracker, |tracker| tracker.snapshot.processed);
-                    let discovered_now = with_progress_tracker(&tracker, |tracker| tracker.snapshot.discovered);
+                    let processed_now =
+                        with_progress_tracker(&tracker, |tracker| tracker.snapshot.processed);
+                    let discovered_now =
+                        with_progress_tracker(&tracker, |tracker| tracker.snapshot.discovered);
                     if discovered_now % 50 == 0 || processed_now % 50 == 0 {
                         let _ = Album::update_progress(album_id, processed_now, total_files);
                     }
@@ -1878,30 +3500,88 @@ pub async fn index_album_worker(
     }
 
     with_progress_tracker(&tracker, |tracker| tracker.emit_now());
-    let final_snapshot = with_progress_tracker(&tracker, |tracker| tracker.snapshot());
-    let _ = Album::update_progress(album_id, final_snapshot.processed, total_files);
+    let mut final_snapshot = with_progress_tracker(&tracker, |tracker| tracker.snapshot());
+    let scan_failed = traversal_failed || !directory_accessible(&album.path);
+    let scan_complete = !is_cancelled && !scan_failed;
+    if scan_complete {
+        let _ = Album::update_progress(album_id, final_snapshot.processed, total_files);
+    } else if scan_failed {
+        final_snapshot.failed += 1;
+        let _ = Album::update_progress(album_id, previous_indexed, previous_total);
+    }
 
     clear_index_trace();
 
     // Delete files that are in DB but not in file system (Mark-and-Sweep)
-    if !is_cancelled {
+    if scan_complete {
+        if let Err(error) = AFolder::ensure_subfolder_states(album_id, &folder_subfolder_states) {
+            eprintln!(
+                "Failed to persist folder subfolder states for album {}: {}",
+                album_id, error
+            );
+        }
+        if let Err(error) = AFolder::delete_unseen_in_album(
+            album_id,
+            &folder_subfolder_states,
+        ) {
+            eprintln!("Failed to remove stale folders from album {}: {}", album_id, error);
+        }
+
         println!("Cleaning up removed files from DB for album {}", album_id);
         let deleted_count = AFile::delete_unseen_in_album(album_id, current_scan_time).unwrap_or(0);
         if deleted_count > 0 {
             println!("Deleted {} stale records from DB.", deleted_count);
         }
+
+        if let Err(error) = pair_live_photos_after_album_index(album_id) {
+            eprintln!(
+                "Failed to pair Live Photos after indexing album {}: {}",
+                album_id, error
+            );
+        }
+        if let Err(error) = reconcile_raw_jpeg_pairs_after_album_index(
+            album_id,
+            group_raw_jpeg_pairs,
+        ) {
+            eprintln!(
+                "Failed to pair RAW+JPEG files after indexing album {}: {}",
+                album_id, error
+            );
+        }
     }
 
-    // Update last scan time
-    let _ = Album::update_last_scan_time(album_id, current_scan_time);
+    if scan_complete {
+        // Update last scan time only after a complete filesystem traversal.
+        let _ = Album::update_last_scan_time(album_id, current_scan_time);
 
-    // index finished – recount from the database to get the true total
-    // (some files may have been skipped or failed to insert).
-    let _ = Album::recount_album(album_id);
+        // Recount only after a complete traversal so an offline disk cannot
+        // replace the existing album totals with a partial result.
+        let _ = Album::recount_album(album_id);
+    }
+
+    // After a clean completed scan, align indexed with total so the next
+    // scan does not incorrectly resume from a progress-milestone value
+    // (update_progress writes indexed every 50 files during the scan,
+    // and recount_album clamps without distinguishing complete vs partial).
+    if scan_complete {
+        if let Ok(album) = Album::get_album_by_id(album_id) {
+            let total = album.total.unwrap_or(0) as u64;
+            let _ = Album::update_progress(album_id, total, total);
+        }
+    }
 
     // 5. Set album cover if needed (must happen before index_finished event)
     // so frontend refresh gets the latest cover_file_id immediately.
-    let _ = Album::auto_set_cover(album_id);
+    if scan_complete {
+        let _ = Album::auto_set_cover(album_id);
+    }
+
+    // Summary log
+    let elapsed = scan_start.elapsed().as_secs_f64();
+    println!(
+        "[scan] album={} folder='{}' files={} time={:.1}s",
+        album_id, album.path, final_snapshot.processed, elapsed
+    );
 
     // 6. Emit finished
     app_handle
@@ -1910,10 +3590,22 @@ pub async fn index_album_worker(
             FinishedPayload {
                 album_id,
                 phase: final_snapshot.phase().to_string(),
-                indexed: final_snapshot.processed,
-                processed: final_snapshot.processed,
+                indexed: if scan_failed {
+                    previous_indexed
+                } else {
+                    final_snapshot.processed
+                },
+                processed: if scan_failed {
+                    previous_indexed
+                } else {
+                    final_snapshot.processed
+                },
                 search_ready: final_snapshot.search_ready,
-                total: final_snapshot.total,
+                total: if scan_failed {
+                    previous_total
+                } else {
+                    final_snapshot.total
+                },
                 search_total: final_snapshot.search_total,
                 failed: final_snapshot.failed,
             },

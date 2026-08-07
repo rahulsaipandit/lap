@@ -39,18 +39,12 @@
     </div>
 
     <div class="sidebar-panel-header">
-      <div role="tablist" class="sidebar-header-tabs">
-        <button
-          role="tab"
-          :class="['sidebar-header-tab', activeTab === 'people' ? 'tab-active' : '']"
-          @click="activeTab = 'people'"
-        >
-          {{ localeMsg.sidebar.people }}
-        </button>
-        <span class="px-1.5 h-5 inline-flex items-center rounded-box text-[10px] font-semibold tracking-[0.08em] text-warning border border-warning/30 bg-warning/10 cursor-default">
-          BETA
-        </span>
-      </div>
+      <span class="sidebar-panel-header-title flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+        {{ titlebar }}<template v-if="totalPersons > 0"> ({{ totalPersons.toLocaleString() }})</template>
+      </span>
+      <span class="px-1.5 h-5 inline-flex items-center rounded-box text-[10px] font-semibold tracking-[0.08em] text-warning border border-warning/30 bg-warning/10 cursor-default">
+        BETA
+      </span>
 
       <ContextMenu :menuItems="personPanelMenuItems" :iconMenu="IconMore" :smallIcon="true" />
     </div>
@@ -61,19 +55,20 @@
         <li v-for="person in sortedPersons" :key="person.id" :id="'person-' + person.id">
           <div
             :class="[
-              'sidebar-item sidebar-item-media gap-2 group',
+              'sidebar-item gap-2 group',
               selectedPerson && selectedPerson.id === person.id && !isRenamingPerson ? 'sidebar-item-selected' : 'sidebar-item-hover',
             ]"
             @click="selectPerson(person)"
+            @contextmenu.prevent.stop="(e: MouseEvent) => handlePersonContextMenu(person, e)"
           >
             <!-- Face thumbnail -->
-            <div class="w-10 h-10 rounded-box overflow-hidden bg-base-300 shrink-0 flex items-center justify-center">
+            <div class="w-8 h-8 rounded-full overflow-hidden bg-base-300/70 ring-1 ring-base-content/5 shrink-0 flex items-center justify-center">
               <img 
                 v-if="person.thumbnail" 
                 :src="'data:image/jpeg;base64,' + person.thumbnail" 
                 class="w-full h-full object-cover"
               />
-              <IconPerson v-else class="w-6 h-6 text-base-content/30" />
+              <IconPerson v-else class="w-5 h-5 text-base-content/30" />
             </div>
             
             <!-- Name input or display -->
@@ -89,18 +84,19 @@
             />
             <template v-else>
               <span class="sidebar-item-label">
-                {{ person.name || `Person ${person.id}` }}
+                {{ getPersonDisplayName(person) }}
               </span>
-              <span v-if="person.count" class="sidebar-item-count">
+              <span v-if="person.count" :class="['sidebar-item-count', selectedPerson?.id === person.id ? 'hidden' : 'group-hover:hidden']">
                 {{ person.count.toLocaleString() }}
               </span>
-              
+
               <div :class="[
                   'ml-auto flex flex-row items-center text-base-content/30',
-                  selectedPerson && selectedPerson.id === person.id ? '' : 'hidden group-hover:block'
+                  selectedPerson?.id === person.id ? '' : 'hidden group-hover:flex'
                 ]"
               >
-                <ContextMenu 
+                <ContextMenu
+                  :ref="(el: any) => { if (el) personContextMenus[person.id] = el }"
                   :iconMenu="IconMore"
                   :menuItems="getMoreMenuItems()"
                   :smallIcon="true"
@@ -110,26 +106,38 @@
           </div>
         </li>
       </ul>
+      <button
+        v-if="hasMorePersons"
+        type="button"
+        class="w-full py-2 text-sm text-base-content/70 hover:text-base-content cursor-pointer disabled:cursor-wait"
+        :disabled="isLoadingMorePersons"
+        @click="loadMorePersons"
+      >
+        {{ isLoadingMorePersons
+          ? $t('tooltip.loading')
+          : $t('menu.person.show_more', {
+              loaded: allPersons.length.toLocaleString(),
+              total: totalPersons.toLocaleString(),
+            })
+        }}
+      </button>
+    </div>
+
+    <div v-else-if="isLoadingPersons" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
+      <span class="text-sm text-center">{{ $t('tooltip.loading') }}</span>
     </div>
 
     <!-- No Persons Found Message -->
+    <div v-else-if="!isIndexing && incompleteCount > 0" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
+      <span class="text-sm text-center">{{ $t('face_index.incomplete', { count: incompleteCount.toLocaleString() }) }}</span>
+      <button class="btn btn-primary btn-sm mt-4 rounded-box" @click="clickIndexFaces">
+        <IconUpdate class="w-4 h-4" />
+        {{ $t('face_index.resume') }}
+      </button>
+    </div>
+
     <div v-else-if="!isIndexing" class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
-      <!-- <IconPerson class="w-8 h-8 mb-2" /> -->
-      <template v-if="incompleteCount > 0">
-         <span class="text-sm text-center">{{ $t('face_index.incomplete', { count: incompleteCount.toLocaleString() }) }}</span>
-         <button class="btn btn-primary btn-sm mt-4 rounded-box" @click="clickIndexFaces">
-          <IconUpdate class="w-4 h-4" />
-          {{ $t('face_index.resume') }}
-        </button>
-      </template>
-      <template v-else>
-        <!-- <span class="text-sm text-center">{{ $t('tooltip.not_found.person') }}</span> -->
-        <span class="text-sm text-center">{{ $t('tooltip.not_found.person_hint') }}</span>
-        <button class="btn btn-primary btn-sm mt-4 rounded-box" @click="clickIndexFaces">
-          <IconUpdate class="w-4 h-4" />
-          {{ $t('face_index.start') }}
-        </button>
-      </template>
+      <span class="text-sm text-center">{{ $t('tooltip.not_found.person') }}</span>
     </div>
 
   </div>
@@ -138,7 +146,7 @@
   <MessageBox
     v-if="showDeletePersonMsgbox"
     :title="$t('msgbox.delete_person.title')"
-    :message="`${$t('msgbox.delete_person.content', { person: selectedPerson?.name || 'Person ' + selectedPerson?.id })}`"
+    :message="`${$t('msgbox.delete_person.content', { person: getPersonDisplayName(selectedPerson) })}`"
     :OkText="$t('msgbox.delete_person.ok')"
     :cancelText="$t('msgbox.cancel')"
     :warningOk="true"
@@ -176,7 +184,7 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
-import { getPersons, renamePerson, deletePerson, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
+import { getPersonsPage, renamePerson, deletePerson, indexFaces, cancelFaceIndex, isFaceIndexing, listenFaceIndexProgress, listenFaceIndexFinished, listenClusterProgress, resetFaces, getFaceStats } from '@/common/api';
 import { 
   IconPerson, 
   IconMore, 
@@ -202,10 +210,6 @@ const emit = defineEmits(['editDataChanged']);
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
-
-//tabs
-const activeTab = ref<'people' | 'album'>('people');
-
 // persons
 const allPersons = ref<any[]>([]);
 const selectedPerson = ref<any>(null);
@@ -225,6 +229,18 @@ const clusterProgress = ref({
   total: 0
 });
 const incompleteCount = ref(0);
+const personContextMenus = ref<Record<number, any>>({});
+const isLoadingPersons = ref(true);
+const isLoadingMorePersons = ref(false);
+const hasMorePersons = ref(false);
+const totalPersons = ref(0);
+const PERSON_PAGE_SIZE = 100;
+let personLoadRequest = 0;
+
+function handlePersonContextMenu(person: any, event: MouseEvent) {
+  selectPerson(person);
+  personContextMenus.value[person.id]?.open?.(event.clientX, event.clientY);
+}
 const betaBadgeRef = ref<HTMLElement | null>(null);
 const betaTooltipRef = ref<HTMLElement | null>(null);
 const isBetaTooltipVisible = ref(false);
@@ -239,6 +255,7 @@ const sortedPersons = computed(() => allPersons.value);
 
 // Computed property to format cluster progress text using i18n
 const { t } = useI18n();
+const getPersonDisplayName = (person: any) => person?.name || t('menu.person.unnamed');
 const clusterProgressText = computed(() => {
   const { phase, current, total } = clusterProgress.value;
   switch (phase) {
@@ -264,6 +281,7 @@ const personPanelMenuItems = computed(() => [
     action: () => clickIndexFaces(),
     disabled: isIndexing.value,
   },
+  { label: "-", action: null },
   {
     label: localeMsg.value.menu.person.reset_index,
     icon: IconTrash,
@@ -291,6 +309,7 @@ const getMoreMenuItems = () => [
       });
     }
   },
+  { label: "-", action: null },
   {
     label: localeMsg.value.menu?.person?.delete || 'Delete',
     icon: IconTrash,
@@ -344,19 +363,50 @@ onUnmounted(() => {
   if (unlistenCluster) unlistenCluster();
 });
 
-async function loadPersons() {
-  const persons = await getPersons(config.settings.categorySort);
-  if (persons) {
-    allPersons.value = persons;
-    if (allPersons.value.length > 0 && !selectedPerson.value) {
-      const index = allPersons.value.findIndex(p => p.id === libConfig.person?.id);
-      selectPerson(allPersons.value[index >= 0 ? index : 0]);
-    }
+async function loadPersons(reset = true) {
+  if (!reset && (!hasMorePersons.value || isLoadingMorePersons.value || isLoadingPersons.value)) return;
+
+  const requestId = reset ? ++personLoadRequest : personLoadRequest;
+  if (reset) {
+    isLoadingPersons.value = true;
+    allPersons.value = [];
+    hasMorePersons.value = false;
+    totalPersons.value = 0;
   } else {
-    if (libConfig.person) {
+    isLoadingMorePersons.value = true;
+  }
+
+  try {
+    const page = await getPersonsPage(
+      config.settings.categorySort,
+      reset ? 0 : allPersons.value.length,
+      PERSON_PAGE_SIZE,
+    );
+    if (requestId !== personLoadRequest) return;
+
+    if (page) {
+      allPersons.value = reset
+        ? page.persons
+        : [...allPersons.value, ...page.persons];
+      hasMorePersons.value = page.has_more;
+      totalPersons.value = page.total;
+      if (allPersons.value.length > 0 && !selectedPerson.value) {
+        const index = allPersons.value.findIndex(p => p.id === libConfig.person?.id);
+        selectPerson(allPersons.value[index >= 0 ? index : 0]);
+      }
+    } else if (libConfig.person) {
       libConfig.person.id = null;
     }
+  } finally {
+    if (requestId === personLoadRequest) {
+      isLoadingPersons.value = false;
+      isLoadingMorePersons.value = false;
+    }
   }
+}
+
+function loadMorePersons() {
+  void loadPersons(false);
 }
 
 function selectPerson(person: any) {
@@ -385,6 +435,7 @@ async function handleRenamePerson() {
   const result = await renamePerson(selectedPerson.value.id, newName);
   if (result) {
     isRenamingPerson.value = false;
+    await loadPersons();
   }
 }
 

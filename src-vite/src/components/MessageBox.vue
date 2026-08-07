@@ -1,8 +1,21 @@
 <template>
   <ModalDialog :title="title" :width="400" @cancel="clickCancel">
-    <div v-if="message" class="text-sm whitespace-pre-line wrap-break-word">
+    <div v-if="message" class="text-sm whitespace-pre-line wrap-break-word select-none">
       {{ message }}
     </div>
+
+    <label
+      v-if="checkboxText"
+      class="mt-3 flex items-start gap-2 text-sm cursor-pointer select-none"
+    >
+      <input
+        v-model="checkboxValue"
+        type="checkbox"
+        class="checkbox checkbox-xs checkbox-error mt-0.5"
+        @change="emit('checkbox-change', checkboxValue)"
+      />
+      <span class="leading-5">{{ checkboxText }}</span>
+    </label>
 
     <div class="flex flex-row items-center text-sm">
       <input v-if="showInput && !multiLine"
@@ -13,6 +26,7 @@
         :placeholder="inputPlaceholder"
         class="px-2 py-1 flex-1 min-w-0 input"
         @input="validateInput"
+        @keydown.enter.prevent="clickOk"
       />
       <span v-if="inputExtension" class="label px-2 text-sm">.{{ inputExtension }}</span>
     </div>
@@ -22,6 +36,7 @@
       v-model="inputValue"
       rows="4"
       minrows="1"
+      maxlength="2048"
       :placeholder="inputPlaceholder"
       class="px-2 py-1 w-full textarea min-h-[30px] max-h-[200px]"
       @input="validateInput"
@@ -37,15 +52,13 @@
       >{{ thirdText }}</button>
 
       <button v-if="cancelText.length > 0"
-        class="px-4 py-1 rounded-box hover:bg-base-100 hover:text-base-content cursor-pointer" 
+        class="t-button-default" 
         @click="clickCancel"
       >{{ cancelText }}</button>
       
       <button 
-        :class="[
-          'px-4 py-1 rounded-box', 
-          okButtonClasses,
-        ]" 
+        :class="warningOk ? 't-button-error' : 't-button-primary'" 
+        :disabled="showInput && !isInputValid"
         @click="clickOk"
       >{{ OkText }}</button>
     </div>
@@ -115,6 +128,14 @@ const props = defineProps({
   warningThird: {
     type: Boolean,
     default: false
+  },
+  checkboxText: {
+    type: String,
+    default: ''
+  },
+  checkboxChecked: {
+    type: Boolean,
+    default: false
   }
 });
 
@@ -123,19 +144,18 @@ const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
-const emit = defineEmits(['ok', 'cancel', 'reset', 'third']);
+const emit = defineEmits(['ok', 'cancel', 'reset', 'third', 'checkbox-change']);
 
 // input 
 const inputRef = ref<HTMLInputElement | null>(null);
 const inputValue = ref(props.inputText);
 const needValidateInput = ref(props.needValidateInput);
 const inputErrorMessage = ref('');
+const checkboxValue = ref(props.checkboxChecked);
 
-const okButtonClasses = computed(() => {
-  return !props.showInput || !props.needValidateInput || inputValue.value.trim().length > 0
-    ? (props.warningOk ? 'hover:bg-error hover:text-base-100 cursor-pointer' : 'hover:bg-primary hover:text-primary-content cursor-pointer')
-    : 'text-base-content/30 cursor-default';
-});
+const isInputValid = computed(() =>
+  !needValidateInput.value || (inputValue.value.trim().length > 0 && isValidFileName(inputValue.value))
+);
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
@@ -158,6 +178,10 @@ watch(() => props.errorMessage, (newValue) => {
     inputErrorMessage.value = newValue;
     emit('reset'); // reset error message
   }
+});
+
+watch(() => props.checkboxChecked, (newValue) => {
+  checkboxValue.value = newValue;
 });
 
 const validateInput = () => {

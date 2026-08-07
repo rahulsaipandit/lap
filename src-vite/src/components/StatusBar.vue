@@ -2,10 +2,10 @@
   <div :class="containerClass">
     <div
       v-if="hasData"
-      class="flex gap-4 items-center flex-1 min-w-0 overflow-hidden whitespace-nowrap"
+      class="flex gap-4 items-center flex-1 min-w-0 overflow-hidden whitespace-nowrap text-base-content/70"
     >
       <div class="flex items-center shink-0">
-        <IconFileSearch class="t-icon-size-xs mr-1" />
+        <IconList class="t-icon-size-xs mr-1" />
         <span v-if="selectedItemIndex >= 0">{{ (selectedItemIndex + 1).toLocaleString() + '/' }}</span>
         <span>{{ $t('statusbar.files_summary', { count: totalFileCount.toLocaleString(), size: formatFileSize(totalFileSize) }) }}</span>
       </div>
@@ -22,10 +22,15 @@
         </div>
 
         <div class="flex items-center gap-1 shink-0">
-          <component :is="currentFile?.file_type === 1 || currentFile?.file_type === 3 ? IconPhoto : IconVideo" class="t-icon-size-xs" />
-          <span>{{ formatDimensionText(currentFile?.width, currentFile?.height) }}</span>
+          <component :is="currentFile?.file_type === 1 || currentFile?.file_type === 3 ? IconAspectRatio : IconVideo" class="t-icon-size-xs" />
+          <span>{{ formatDimensionText(currentFile?.width, currentFile?.height, true) }}</span>
         </div>
 
+        <div class="flex items-center gap-1 shink-0">
+          <IconCalendarDay class="t-icon-size-xs" />
+          <span>{{ formatTimestamp(currentFile?.taken_date, $t('format.date_time')) }}</span>
+        </div>
+        
         <div v-if="showFilmStrip || showQuickView || showScale" class="flex items-center gap-1 shink-0">
           <component :is="imageScale >= 1 ? IconZoomIn : IconZoomOut" class="t-icon-size-xs" />
           <span>{{ (imageScale * 100).toFixed(0) }}%</span>
@@ -47,11 +52,6 @@
         <div v-if="currentFile?.geo_name" class="flex items-center gap-1 shink-0">
           <IconLocation class="t-icon-size-xs" />
           <span>{{ currentFile?.geo_name }}</span>
-        </div>
-
-        <div class="flex items-center gap-1 shink-0">
-          <IconClock class="t-icon-size-xs" />
-          <span>{{ formatTimestamp(currentFile?.taken_date, $t('format.date_time')) }}</span>
         </div>
       </template>
     </div>
@@ -77,17 +77,17 @@ import {
 import {
   IconCheckAll,
   IconChecked,
-  IconPhoto,
+  IconAspectRatio,
   IconVideo,
   IconCamera,
   IconCameraAperture,
   IconLocation,
-  IconClock,
-  IconFileSearch,
+  IconList,
   IconZoomIn,
   IconZoomOut,
   IconUpdate,
   IconUpdateDot,
+  IconCalendarDay,
 } from '@/common/icons';
 
 const props = defineProps({
@@ -175,7 +175,7 @@ const hasRealSelectedFile = computed(() => {
   return !!file && !file.isPlaceholder;
 });
 const containerClass = computed(() => {
-  const base = 'px-2 h-8 flex items-center justify-between text-sm cursor-default bg-base-300/80 backdrop-blur-md';
+  const base = 'px-2 h-8 flex items-center justify-between text-sm cursor-default bg-base-300';
   if (props.isEmbedded) return base;
   return `${base} absolute bottom-0 left-0 right-0 z-30`;
 });

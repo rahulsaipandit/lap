@@ -11,6 +11,8 @@ export interface Folder {
     modified_at?: number;
     is_expanded?: boolean;
     is_favorite?: boolean;
+    is_excluded_from_search?: boolean;
+    has_subfolders?: boolean;
     children?: Folder[];
 }
 
@@ -32,6 +34,7 @@ export interface Album {
     created_at?: number;
     modified_at?: number;
     children?: Folder[];
+    is_accessible?: boolean;
 }
 
 /**

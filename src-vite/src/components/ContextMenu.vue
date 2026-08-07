@@ -1,5 +1,5 @@
 <template>
-  <div ref="dropdown" class="relative inline-block text-left">
+  <div ref="dropdown" class="relative inline-flex leading-none text-left">
 
     <!-- Dropdown Trigger -->
     <slot name="trigger" :toggle="toggleDropdown">
@@ -17,7 +17,7 @@
       <transition name="fade">
         <div v-if="isDropDown" 
           ref="menu"
-          class="menu text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 absolute rounded-box shadow-lg z-500"
+          class="menu select-none text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 absolute rounded-box shadow-lg z-500"
           :style="menuStyle"
         >
           <!-- menu items -->
@@ -43,7 +43,15 @@
               >
                 <div class="w-full flex items-center">
                   <div class="w-5">
-                    <component class="t-icon-size-sm" :is="item.icon" ></component>
+                    <component v-if="item.icon" class="t-icon-size-sm" :is="item.icon" />
+                    <span
+                      v-else-if="item.swatch"
+                      :class="[
+                        'm-1 block size-3 rounded-full border',
+                        item.selected ? 'border-primary/70 ring-2 ring-primary/70' : 'border-base-content/5',
+                      ]"
+                      :style="item.swatch"
+                    />
                   </div>
                   <span class="ml-2 mr-4">{{ item.label }}</span>
                   <span class="ml-auto text-base-content/30">{{ item.shortcut }}</span>
@@ -60,7 +68,7 @@
         <div
           v-if="activeSubmenuItem?.children?.length"
           ref="submenu"
-          class="menu fixed text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 rounded-box shadow-lg min-w-max z-510"
+          class="menu select-none fixed text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 rounded-box shadow-lg min-w-max z-510"
           :style="submenuStyle"
           @mouseenter="cancelSubmenuClose"
           @mouseleave="scheduleSubmenuClose(activeSubmenuIndex)"
@@ -147,9 +155,11 @@ const activeSubmenuIndex = ref(null);
 const activeSubmenuItem = ref(null);
 let submenuCloseTimeout = null;
 let submenuOpenTimeout = null;
+let openRequestId = 0;
 
 // Remove event listener when the component is destroyed
 onBeforeUnmount(() => {
+  openRequestId++;
   document.removeEventListener('mousedown', handleClickOutside, { capture: true });
   document.removeEventListener('keydown', handleKeyDown);
   cancelSubmenuClose();
@@ -184,12 +194,23 @@ const handleKeyDown = (event) => {
 const open = async (x, y) => {
   if (props.disabled) return;
 
-  isDropDown.value = true;
+  const requestId = ++openRequestId;
+  const cancelPendingOpen = () => {
+    if (openRequestId === requestId) openRequestId++;
+  };
+  document.addEventListener('mousedown', cancelPendingOpen, { capture: true, once: true });
 
   // Resolve menu items (call function if provided)
-  resolvedMenuItems.value = typeof props.menuItems === 'function' 
-    ? props.menuItems() 
-    : props.menuItems;
+  try {
+    const menuItems = typeof props.menuItems === 'function'
+      ? props.menuItems()
+      : props.menuItems;
+    resolvedMenuItems.value = await Promise.resolve(menuItems);
+  } finally {
+    document.removeEventListener('mousedown', cancelPendingOpen, { capture: true });
+  }
+  if (openRequestId !== requestId) return;
+  isDropDown.value = true;
 
   await nextTick(); // Ensure menu is rendered before measuring
 
@@ -325,8 +346,8 @@ const positionSubmenu = async (targetEl) => {
 const handleItemMouseEnter = (index, item, event) => {
   cancelSubmenuClose();
   cancelSubmenuOpen();
-  activeSubmenuIndex.value = item.children?.length ? index : null;
-  if (item.children?.length) {
+  activeSubmenuIndex.value = !item.disabled && item.children?.length ? index : null;
+  if (!item.disabled && item.children?.length) {
     const targetEl = event?.currentTarget;
     const openDelay = Number(item.submenuOpenDelay || 0);
     if (openDelay > 0) {
@@ -385,6 +406,7 @@ const handleLeafClick = (item) => {
 };
 
 const handleMainItemClick = (index, item, event) => {
+  if (item.disabled) return;
   if (item.children?.length) {
     cancelSubmenuClose();
     cancelSubmenuOpen();

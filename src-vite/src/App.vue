@@ -15,7 +15,8 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useConfigStore } from '@/stores/configStore';
 import { useLibraryStore } from '@/stores/libraryStore';
 import { clearIndexRecoveryInfo } from '@/common/api';
-import { setTheme, SCALE_VALUES } from '@/common/utils';
+import { isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { matchesShortcut } from '@/common/shortcuts';
 import ToastContainer from '@/components/ToastContainer.vue';
 
 const libConfig = useLibraryStore();
@@ -53,25 +54,39 @@ onMounted(async () => {
       unlistenMainCloseRequested = await win.onCloseRequested(async (event) => {
         if (isHandlingMainClose) return;
         isHandlingMainClose = true;
-        event.preventDefault();
 
         try {
-          if (libConfig._initialized) {
-            // Mark scanning as paused so it won't auto-resume on restart
-            if (libConfig.index.status === 1) {
-              libConfig.index.status = 2;
+          event.preventDefault();
+
+          if (isMac) {
+            // macOS convention: close hides the window; the app stays alive and
+            // can be reopened from the Dock. Quitting still uses the native menu.
+            await win.hide();
+            return;
+          }
+
+          try {
+            if (libConfig._initialized) {
+              // Mark scanning as paused so it won't auto-resume on restart
+              if (libConfig.index.status === 1) {
+                libConfig.index.status = 2;
+              }
+              // Normal close → clear recovery trace (crash leaves it intact)
+              await clearIndexRecoveryInfo();
+              await libConfig.save();
             }
-            // Normal close → clear recovery trace (crash leaves it intact)
-            await clearIndexRecoveryInfo();
-            await libConfig.save();
+          } finally {
+            await win.close();
           }
         } finally {
-          await win.close();
+          isHandlingMainClose = false;
         }
       });
     } else {
       unlistenMainCloseRequested = await win.listen('tauri://close-requested', async () => {
-        if (libConfig._initialized) {
+        if (isMac) {
+          await win.hide();
+        } else if (libConfig._initialized) {
           // Mark scanning as paused so it won't auto-resume on restart
           if (libConfig.index.status === 1) {
             libConfig.index.status = 2;
@@ -119,8 +134,16 @@ const handleKeyDown = (event) => {
     return;
   }
 
+  if (!isMac && matchesShortcut('app.preferences', event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    emit('app-open-preferences');
+    return;
+  }
+
   emit('global-keydown', {
     key: event.key,
+    code: event.code,
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
@@ -141,14 +164,9 @@ function handleMainWindowScaleShortcut(event) {
   const win = getCurrentWebviewWindow();
   if (win.label !== 'main') return false;
 
-  const isCmdOrCtrl = event.metaKey || event.ctrlKey;
-  if (!isCmdOrCtrl || event.altKey) return false;
-
-  const key = event.key;
-  const code = event.code;
-  const isScaleUp = key === '+' || key === '=' || code === 'NumpadAdd';
-  const isScaleDown = key === '-' || key === '_' || code === 'NumpadSubtract';
-  const isScaleReset = key === '0' || code === 'Numpad0';
+  const isScaleUp = matchesShortcut('app.scale.increase', event);
+  const isScaleDown = matchesShortcut('app.scale.decrease', event);
+  const isScaleReset = matchesShortcut('app.scale.reset', event);
 
   if (!isScaleUp && !isScaleDown && !isScaleReset) return false;
 

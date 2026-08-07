@@ -1,114 +1,153 @@
 <template>
+  <div class="sidebar-panel min-h-0">
     <!-- albums -->
+    <div v-if="isMainPane" class="sidebar-panel-header">
+      <span class="sidebar-panel-header-title flex-1">
+        {{ $t('album.album_list') }}<template v-if="albums.length > 0"> ({{ albums.length.toLocaleString() }})</template>
+      </span>
+      <TButton
+        :icon="IconAdd"
+        :buttonSize="'small'"
+        :tooltip="$t('menu.album.add')"
+        @click="clickNewAlbum"
+      />
+    </div>
+
     <ul
-      v-if="albums.length > 0"
       ref="albumListRootRef"
       tabindex="0"
       data-album-list-root="true"
-      class="flex-1 overflow-x-hidden overflow-y-auto rounded-box select-none outline-none"
+      class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-box select-none outline-none"
       @keydown="handleLocalAlbumListKeyDown"
       @mousedown.capture="focusAlbumListRoot"
+      @drop.stop
     >
-      
-      <!-- title -->
-      <div v-if="isMainPane" class="sidebar-panel-header">
-        <span class="sidebar-panel-header-title flex-1">{{ $t('album.album_list') }}</span>
-        <TButton
-          v-if="isEditList"
-          :icon="IconRestore"
-          :buttonSize="'small'"
-          :selected="true"
-          @click="clickCloseEditList"
-        />
-        <template v-else>
-          <TButton
-            :icon="IconAdd"
-            :buttonSize="'small'"
-            :tooltip="$t('menu.album.add')"
-            @click="clickNewAlbum"
-          />
-        </template>
-      </div>
-      
       <!-- drag to change albums' display order -->
-      <VueDraggable 
-        v-model="albums" 
-        :disabled="!isMainPane || !isEditList"
+      <VueDraggable
+        v-if="albums.length > 0"
+        v-model="albums"
+        :disabled="!isMainPane || reorderingAlbumId === null"
         group="album-folder"
-        :handle="'.drag-handle'" 
+        :handle="'.album-drag-handle'"
         :animation="200"
         @start="onDragStart"
-        @end="onDragEnd" 
+        @end="onDragEnd"
       >
-        <li v-for="album in albums" :key="album.id" :data-album-id="album.id">
-          <div 
+        <li
+          v-for="album in albums"
+          :key="album.id"
+          :data-album-id="album.id"
+          :data-selected-album-folder="
+            selection.albumId.value === album.id && !selection.selected.value ? 'true' : undefined
+          "
+        >
+          <div
+            :data-reordering-album="isReorderingAlbum(album) ? 'true' : undefined"
+            :data-file-drop-path="album.is_accessible === false ? undefined : album.path"
+            :data-file-drop-album-id="album.is_accessible === false ? undefined : album.id"
             :class="[
-              'mx-1 p-1 h-12 flex items-center rounded-box whitespace-nowrap cursor-pointer group transition-all duration-200 ease-in-out', 
-              selection.albumId.value === album.id && !isEditList 
-                ? (selection.selected.value ? 'text-primary bg-base-100 hover:bg-base-100' : 'text-primary')
+              'mx-1 p-1 h-12 flex items-center rounded-box whitespace-nowrap cursor-pointer group border-2 border-transparent transition-all duration-200 ease-in-out',
+              selection.albumId.value === album.id
+                ? (selection.selected.value ? `${isMainSourceActive ? 'text-primary' : 'text-base-content/70 bg-base-100/30 hover:bg-base-100/70'} bg-base-100 hover:bg-base-100` : 'text-base-content hover:bg-base-100/30')
                 : 'hover:text-base-content hover:bg-base-100/30',
             ]"
             @click.stop="clickAlbum(album)"
             @dblclick.stop="dlbClickAlbum(album)"
+            @contextmenu.prevent.stop="(e: MouseEvent) => handleAlbumContextMenu(album, e)"
           >
-            <IconRight
-              class="p-1 w-6 h-6 shrink-0 transition-transform hover:text-base-content"
-              :class="{ 'rotate-90': album.is_expanded }"
-              @click.stop="expandAlbum(album)"
+            <IconDragHandle
+              v-if="isReorderingAlbum(album)"
+              class="album-drag-handle p-1 w-6 h-6 shrink-0 cursor-move text-base-content/70 hover:text-base-content"
+              :title="$t('menu.album.reorder')"
+              @click.stop
               @dblclick.stop
             />
-            <div v-if="album.cover_file_id && albumCovers[album.id]" class="w-10 h-10 mr-2 shrink-0" @click.stop="clickAlbum(album)">
-              <img :src="albumCovers[album.id]" class="w-full h-full object-cover rounded-box">
+            <IconRight
+              v-else
+              :class="[
+                'p-1 w-6 h-6 shrink-0 transition-transform hover:text-base-content',
+                album.is_expanded ? 'rotate-90' : '',
+              ]"
+              @click.stop="toggleAlbumExpansion(album)"
+              @dblclick.stop
+            />
+            <div class="w-10 h-10 mr-2 rounded-box shrink-0 overflow-hidden border border-base-content/5 bg-base-content/5" @click.stop>
+              <!-- Scanning / Paused / Queued -->
+              <div v-if="isAlbumScanning(album.id)"
+                class="w-full h-full flex items-center justify-center cursor-pointer"
+                :title="$t('toolbar.tooltip.scanning')"
+                @click="toggleIndexAlbum(album.id)"
+              >
+                <IconUpdate class="w-6 h-6 animate-spin" />
+              </div>
+              <div v-else-if="isAlbumPaused(album.id) || (Number(album.indexed) > 0 && Number(album.indexed) < Number(album.total))"
+                class="w-full h-full flex items-center justify-center"
+                :class="album.is_accessible === false ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'"
+                :title="$t('toolbar.tooltip.scan_paused')"
+                @click="toggleIndexAlbum(album.id)"
+              >
+                <IconUpdateDot class="w-6 h-6" />
+              </div>
+              <div v-else-if="getAlbumIcon(album) === 'update'"
+                class="w-full h-full flex items-center justify-center cursor-pointer hover:bg-base-100/30"
+                :title="$t('toolbar.tooltip.scan_queued')"
+                @click="toggleIndexAlbum(album.id)"
+              >
+                <IconUpdate class="w-6 h-6" />
+              </div>
+              <!-- Cover -->
+              <img
+                v-else-if="album.cover_file_id && albumCovers[album.id] && !albumCoverErrors[album.id]"
+                :src="albumCovers[album.id]"
+                class="w-full h-full object-cover"
+                @error="albumCoverErrors[album.id] = true"
+                @click="clickAlbum(album)"
+              >
+              <!-- Fallback -->
+              <div v-else
+                class="w-full h-full flex items-center justify-center cursor-pointer"
+                @click="clickAlbum(album)"
+              >
+                <IconFolders class="w-6 h-6" />
+              </div>
             </div>
-            <div v-else class="skeleton w-10 h-10 mr-2 shrink-0"></div>
 
-            <div class="flex flex-col overflow-hidden" :class="{'text-base-content/30': isEditList }">  
+            <div class="flex flex-col overflow-hidden">
               <div class="overflow-hidden whitespace-pre text-ellipsis">
-                {{ album.name }} 
+                {{ album.name }}
               </div>
-              <div v-if="album.description" class="text-xs overflow-hidden whitespace-nowrap text-ellipsis">
-                {{ album.description }}
-              </div>
+              <div
+                v-if="album.is_accessible === false"
+                class="text-xs overflow-hidden whitespace-nowrap text-ellipsis text-warning/70"
+              >{{ $t('album.folder_unavailable.title') }}</div>
+              <div
+                v-else-if="album.description"
+                class="text-xs overflow-hidden whitespace-nowrap text-ellipsis text-base-content/50"
+              >{{ album.description }}</div>
             </div>
 
             <!-- Right side: Count and Status Icons -->
-            <div class="ml-auto pl-1 flex items-center justify-center text-xs text-base-content/30">
-              <!-- <TButton v-if="album.indexed !== undefined && album.total !== undefined && album.indexed < album.total" 
-                :icon="IconUpdate"
-                :iconClasses="(libConfig.index.albumQueue as any).includes(album.id) ? ['animate-spin'] : []"
-                :buttonSize="'small'"
-                @click="clickIndexAlbum(album.id)"
-              /> -->
-              <div v-if="getAlbumIcon(album) !== 'none'" @click="toggleIndexAlbum(album.id)">
-                <component 
-                  :is="getAlbumIcon(album) === 'update' ? IconUpdate : IconUpdateDot"
-                  class="mx-1 w-4 h-4 hover:text-base-content" 
-                  :class="shouldAnimateAlbumIcon(album) ? 'animate-spin' : ''" 
-                />
-              </div>
-              <span v-if="props.showTotalCount !== false">
-                {{ (album.total ?? 0).toLocaleString() }}
+            <div class="ml-auto">
+              <span
+                v-if="props.showTotalCount !== false && album.total"
+                class="sidebar-item-count"
+                :class="selection.albumId.value === album.id && selection.selected.value ? 'hidden' : 'group-hover:hidden'"
+              >
+                {{ album.total.toLocaleString() }}
               </span>
             </div>  
 
             <div class="flex flex-row items-center text-base-content/30">
-              <div v-if="isMainPane && !isEditList"
+              <div v-if="isMainPane"
                 :class="[
                   selection.albumId.value === album.id && selection.selected.value ? '' : 'hidden group-hover:block'
                 ]"
               >
                 <ContextMenu
+                  :ref="(el: any) => { if (el) albumContextMenus[album.id] = el }"
                   :iconMenu="IconMore"
                   :menuItems="() => getMoreMenuItems(album)"
                   :smallIcon="true"
-                />
-              </div>
-              <!-- dragging handle -->
-              <div v-if="isEditList" class="drag-handle">
-                <TButton 
-                  :icon="IconDragHandle"
-                  :buttonSize="'small'"
-                  :selected="true"
                 />
               </div>
             </div>
@@ -119,10 +158,21 @@
             enter-to-class="max-h-96"
           >
             <div
-              v-if="album.is_expanded && !isEditList && getAlbumQueueIndex(album.id, libConfig.index.albumQueue as any[]) === -1"
+              v-if="album.is_expanded && getAlbumQueueIndex(album.id, libConfig.index.albumQueue as any[]) === -1"
               class="ml-6 mr-2 my-1 p-1 rounded-box bg-base-300/30 border border-base-content/5 shadow-sm"
             >
-              <AlbumFolder 
+              <div
+                v-if="album.is_accessible === false"
+                class="px-2 py-3 flex items-start gap-2 text-base-content/50"
+              >
+                <IconFolderError class="mt-0.5 w-4 h-4 shrink-0" />
+                <div class="min-w-0">
+                  <div class="text-sm text-base-content/70">{{ $t('album.folder_unavailable.title') }}</div>
+                  <div class="text-xs">{{ $t('album.folder_unavailable.description') }}</div>
+                </div>
+              </div>
+              <AlbumFolder
+                v-else
                 :children="album.children" 
                 :albumId="album.id"
                 :rootPath="album.path"
@@ -134,30 +184,23 @@
         </li>
       </VueDraggable>
 
+      <li v-else class="sidebar-empty text-sm">
+        <span class="text-center">{{ $t('tooltip.not_found.albums') }}</span>
+      </li>
     </ul>
-
-    <!-- No Albums Found Message -->
-    <div v-else-if="!isLoading && !isEditList" class="mt-4 px-2 flex flex-col items-center justify-center gap-2 text-base-content/30">
-      <!-- <span class="text-center">{{ $t('album.no_albums.title') }}</span> -->
-      <span class="text-sm text-center">{{ $t('album.no_albums.description') }}</span>
-      <button class="mt-2 btn btn-primary btn-sm rounded-box" @click="clickNewAlbum">
-        <IconAdd class="w-5 h-5" />
-        {{ $t('menu.album.add') }}
-      </button>
-    </div>
 
     <!-- edit album information -->
     <AlbumEdit
       v-if="showAlbumEdit"
       :isNewAlbum="isNewAlbum"
-      :albumId="isNewAlbum ? 0 : selection.albumId.value"
-      :inputName="isNewAlbum ? '' : selectedAlbum?.name"
-      :inputDescription="isNewAlbum ? '' : selectedAlbum?.description"
-      :albumPath="isNewAlbum ? '' : selectedAlbum?.path"
-      :albumCoverFileId="isNewAlbum ? undefined : selectedAlbum?.cover_file_id"
-      :createdAt="isNewAlbum ? '' : formatTimestamp(selectedAlbum?.created_at ?? 0, $t('format.date_time'))"
-      :modifiedAt="isNewAlbum ? '' : formatTimestamp(selectedAlbum?.modified_at ?? 0, $t('format.date_time'))"
-      :lastScanTime="isNewAlbum ? '' : formatTimestamp((selectedAlbum?.last_scan_time ?? 0) / 1000, $t('format.date_time'))"
+      :albumId="isNewAlbum ? 0 : editingAlbumId"
+      :inputName="isNewAlbum ? '' : editingAlbum?.name"
+      :inputDescription="isNewAlbum ? '' : editingAlbum?.description"
+      :albumPath="isNewAlbum ? newAlbumFolderPath : editingAlbum?.path"
+      :albumCoverFileId="isNewAlbum ? undefined : editingAlbum?.cover_file_id"
+      :createdAt="isNewAlbum ? '' : formatTimestamp(editingAlbum?.created_at ?? 0, $t('format.date_time'))"
+      :modifiedAt="isNewAlbum ? '' : formatTimestamp(editingAlbum?.modified_at ?? 0, $t('format.date_time'))"
+      :lastScanTime="isNewAlbum ? '' : formatTimestamp((editingAlbum?.last_scan_time ?? 0) / 1000, $t('format.date_time'))"
       @ok="clickEditAlbum"
       @cancel="showAlbumEdit = false"
     />
@@ -173,7 +216,7 @@
       @ok="clickRemoveAlbum"
       @cancel="showRemoveAlbumMsgbox = false"
     />
-
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -192,11 +235,13 @@ import {
   getThumbnailDataUrlInflight,
   isWin,
   setThumbnailDataUrlInflight,
+  openFolderDialog,
 } from '@/common/utils';
 import { getAlbumQueueIndex, getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
-import { getAllAlbums, setDisplayOrder, addAlbum, editAlbum, removeAlbum, 
+import { getAllAlbums, reorderAlbums, addAlbum, editAlbum, removeAlbum, 
          fetchFolder, expandFinalFolder, getFileThumbById,
-         getAlbum, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished } from '@/common/api';
+         getAlbum, hasImportableClipboard, isDirectoryAccessible, cancelIndexing as cancelIndexingApi, listenIndexProgress, listenIndexFinished } from '@/common/api';
+import { DEFAULT_PLATFORM, getShortcutLabel } from '@/common/shortcuts';
 import { Album, Folder } from '@/common/types';
 import { useAlbumSelectionProvider, SelectionSource } from '@/composables/useAlbumSelection';
 
@@ -209,27 +254,29 @@ import TButton from '@/components/TButton.vue';
 import {
   IconAdd,
   IconMore,
-  IconDragHandle,
   IconEdit,
   IconRemove,
-  IconRestore,
   IconUpdate,
   IconUpdateOff,
   IconUpdateDot,
   IconRight,
+  IconDragHandle,
+  IconOrder,
+  IconFolders,
+  IconClipboard,
+  IconFolderError,
 } from '@/common/icons';
 
 const props = withDefaults(defineProps<{
   selectionSource: SelectionSource;
+  titlebar?: string;
   showTotalCount?: boolean;
 }>(), {
   showTotalCount: true,
 });
 
-const emit = defineEmits(['editDataChanged']);
-
 /// i18n
-const { locale, messages } = useI18n();
+const { t, locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
@@ -242,8 +289,6 @@ const selection = useAlbumSelectionProvider(
   }
 );
 
-let unlistenKeydown: () => void;
-
 let unlistenAlbumCoverChanged: () => void;
 let unlistenExpandAlbumFolder: (() => void) | undefined;
 let unlistenIndexProgress: (() => void) | undefined;
@@ -252,15 +297,8 @@ let unlistenAlbumsRefreshed: (() => void) | undefined;
 
 // Computed to check if we're in main album pane
 const isMainPane = computed(() => props.selectionSource === 'album');
+const isMainSourceActive = computed(() => libConfig.activePane !== 'collection');
 const albumListRootRef = ref<HTMLElement | null>(null);
-
-const panelMenuItems = computed(() => [
-  {
-    label: localeMsg.value.menu.album.reorder || 'Reorder',
-    icon: IconDragHandle,
-    action: () => clickReorder(),
-  },
-]);
 
 // message boxes
 const showAlbumEdit = ref(false);           // show edit album
@@ -269,12 +307,26 @@ const showRemoveAlbumMsgbox = ref(false);   // show remove album
 const albums = ref<Album[]>([]);
 const albumCovers = ref<Record<number, string>>({});
 const isNewAlbum = ref(false);
-const isEditList = ref(false);  // edit album list
+const newAlbumFolderPath = ref('');
+const editingAlbumId = ref(0);
 const isLoading = ref(true);    // loading albums
 const isDragging = ref(false);  // dragging albums
+const reorderingAlbumId = ref<number | null>(null);
+const albumCoverErrors = ref<Record<number, boolean>>({});
+const albumContextMenus = ref<Record<number, any>>({});
 
-const getAlbumById = (id: number) => albums.value.find(album => album.id === id);
+function handleAlbumContextMenu(album: Album, event: MouseEvent) {
+  void (async () => {
+    await clickAlbum(album);
+    albumContextMenus.value[album.id]?.open?.(event.clientX, event.clientY);
+  })();
+}
+
+const getAlbumById = (id: number) =>
+  albums.value.find(album => Number(album.id) === Number(id));
+const isReorderingAlbum = (album: Album) => Number(album.id) === reorderingAlbumId.value;
 const selectedAlbum = computed(() => getAlbumById(selection.albumId.value)) || {};
+const editingAlbum = computed(() => getAlbumById(editingAlbumId.value));
 const isAlbumQueued = (albumId: number) =>
   getAlbumQueueIndex(albumId, libConfig.index.albumQueue as any[]) >= 0;
 const syncIndexStatus = () => {
@@ -313,33 +365,73 @@ const isAlbumScanning = (albumId: number) =>
   }) === 'scanning';
 const getAlbumIcon = (album: any) => getAlbumScanIcon(getAlbumStatus(album));
 const shouldAnimateAlbumIcon = (album: any) => shouldAnimateAlbumScanIcon(getAlbumStatus(album));
+const refreshAlbumAccess = async (album: Album) => {
+  album.is_accessible = await isDirectoryAccessible(album.path);
+  if (!album.is_accessible) {
+    album.children = undefined;
+  }
+  return album.is_accessible;
+};
+
+const openAlbumEdit = async (albumId: number) => {
+  if (!getAlbumById(albumId)) {
+    const album = await getAlbum(albumId);
+    if (!album) return;
+    if (!getAlbumById(albumId)) {
+      albums.value.push(album);
+    }
+  }
+  editingAlbumId.value = albumId;
+  isNewAlbum.value = false;
+  showAlbumEdit.value = true;
+};
 
 // Get menu items for a specific album (function for lazy evaluation)
-const getMoreMenuItems = (album: any) => {
+const getMoreMenuItems = async (album: any) => {
+  const [canPaste, isAccessible] = await Promise.all([
+    hasImportableClipboard(),
+    refreshAlbumAccess(album),
+  ]);
   return [
     {
       label: localeMsg.value.menu.album.edit,
       icon: IconEdit,
-      action: () => {
-        showAlbumEdit.value = true;
-        isNewAlbum.value = false;
-      }
+      action: () => openAlbumEdit(album.id)
     },
     {
-      label: isAlbumQueued(album.id)
-        ? localeMsg.value.menu.album.pause_scan
-        : localeMsg.value.menu.album.index,
-      icon: isAlbumQueued(album.id) ? IconUpdateOff : IconUpdate,
-      action: () => toggleIndexAlbum(album.id)
+      label: t('menu.file.paste'),
+      icon: IconClipboard,
+      shortcut: getShortcutLabel('file.paste', DEFAULT_PLATFORM),
+      disabled: !canPaste || !isAccessible,
+      action: () => {
+        void tauriEmit('paste-clipboard-to-folder', {
+          albumId: album.id,
+          folderPath: album.path,
+        });
+      }
     },
     {
       label: "-",   // separator
       action: () => {}
     },
     {
-      label: localeMsg.value.menu.album.reorder || 'Reorder',
-      icon: IconDragHandle,
-      action: () => clickReorder(),
+      label: isAlbumQueued(album.id)
+        ? localeMsg.value.menu.album.pause_scan
+        : localeMsg.value.menu.album.scan,
+      icon: isAlbumQueued(album.id) ? IconUpdateOff : IconUpdate,
+      disabled: !isAccessible && !isAlbumQueued(album.id),
+      action: () => toggleIndexAlbum(album.id)
+    },
+    {
+      label: localeMsg.value.menu.album.reorder,
+      icon: IconOrder,
+      action: () => {
+        reorderingAlbumId.value = isReorderingAlbum(album) ? null : album.id;
+      }
+    },
+    {
+      label: "-",   // separator
+      action: () => {}
     },
     {
       label: localeMsg.value.menu.album.remove,
@@ -352,9 +444,14 @@ const getMoreMenuItems = (album: any) => {
 };
 
 // Load cover thumbnail for a single album
-const loadAlbumCover = async (albumId: number, coverFileId: number | null) => {
+const loadAlbumCover = async (
+  albumId: number,
+  coverFileId: number | null,
+  bustCache = false,
+) => {
+  delete albumCoverErrors.value[albumId];
   if (coverFileId) {
-    let url = getThumbUrl(coverFileId, false, config.settings.thumbnailSize);
+    let url = getThumbUrl(coverFileId, bustCache, config.settings.thumbnailSize);
     if (isWin && !url.startsWith('data:')) {
       const inflight = getThumbnailDataUrlInflight(coverFileId, config.settings.thumbnailSize);
       const dataUrl = await (inflight || setThumbnailDataUrlInflight(
@@ -366,7 +463,10 @@ const loadAlbumCover = async (albumId: number, coverFileId: number | null) => {
       url = dataUrl || url;
     }
     if (url) {
-      albumCovers.value[albumId] = url;
+      albumCovers.value = {
+        ...albumCovers.value,
+        [albumId]: url,
+      };
     }
   } else {
     delete albumCovers.value[albumId];
@@ -380,8 +480,7 @@ const loadAlbumCovers = async () => {
 };
 
 onMounted( async () => {
-  unlistenKeydown = await listen('global-keydown', handleKeyDown);
-
+  document.addEventListener('pointerdown', handleReorderOutsidePointerDown, true);
   if (albums.value.length === 0) {
     albums.value = await getAllAlbums();
     await loadAlbumCovers();
@@ -395,7 +494,8 @@ onMounted( async () => {
 
   // listen for album-cover-changed event
   unlistenAlbumCoverChanged = await listen('album-cover-changed', async (event: any) => {
-    const { albumId: eventAlbumId, fileId } = event.payload;
+    const eventAlbumId = Number(event.payload?.albumId || 0);
+    const fileId = Number(event.payload?.fileId || 0);
     const album = getAlbumById(eventAlbumId);
     if (album) {
       if (fileId) {
@@ -411,11 +511,11 @@ onMounted( async () => {
       }
       
       // Update the cover in albumCovers
-      await loadAlbumCover(eventAlbumId, album.cover_file_id ?? null);
+      await loadAlbumCover(eventAlbumId, album.cover_file_id ?? null, true);
     }
   });
 
-  // listen for expand-album-folder event (from Content.vue "Find Album Folder" action)
+  // Keep the sidebar folder selection in sync with content navigation.
   unlistenExpandAlbumFolder = await listen('expand-album-folder', async (event: any) => {
     const { albumId, folderPath } = event.payload;
     if (albumId && folderPath) {
@@ -459,6 +559,11 @@ onMounted( async () => {
 
   unlistenAlbumsRefreshed = await listen('albums-refreshed', async (event: any) => {
     const refreshedAlbums = Array.isArray(event.payload?.albums) ? event.payload.albums : [];
+    const refreshFolders = event.payload?.refreshFolders !== false;
+    const selectedAlbumId = selection.albumId.value;
+    const selectedFolderPath = selection.folderPath.value;
+    const shouldRestoreSelectedFolder = !selection.selected.value && !!selectedFolderPath;
+
     for (const updatedAlbum of refreshedAlbums) {
       const albumId = Number(updatedAlbum?.id || 0);
       if (albumId <= 0) continue;
@@ -469,8 +574,19 @@ onMounted( async () => {
       album.indexed = updatedAlbum.indexed;
       album.last_scan_time = updatedAlbum.last_scan_time;
       album.last_scan_count = updatedAlbum.last_scan_count;
+      const previousCoverFileId = Number(album.cover_file_id || 0);
       if (updatedAlbum.cover_file_id !== undefined) {
         album.cover_file_id = updatedAlbum.cover_file_id;
+      }
+      if (Number(album.cover_file_id || 0) !== previousCoverFileId) {
+        await loadAlbumCover(albumId, album.cover_file_id ?? null, true);
+      }
+      if (refreshFolders && album.is_expanded) {
+        if (shouldRestoreSelectedFolder && albumId === selectedAlbumId) {
+          await clickFinalSubFolder(albumId, selectedFolderPath);
+        } else {
+          await expandAlbum(album, true);
+        }
       }
     }
   });
@@ -494,16 +610,21 @@ watch(() => config.settings.folderSort, async () => {
 });
 
 onBeforeUnmount(() => {
-  if (unlistenKeydown) unlistenKeydown();
+  document.removeEventListener('pointerdown', handleReorderOutsidePointerDown, true);
   if (unlistenAlbumCoverChanged) unlistenAlbumCoverChanged();
   if (unlistenExpandAlbumFolder) unlistenExpandAlbumFolder();
   if (unlistenIndexProgress) unlistenIndexProgress();
   if (unlistenIndexFinished) unlistenIndexFinished();
   if (unlistenAlbumsRefreshed) unlistenAlbumsRefreshed();
+  uiStore.removeInputHandler('AlbumListDrag');
 });
 
 /// Add a new album
 const clickNewAlbum = async () => {
+  const folderPath = await openFolderDialog(t('album.edit.select_folder'));
+  if (!folderPath) return;
+  newAlbumFolderPath.value = folderPath;
+  editingAlbumId.value = 0;
   showAlbumEdit.value = true;
   isNewAlbum.value = true;
 };
@@ -546,7 +667,10 @@ const clickEditAlbum = async (folderPathParam: string, newName: string, newDescr
       albums.value.push(newAlbum);
       clickAlbum(newAlbum);
       showAlbumEdit.value = false;
-      
+
+      tauriEmit('albums-refreshed');
+      tauriEmit('library-total-refreshed');
+
       // add the new album to the index queue
       libConfig.index.status = 1;
       removePausedAlbum(newAlbum.id);
@@ -554,10 +678,11 @@ const clickEditAlbum = async (folderPathParam: string, newName: string, newDescr
     }
   } else {
     // Edit existing album
-    const result = await editAlbum(selection.albumId.value, newName, newDescription);
-    if(result && selectedAlbum.value) {
-      selectedAlbum.value.name = newName;
-      selectedAlbum.value.description = newDescription;
+    const result = await editAlbum(editingAlbumId.value, newName, newDescription);
+    if(result && editingAlbum.value) {
+      editingAlbum.value.name = newName;
+      editingAlbum.value.description = newDescription;
+      tauriEmit('album-updated', { albumId: editingAlbumId.value, name: newName, description: newDescription });
       showAlbumEdit.value = false;
     }
   }
@@ -578,6 +703,8 @@ const toggleIndexAlbum = async (albumId: number) => {
   if (state === 'scanning' || state === 'queued') {
     await clickCancelIndexAlbum(albumId);
   } else {
+    const album = getAlbumById(albumId);
+    if (!album || !(await refreshAlbumAccess(album))) return;
     await clickIndexAlbum(albumId);
   }
 }
@@ -639,7 +766,13 @@ const clickRemoveAlbum = async () => {
 
     // remove the album from the list
     albums.value = albums.value.filter(album => album.id !== albumId);
+    if (reorderingAlbumId.value === albumId) {
+      reorderingAlbumId.value = null;
+    }
     showAlbumEdit.value = false; // Close the edit dialog if it's open
+
+    tauriEmit('albums-refreshed');
+    tauriEmit('library-total-refreshed');
 
     selection.resetSelection();
   }
@@ -647,51 +780,60 @@ const clickRemoveAlbum = async () => {
 
 /// click a album to select it
 const clickAlbum = async (album: Album) => {
-  if(isEditList.value) {
-    return;
-  }
-
   if (isMainPane.value) {
     uiStore.setActivePane('left-sidebar');
   }
 
   // In MoveTo dialog, disable album selection and toggle expansion instead
   if (!isMainPane.value) {
-    expandAlbum(album);
+    await expandAlbum(album);
     return;
   }
 
   selection.selectAlbum(album);
+  requestAnimationFrame(() => {
+    setTimeout(async () => {
+      const isAccessible = await refreshAlbumAccess(album);
+      if (isAccessible && !album.children) {
+        const subFolders = await fetchFolder(album.path, false, config.settings.folderSort);
+        if (subFolders) {
+          album.children = [subFolders];
+          // A leaf album still has a useful root-folder node for folder
+          // actions and context. Show it when the album is selected.
+          if (!subFolders.has_subfolders) {
+            album.is_expanded = true;
+          }
+        }
+      }
+    }, 0);
+  });
 };
 
 /// dlb click album to select it and expand/collapse its folders
 const dlbClickAlbum = async (album: any) => {
-  clickAlbum(album);
-  expandAlbum(album);
+  await clickAlbum(album);
+  await expandAlbum(album);
 };
 
 /// click album icon to expand or collapse next level folders
 const expandAlbum = async (album: any, forceRefresh = false) => {
   const willExpand = forceRefresh ? true : !album.is_expanded;
-  
-  // Collapse all other albums when expanding one (accordion behavior)
-  // Only enabled in Main Pane to keep UI clean. In MoveTo dialog, allow multiple expansions.
-  if (willExpand && isMainPane.value) {
-    albums.value.forEach(a => {
-      if (a.id !== album.id) {
-        a.is_expanded = false;
-      }
-    });
-  }
-  
+
   album.is_expanded = willExpand; 
   
+  if (album.is_expanded && !(await refreshAlbumAccess(album))) {
+    return;
+  }
   if (album.is_expanded && (!album.children || forceRefresh)) {
     const subFolders = await fetchFolder(album.path, false, config.settings.folderSort);
     if(subFolders) {
       album.children = [subFolders];
     }
   }
+};
+
+const toggleAlbumExpansion = async (album: Album) => {
+  await expandAlbum(album);
 };
 
 /// click folder to select
@@ -730,7 +872,7 @@ const focusExpandedFolderTree = async (albumId: number) => {
 };
 
 const shouldHandleAlbumListNavigation = (key: string) => {
-  if (uiStore.inputStack.length > 0 || isEditList.value || isDragging.value) return false;
+  if (uiStore.inputStack.length > 0 || isDragging.value) return false;
   if (isMainPane.value && uiStore.activePane !== 'left-sidebar') return false;
   if (document.activeElement !== albumListRootRef.value) return false;
 
@@ -793,6 +935,23 @@ const clickFinalSubFolder = async (albumIdVal: number, folderPathVal: string) =>
     return;
   }
 
+  // If navigating to the album root path, select the root folder directly.
+  // expandFinalFolder returns null for the root path (empty relative path),
+  // so we handle it here instead.
+  if (folderPathVal === album.path) {
+    if (selection.selected.value) {
+      clickAlbum(album);
+      return;
+    }
+    await expandAlbum(album, true);
+    const rootFolder = album.children?.[0];
+    if (rootFolder) {
+      await clickFolder(album.id, rootFolder);
+      scrollToFolder(rootFolder.id);
+    }
+    return;
+  }
+
   if (selection.selected.value) {  // album is selected
     clickAlbum(album);
   } else {    // album's sub-folder is selected
@@ -813,44 +972,38 @@ const clickFinalSubFolder = async (albumIdVal: number, folderPathVal: string) =>
 /// drag albums to change their display order
 const onDragStart = () => {
   isDragging.value = true;
+  uiStore.removeInputHandler('AlbumListDrag');
+  uiStore.pushInputHandler('AlbumListDrag');
 };
 
 const onDragEnd = async () => {
   isDragging.value = false;
-  
-  // update the display order of albums
-  for (let i = 0; i < albums.value.length; i++) {
-    await setDisplayOrder(albums.value[i].id, i);
+  setTimeout(() => uiStore.removeInputHandler('AlbumListDrag'), 0);
+  try {
+    await reorderAlbums(albums.value.map((album, displayOrder) => ({ id: album.id, displayOrder })));
+  } catch (error) {
+    console.error('Failed to reorder albums:', error);
+    const restoredAlbums = await getAllAlbums();
+    if (Array.isArray(restoredAlbums)) {
+      albums.value = restoredAlbums;
+      await loadAlbumCovers();
+    }
   }
 }
 
-const clickCloseEditList = () => {
-  isEditList.value = false;
-  uiStore.removeInputHandler('AlbumList-edit');
-  emit('editDataChanged', false);
-};
-
-const clickReorder = () => {
-  isEditList.value = true;
-  uiStore.pushInputHandler('AlbumList-edit');
-  emit('editDataChanged', true);
-};
-
-const handleKeyDown = (event: { payload: { key: string } }) => {
-  if (isEditList.value && event.payload.key === 'Escape') {
-    clickCloseEditList();
-  }
-};
+function handleReorderOutsidePointerDown(event: PointerEvent) {
+  if (event.button !== 0 || reorderingAlbumId.value === null || isDragging.value) return;
+  if (event.target instanceof Element && event.target.closest('[data-reordering-album="true"]')) return;
+  reorderingAlbumId.value = null;
+}
 
 // Expose methods
-defineExpose({ 
+defineExpose({
   albums,
-  isEditList,
   clickNewAlbum,
+  openAlbumEdit,
   refreshAlbums,
   clickFinalSubFolder,
-  clickReorder,
-  clickCloseEditList,
 });
 
 </script>

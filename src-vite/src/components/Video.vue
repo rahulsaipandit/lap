@@ -1,5 +1,12 @@
 <template>
-  <div ref="videoContainer" class="relative w-full h-full overflow-hidden cursor-pointer" style="touch-action: none;" @wheel.prevent="handleWheel">
+  <div
+    ref="videoContainer"
+    class="relative w-full h-full overflow-hidden cursor-pointer"
+    :class="{ 'pointer-events-none': !isActive }"
+    style="touch-action: none;"
+    @wheel.prevent="handleWheel"
+    @contextmenu="handleContextMenu"
+  >
     <TransitionGroup :name="transitionName" @after-leave="handleTransitionEnd">
       <div
         v-for="index in [0, 1]"
@@ -8,24 +15,42 @@
         class="slide-wrapper absolute inset-0 w-full h-full pointer-events-none overflow-hidden"
       >
         <div class="w-full h-full pointer-events-auto overflow-hidden">
-          <video :ref="(el) => { if (el) videoElements[index] = el as HTMLVideoElement }" class="video-js"></video>
+          <video
+            :key="`video-el-${index}-${playerEpochs[index]}`"
+            :ref="(el) => { if (el) videoElements[index] = el as HTMLVideoElement }"
+            class="video-js"
+          ></video>
         </div>
       </div>
     </TransitionGroup>
 
-    <div v-if="!hasError && !isPlaying && !isLoading" class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+    <div v-if="showPlayOverlay && !hasError && !isPlaying && !isLoading" class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
       <div
-        class="w-16 h-16 rounded-full bg-base-100/50 flex items-center justify-center hover:bg-base-100 hover:scale-110 transition-all duration-300 ease-out group pointer-events-auto cursor-pointer"
+        class="w-16 h-16 rounded-full bg-base-100/70 flex items-center justify-center hover:scale-110 transition-all duration-300 ease-out group pointer-events-auto cursor-pointer"
         @click.stop="clickPlayVideo"
       >
-        <component :is="isReplaying ? IconVideoReplay : IconVideoPlay" class="w-8 h-8 text-base-content/50 transition-colors duration-300 group-hover:text-base-content/70" />
+        <component :is="isReplaying ? IconVideoReplay : IconVideoPlay" class="w-8 h-8" />
       </div>
     </div>
 
-    <div v-if="showSpinner" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20 bg-base-200/20">
-      <span class="loading loading-spinner loading-lg text-primary opacity-80"></span>
-      <div class="mt-4 text-sm font-medium text-base-content/80 drop-shadow-md">{{ $t('video.loading') }}</div>
-    </div>
+    <Transition name="loading-overlay">
+      <div v-if="showSpinner" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20 bg-base-200/20 px-6 text-center">
+        <span class="loading loading-spinner loading-lg text-primary opacity-80"></span>
+        <div class="mt-4 text-sm font-medium text-base-content/70 drop-shadow-md">{{ loadingLabel }}</div>
+        <div v-if="isCompatibilityProcessing" class="mt-2 flex max-w-md flex-col items-center text-xs text-base-content/60">
+          <div>
+            {{ $t('video.errors.external_player_recommended') }}
+          </div>
+          <button
+            v-if="canOpenExternalApp"
+            class="btn btn-primary btn-sm mt-4 pointer-events-auto"
+            @click.stop="openInExternalApp"
+          >
+            {{ externalOpenLabel }}
+          </button>
+        </div>
+      </div>
+    </Transition>
 
     <div v-if="hasError && !isLoading" class="absolute inset-0 flex flex-col items-center justify-center z-10 px-6 text-center overflow-hidden bg-black/50">
       
@@ -47,10 +72,15 @@ import { config } from '@/common/config';
 import { IconVideoSlash, IconVideoPlay, IconVideoReplay } from '@/common/icons';
 import videojs from 'video.js/core';
 import 'video.js/dist/video-js.min.css';
-import { getAssetSrc, isLinux } from '@/common/utils';
+import { getAssetSrc, isLinux, isMac, isWin } from '@/common/utils';
 import { openFileWithApp } from '@/common/api';
 import zhCN from 'video.js/dist/lang/zh-CN.json';
-import { prepareVideo, cancelVideoPrepare } from '@/common/video';
+import {
+  prepareVideo,
+  cancelVideoPrepare,
+  isWebViewVideoPlaybackDisabled,
+  type VideoPrepareMode,
+} from '@/common/video';
 
 videojs.addLanguage('zh-CN', zhCN);
 
@@ -59,28 +89,42 @@ const props = defineProps({
   rotate: { type: Number, default: 0 },
   isZoomFit: { type: Boolean, default: false },
   isSlideShow: { type: Boolean, default: false },
+  isActive: { type: Boolean, default: true },
+  playOnActivate: { type: Boolean, default: false },
+  viewportState: { type: Object, default: null },
+  showControls: { type: Boolean, default: true },
+  showPlayOverlay: { type: Boolean, default: true },
 });
 
-const emit = defineEmits(['message-from-video-viewer', 'slideshow-next', 'scale', 'viewport-change']);
+const emit = defineEmits(['message-from-video-viewer', 'slideshow-next', 'scale', 'viewport-change', 'context-menu']);
 const { t: $t } = useI18n();
 
 const videoContainer = ref<HTMLDivElement | null>(null);
 const videoElements = ref<HTMLVideoElement[]>([]);
 const players = ref<(ReturnType<typeof videojs> | null)[]>([null, null]);
+const playerEpochs = ref([0, 0]);
 const videoJsLang = computed(() => (config.settings.language === 'zh' ? 'zh-CN' : config.settings.language));
 
 const hasError = ref(false);
 const errorMessage = ref('');
 const isLoading = ref(false);
 const showSpinner = ref(false);
+const isCompatibilityProcessing = ref(false);
 const isPlaying = ref(false);
 const isReplaying = ref(false);
 const isFit = ref(false);
 const scale = ref(1);
+const viewportOffset = ref({ x: 0, y: 0 });
 const rotate = ref(0);
 const noTransition = ref(false);
 const activeVideo = ref(0);
+const playerInstanceId = globalThis.crypto?.randomUUID?.()
+  ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const getPlayerId = (index: number) => `${playerInstanceId}-${index}`;
 let currentLoadingId = 0;
+let nextBackendRequestId = 0;
+const activeBackendRequestIds: Array<number | null> = [null, null];
+const loadAttemptCleanups: Array<(() => void) | null> = [null, null];
 
 const externalVideoAppPath = computed(() => String(config.settings?.externalVideoAppPath || '').trim());
 const externalVideoAppName = computed(() => String(config.settings?.externalVideoAppName || '').trim());
@@ -91,10 +135,20 @@ const externalOpenLabel = computed(() => {
   }
   return $t('video.errors.open_in_external_app') || 'Open in external player';
 });
+const loadingLabel = computed(() => (
+  isCompatibilityProcessing.value ? $t('video.loading_compatible') : $t('video.loading')
+));
 
 async function openInExternalApp() {
   if (!props.filePath || !externalVideoAppPath.value) return;
   await openFileWithApp(props.filePath, externalVideoAppPath.value);
+}
+
+function handleContextMenu(event: MouseEvent) {
+  if (!(event.target instanceof HTMLVideoElement)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit('context-menu', event);
 }
 
 let isTouchpadDevice = false;
@@ -138,7 +192,7 @@ const playerOptions = computed(() => ({
   height: '100%',
   autoplay: false,
   muted: config.video.muted,
-  controls: true,
+  controls: props.showControls,
   preload: 'auto',
   language: videoJsLang.value,
   playbackRates: [0.5, 1, 1.25, 1.5, 2],
@@ -154,6 +208,66 @@ const playerOptions = computed(() => ({
 }));
 
 const getActivePlayer = () => players.value[activeVideo.value];
+const PLAYBACK_DEADLINE_MS = 30_000;
+const DIRECT_PLAYBACK_TIMEOUT_MS = 8000;
+const LOADING_OVERLAY_DELAY_MS = 500;
+let playbackDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+const directPlaybackTypes: Record<string, string> = {
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+};
+
+function getDirectPlaybackType(filePath: string): string | null {
+  const extension = filePath.split('.').pop()?.toLowerCase() || '';
+  const supportedExtensions = isMac
+    ? ['mp4', 'm4v', 'mov', 'webm']
+    : (isWin || isLinux ? ['mp4', 'm4v', 'webm'] : []);
+  return supportedExtensions.includes(extension) ? directPlaybackTypes[extension] : null;
+}
+
+function shouldBypassDirectPlayback(filePath: string): boolean {
+  const extension = filePath.split('.').pop()?.toLowerCase() || '';
+  return extension === 'mkv';
+}
+
+function startCompatibilityProcessing(loadId: number) {
+  if (loadId !== currentLoadingId) return;
+  isCompatibilityProcessing.value = true;
+}
+
+function resetCompatibilityProcessing() {
+  isCompatibilityProcessing.value = false;
+}
+
+function clearLoadingOverlayTimer() {
+  if (!loadingOverlayTimer) return;
+  clearTimeout(loadingOverlayTimer);
+  loadingOverlayTimer = null;
+}
+
+function clearPlaybackDeadlineTimer() {
+  if (!playbackDeadlineTimer) return;
+  clearTimeout(playbackDeadlineTimer);
+  playbackDeadlineTimer = null;
+}
+
+function resetLoadingUi() {
+  clearLoadingOverlayTimer();
+  clearPlaybackDeadlineTimer();
+  isLoading.value = false;
+  showSpinner.value = false;
+  resetCompatibilityProcessing();
+}
+
+function getTransformContainer(player: ReturnType<typeof videojs> | null): HTMLElement | null {
+  const playerElement = player?.el();
+  // Native fullscreen is applied to the Video.js player, not the outer Vue
+  // container. Its dimensions are the only correct basis for fit-to-screen.
+  return player?.isFullscreen() && playerElement ? playerElement : videoContainer.value;
+}
 
 const updateTransform = (options: boolean | { resetRotation?: boolean, recalcScale?: boolean } = false) => {
   const resetRotation = typeof options === 'boolean' ? options : (options.resetRotation ?? false);
@@ -169,8 +283,9 @@ const updateTransform = (options: boolean | { resetRotation?: boolean, recalcSca
 
   const videoWidth = player?.videoWidth();
   const videoHeight = player?.videoHeight();
-  const containerWidth = videoContainer.value?.clientWidth;
-  const containerHeight = videoContainer.value?.clientHeight;
+  const transformContainer = getTransformContainer(player);
+  const containerWidth = transformContainer?.clientWidth;
+  const containerHeight = transformContainer?.clientHeight;
   const isRotated = rotate.value % 180 !== 0;
 
   // IMPORTANT: Set dimensions to natural size to prevent clipping inside the tag
@@ -199,11 +314,26 @@ const updateTransform = (options: boolean | { resetRotation?: boolean, recalcSca
     }
   }
 
-  video.style.transform = `translate(-50%, -50%) rotate(${rotate.value}deg) scale(${scale.value})`;
+  video.style.transform = `translate(calc(-50% + ${viewportOffset.value.x}px), calc(-50% + ${viewportOffset.value.y}px)) rotate(${rotate.value}deg) scale(${scale.value})`;
 
-  emit('scale', { scale: scale.value, minScale: 0.1, maxScale: 10 });
+  emit('scale', { scale: scale.value, displayScale: scale.value, minScale: 0.1, maxScale: 10 });
   emit('viewport-change', { scale: scale.value, isZoomFit: isFit.value, fileType: 2 });
 };
+
+function refreshFullscreenLayout(index: number) {
+  if (activeVideo.value !== index) return;
+
+  // Video.js promotes its own player element to fullscreen, leaving the outer
+  // Vue container at its original size. Wait for the browser to apply the new
+  // fullscreen bounds before recalculating our custom video transform.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (activeVideo.value === index) {
+        updateTransform({ recalcScale: true });
+      }
+    });
+  });
+}
 
 const setupPlayer = (index: number) => {
   const el = videoElements.value[index];
@@ -214,6 +344,9 @@ const setupPlayer = (index: number) => {
     player.volume(config.video.volume);
     player.muted(config.video.muted);
 
+    player.on('fullscreenchange', () => refreshFullscreenLayout(index));
+    player.on('playerresize', () => refreshFullscreenLayout(index));
+
     player.on('error', () => {
       if (activeVideo.value === index) {
         handlePlayerError(player);
@@ -222,6 +355,10 @@ const setupPlayer = (index: number) => {
 
     player.on('play', () => {
       if (activeVideo.value === index) {
+        if (!props.isActive) {
+          player.pause();
+          return;
+        }
         isPlaying.value = true;
         isReplaying.value = false;
       }
@@ -236,6 +373,10 @@ const setupPlayer = (index: number) => {
 
     player.on('ended', () => {
       if (activeVideo.value === index) {
+        if (!props.isSlideShow && config.settings.loopVideo) {
+          player.play().catch(() => {});
+          return;
+        }
         isPlaying.value = false;
         isReplaying.value = true;
         if (props.isSlideShow) {
@@ -245,7 +386,7 @@ const setupPlayer = (index: number) => {
     });
 
     player.on('volumechange', () => {
-      if (activeVideo.value === index && !isLoading.value) {
+      if (activeVideo.value === index && !isLoading.value && props.isActive) {
         config.setVideoVolume(player.volume());
         config.setVideoMuted(player.muted());
       }
@@ -253,18 +394,56 @@ const setupPlayer = (index: number) => {
   }
 };
 
-const clickPlayVideo = () => getActivePlayer()?.play();
+async function recreatePlayer(index: number) {
+  loadAttemptCleanups[index]?.();
+  loadAttemptCleanups[index] = null;
+
+  const player = players.value[index];
+  if (player) {
+    player.off();
+    try {
+      player.dispose();
+    } catch (error) {
+      console.warn('[Video] Failed to dispose player:', error);
+    }
+    players.value[index] = null;
+  }
+
+  playerEpochs.value[index] += 1;
+  await nextTick();
+  setupPlayer(index);
+  return players.value[index];
+}
+
+const clickPlayVideo = () => {
+  if (!props.isActive) return;
+  getActivePlayer()?.play();
+};
 
 const loadVideo = async (filePath: string) => {
   if (!filePath) return;
+  clearLoadingOverlayTimer();
+  clearPlaybackDeadlineTimer();
   const currentLoadId = ++currentLoadingId;
   
   // IMMEDIATELY set loading state to block volumechange feedbacks from old players
   hasError.value = false;
   isPlaying.value = false;
   isReplaying.value = false;
+  resetLoadingUi();
   isLoading.value = true;
-  showSpinner.value = false;
+
+  const nextUpIndex = activeVideo.value ^ 1;
+  const cancelPromises = activeBackendRequestIds.map((requestId, index) => {
+    if (requestId === null) return Promise.resolve();
+    activeBackendRequestIds[index] = null;
+    return cancelVideoPrepare(getPlayerId(index), requestId).catch((error) => {
+      console.warn('[Video] Failed to cancel previous prepare task:', error);
+    });
+  });
+  await Promise.allSettled(cancelPromises);
+
+  if (currentLoadId !== currentLoadingId) return;
 
   const currentPlayer = getActivePlayer();
   if (currentPlayer) {
@@ -272,26 +451,58 @@ const loadVideo = async (filePath: string) => {
     currentPlayer.reset();
   }
 
-  const nextUpIndex = activeVideo.value ^ 1;
-  const player = players.value[nextUpIndex];
-  if (!player) return;
+  // MPEG program streams can wedge the macOS WebKit media process. Never
+  // assign these files to a WebView video element or start compatibility
+  // processing; fail before creating a backend/player request.
+  if (isWebViewVideoPlaybackDisabled(filePath)) {
+    resetLoadingUi();
+    hasError.value = true;
+    errorMessage.value = getPrepareErrorMessage('video_requires_external_player');
+    return;
+  }
+
+  const playerId = getPlayerId(nextUpIndex);
+  const backendRequestId = ++nextBackendRequestId;
+  activeBackendRequestIds[nextUpIndex] = backendRequestId;
+
+  const player = await recreatePlayer(nextUpIndex);
+  if (!player || currentLoadId !== currentLoadingId) return;
+
+  playbackDeadlineTimer = setTimeout(() => {
+    if (currentLoadId !== currentLoadingId) return;
+    currentLoadingId++;
+    loadAttemptCleanups[nextUpIndex]?.();
+    loadAttemptCleanups[nextUpIndex] = null;
+    player.pause();
+    player.reset();
+    activeBackendRequestIds[nextUpIndex] = null;
+    void cancelVideoPrepare(playerId, backendRequestId);
+    resetLoadingUi();
+    hasError.value = true;
+    errorMessage.value = getFallbackErrorMessage();
+  }, PLAYBACK_DEADLINE_MS);
+
+  loadAttemptCleanups[nextUpIndex]?.();
+  if (currentLoadId !== currentLoadingId) return;
 
   // Sync audio state IMMEDIATELY so the UI reflects the user settings during loading
   player.muted(config.video.muted);
   player.volume(config.video.volume);
   
-  setTimeout(() => {
+  loadingOverlayTimer = setTimeout(() => {
+    loadingOverlayTimer = null;
     if (currentLoadId === currentLoadingId && !hasError.value && activeVideo.value !== nextUpIndex) {
       showSpinner.value = true;
     }
-  }, 1000);
+  }, LOADING_OVERLAY_DELAY_MS);
 
   const handleSuccessfulLoad = () => {
     if (currentLoadId !== currentLoadingId) return;
+    clearPlaybackDeadlineTimer();
     activeVideo.value = nextUpIndex;
+    activeBackendRequestIds[nextUpIndex] = null;
     hasError.value = false;
-    isLoading.value = false;
-    showSpinner.value = false;
+    resetLoadingUi();
 
     // Pause the other player
     const prevPlayer = players.value[nextUpIndex ^ 1];
@@ -303,13 +514,16 @@ const loadVideo = async (filePath: string) => {
     noTransition.value = true;
     isFit.value = props.isZoomFit;
     rotate.value = props.rotate;
-    updateTransform({ resetRotation: true, recalcScale: true });
+    viewportOffset.value = { x: 0, y: 0 };
+    if (!applyViewportState(props.viewportState)) {
+      updateTransform({ resetRotation: true, recalcScale: true });
+    }
 
     setTimeout(() => {
       noTransition.value = false;
     }, 100);
 
-    if (config.settings.autoPlayVideo || props.isSlideShow) {
+    if (props.isActive && (config.settings.autoPlayVideo || props.isSlideShow)) {
       // Restore user audio settings right before playback starts
       player.volume(config.video.volume);
       player.muted(config.video.muted);
@@ -320,9 +534,10 @@ const loadVideo = async (filePath: string) => {
     }
   };
 
-  const loadPrepared = async (force: string | null = null) => {
+  const loadPrepared = async (force: VideoPrepareMode = null) => {
+    startCompatibilityProcessing(currentLoadId);
     try {
-      const result = await prepareVideo(filePath, String(nextUpIndex), force);
+      const result = await prepareVideo(filePath, playerId, force, backendRequestId);
       if (currentLoadId !== currentLoadingId) return;
       const playbackSrc = isLinux ? result.url : getAssetSrc(result.url);
 
@@ -332,45 +547,131 @@ const loadVideo = async (filePath: string) => {
         type: result.action === 'remux' ? 'video/mp4' : (result.url.endsWith('.webm') ? 'video/webm' : 'video/mp4'),
       });
 
-      const onLoaded = () => {
+      let preparedAttemptSettled = false;
+      const cleanupLoadAttempt = () => {
+        player.off('loadeddata', onLoaded);
         player.off('error', onError);
+        if (loadAttemptCleanups[nextUpIndex] === cleanupLoadAttempt) {
+          loadAttemptCleanups[nextUpIndex] = null;
+        }
+      };
+
+      const onLoaded = () => {
+        if (preparedAttemptSettled) return;
+        preparedAttemptSettled = true;
+        cleanupLoadAttempt();
         handleSuccessfulLoad();
       };
 
       const onError = () => {
+        if (preparedAttemptSettled) return;
+        preparedAttemptSettled = true;
+        cleanupLoadAttempt();
         if (currentLoadId !== currentLoadingId) return;
-        player.off('loadeddata', onLoaded);
-        player.off('error', onError);
-
         const err = player.error();
-        if (err && err.code === 1) {
+
+        if (force !== 'process' && err?.code !== 1) {
+          console.warn('[Video] Compatible output failed playback, forcing transcode...');
+          loadPrepared('process');
           return;
         }
 
-        if (!force) {
-          console.warn('[Video] Initial playback failed, retrying with processed fallback...');
-          loadPrepared('fallback');
-          return;
+        resetLoadingUi();
+        if (err?.code === 1) {
+          hasError.value = true;
+          errorMessage.value = getFallbackErrorMessage();
+        } else {
+          handlePlayerError(player);
         }
-
-        isLoading.value = false;
-        showSpinner.value = false;
-        handlePlayerError(player);
       };
 
       player.one('loadeddata', onLoaded);
       player.one('error', onError);
+      loadAttemptCleanups[nextUpIndex]?.();
+      loadAttemptCleanups[nextUpIndex] = cleanupLoadAttempt;
       player.load();
     } catch (e) {
       if (currentLoadId !== currentLoadingId) return;
-      isLoading.value = false;
-      showSpinner.value = false;
+      activeBackendRequestIds[nextUpIndex] = null;
+      resetLoadingUi();
       console.error('[Video] Prepare failed:', e);
       hasError.value = true;
       errorMessage.value = getPrepareErrorMessage(e);
     }
   };
-  loadPrepared();
+
+  const loadDirect = (type: string | null) => {
+    resetCompatibilityProcessing();
+    player.reset();
+    const source = type
+      ? { src: getAssetSrc(filePath), type }
+      : { src: getAssetSrc(filePath) };
+    player.src(source);
+
+    let directLoadTimer: ReturnType<typeof setTimeout> | null = null;
+    let directAttemptSettled = false;
+    const cleanupDirectAttempt = () => {
+      if (directLoadTimer) {
+        clearTimeout(directLoadTimer);
+        directLoadTimer = null;
+      }
+      player.off('loadeddata', onLoaded);
+      player.off('error', onError);
+      if (loadAttemptCleanups[nextUpIndex] === cleanupDirectAttempt) {
+        loadAttemptCleanups[nextUpIndex] = null;
+      }
+    };
+
+    const fallbackToPrepared = () => {
+      if (directAttemptSettled) return;
+      directAttemptSettled = true;
+      cleanupDirectAttempt();
+      if (currentLoadId !== currentLoadingId) return;
+      player.reset();
+      console.warn('[Video] Direct playback failed, preparing a compatible source...');
+      loadPrepared('compatible');
+    };
+
+    const onLoaded = () => {
+      if (directAttemptSettled) return;
+      if (!player.videoWidth() || !player.videoHeight()) {
+        fallbackToPrepared();
+        return;
+      }
+      directAttemptSettled = true;
+      cleanupDirectAttempt();
+      handleSuccessfulLoad();
+    };
+
+    const onError = () => {
+      if (directAttemptSettled) return;
+      if (currentLoadId !== currentLoadingId) {
+        directAttemptSettled = true;
+        cleanupDirectAttempt();
+        return;
+      }
+
+      fallbackToPrepared();
+    };
+
+    player.one('loadeddata', onLoaded);
+    player.one('error', onError);
+    loadAttemptCleanups[nextUpIndex]?.();
+    loadAttemptCleanups[nextUpIndex] = cleanupDirectAttempt;
+    directLoadTimer = setTimeout(fallbackToPrepared, DIRECT_PLAYBACK_TIMEOUT_MS);
+    player.load();
+  };
+
+  // Matroska files can leave WebView media pipelines pending without either
+  // loadeddata or error. Start bounded compatibility processing immediately
+  // instead of spending part of the deadline here.
+  if (shouldBypassDirectPlayback(filePath)) {
+    loadPrepared('compatible');
+  } else {
+    // Try the actual WebView first for other containers. canPlayType() is only a
+    // hint, while a real load also covers platform codec packs and WebView support.
+    loadDirect(getDirectPlaybackType(filePath));
+  }
 };
 
 function getFallbackErrorMessage() {
@@ -386,7 +687,9 @@ function getFallbackErrorMessage() {
 
 function getPrepareErrorMessage(error: unknown) {
   if (String(error).includes('video_requires_external_player')) {
-    const reason = $t('video.errors.external_player_recommended');
+    const reason = isWebViewVideoPlaybackDisabled(props.filePath || '')
+      ? $t('video.errors.unsafe_webview')
+      : $t('video.errors.external_player_recommended');
     if (canOpenExternalApp.value && externalVideoAppName.value) {
       return `${reason}\n${$t('video.errors.use_external_with_app', { app: externalVideoAppName.value })}`;
     }
@@ -507,15 +810,14 @@ function applyZoomFromWheel(event: WheelEvent) {
   updateTransform();
 }
 
-onMounted(() => {
-  nextTick(() => {
-    setupPlayer(0);
-    setupPlayer(1);
-    if (props.filePath) {
-      activeVideo.value = 0;
-      loadVideo(props.filePath);
-    }
-  });
+onMounted(async () => {
+  await nextTick();
+  setupPlayer(0);
+  setupPlayer(1);
+  if (props.filePath) {
+    activeVideo.value = 0;
+    loadVideo(props.filePath);
+  }
 
   if (videoContainer.value) {
     resizeObserver = new ResizeObserver(() => {
@@ -534,6 +836,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  currentLoadingId++;
+  resetLoadingUi();
   resizeObserver?.disconnect();
   if (videoContainer.value) {
     const el = videoContainer.value as HTMLElement;
@@ -552,9 +856,13 @@ onBeforeUnmount(() => {
       }, 0);
     }
   });
+  loadAttemptCleanups.forEach((cleanup) => cleanup?.());
   players.value = [null, null];
-  cancelVideoPrepare('0');
-  cancelVideoPrepare('1');
+  activeBackendRequestIds.forEach((requestId, index) => {
+    if (requestId === null) return;
+    activeBackendRequestIds[index] = null;
+    void cancelVideoPrepare(getPlayerId(index), requestId);
+  });
 });
 
 watch(() => props.filePath, (newPath) => {
@@ -568,15 +876,37 @@ watch(() => props.rotate, (val) => {
 
 watch(() => props.isZoomFit, (val) => {
   isFit.value = val;
+  viewportOffset.value = { x: 0, y: 0 };
   updateTransform({ recalcScale: true });
 });
 
+watch(() => props.viewportState, (viewport) => {
+  if (viewport) {
+    void nextTick(() => applyViewportState(viewport, true));
+  }
+});
+
 watch(() => props.isSlideShow, (newVal) => {
-  if (newVal) {
+  if (newVal && props.isActive) {
     const player = getActivePlayer();
     if (player && !isPlaying.value) {
       player.play();
     }
+  }
+});
+
+watch(() => props.isActive, (isActive) => {
+  const player = getActivePlayer();
+  if (!player) return;
+  if (!isActive) {
+    player.pause();
+    player.muted(true);
+    return;
+  }
+  player.volume(config.video.volume);
+  player.muted(config.video.muted);
+  if (props.playOnActivate && !isPlaying.value) {
+    player.play().catch(() => {});
   }
 });
 
@@ -607,29 +937,77 @@ function getViewportState() {
   return { scale: scale.value, isZoomFit: isFit.value, fileType: 2 };
 }
 
-function applyViewportState(viewport: { scale?: number; isZoomFit?: boolean }, silent = false) {
-  if (!viewport) return;
+function applyViewportState(
+  viewport: {
+    scale?: number;
+    isZoomFit?: boolean;
+    normX?: number;
+    normY?: number;
+    sourceWidth?: number;
+    sourceHeight?: number;
+  },
+  silent = false,
+): boolean {
+  if (!viewport) return false;
+
+  const nextScale = Number(viewport.scale);
+  const hasScale = Number.isFinite(nextScale) && nextScale > 0;
+  const hasPosition = Number.isFinite(Number(viewport.normX)) || Number.isFinite(Number(viewport.normY));
+
   if (typeof viewport.isZoomFit === 'boolean') {
     isFit.value = viewport.isZoomFit;
-    if (viewport.isZoomFit) {
+    if (viewport.isZoomFit && !hasScale) {
+      viewportOffset.value = { x: 0, y: 0 };
       updateTransform({ recalcScale: true });
-      return;
+      return true;
     }
   }
 
-  if (typeof viewport.scale === 'number') {
-    scale.value = Math.max(0.1, Math.min(10, viewport.scale));
+  if (!hasScale) return false;
+
+  const player = getActivePlayer();
+  const videoWidth = player?.videoWidth();
+  const videoHeight = player?.videoHeight();
+  const transformContainer = getTransformContainer(player);
+  const containerWidth = transformContainer?.clientWidth;
+  const containerHeight = transformContainer?.clientHeight;
+  const sourceWidth = Number(viewport.sourceWidth);
+  const sourceHeight = Number(viewport.sourceHeight);
+  const sourceScale = sourceWidth > 0 && videoWidth
+    ? sourceWidth / videoWidth
+    : (sourceHeight > 0 && videoHeight ? sourceHeight / videoHeight : 1);
+
+  scale.value = Math.max(0.1, Math.min(10, nextScale * sourceScale));
+  if (typeof viewport.isZoomFit !== 'boolean') {
     isFit.value = false;
-    if (silent) {
-      noTransition.value = true;
-      updateTransform();
-      requestAnimationFrame(() => {
-        noTransition.value = false;
-      });
-      return;
-    }
+  }
+
+  if (hasPosition && videoWidth && videoHeight && containerWidth && containerHeight) {
+    const isRotated = rotate.value % 180 !== 0;
+    const width = (isRotated ? videoHeight : videoWidth) * scale.value;
+    const height = (isRotated ? videoWidth : videoHeight) * scale.value;
+    const normX = Math.min(Math.max(Number(viewport.normX ?? 0.5), 0), 1);
+    const normY = Math.min(Math.max(Number(viewport.normY ?? 0.5), 0), 1);
+    const localX = (normX - 0.5) * width;
+    const localY = (normY - 0.5) * height;
+    viewportOffset.value = {
+      x: width > containerWidth ? -localX : 0,
+      y: height > containerHeight ? -localY : 0,
+    };
+  } else {
+    viewportOffset.value = { x: 0, y: 0 };
+  }
+
+  if (silent) {
+    noTransition.value = true;
+    updateTransform();
+    requestAnimationFrame(() => {
+      noTransition.value = false;
+    });
+  } else {
     updateTransform();
   }
+  return true;
 }
 
 defineExpose({
@@ -773,4 +1151,13 @@ function handleWheel(event: WheelEvent) {
 }
 .slide-in-enter-from { transform: translateX(100%); }
 .slide-in-leave-to { transform: translateX(-100%); }
+.loading-overlay-enter-active,
+.loading-overlay-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.loading-overlay-enter-from,
+.loading-overlay-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
+}
 </style>

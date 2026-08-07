@@ -1,20 +1,13 @@
 <template>
   <div class="w-full h-full rounded-box bg-base-200 flex flex-col overflow-hidden">
     <!-- Header & Close -->
-    <div class="flex items-center w-full shrink-0 px-2 mb-2">
+    <div class="my-2 px-2 flex items-center w-full shrink-0">
       <div class="flex-1 pl-1">
-        <span class="text-[11px] font-bold uppercase tracking-[0.22em] text-base-content/35">
+        <span class="text-sm font-semibold text-primary/70">
           {{ $t('file_info.title') }}
         </span>
       </div>
-      <div class="mt-2 flex items-center gap-1">
-        <TButton
-          :icon="IconRefresh"
-          :tooltip="$t('menu.file.refresh_file_info')"
-          :buttonSize="'small'"
-          :disabled="!fileInfo"
-          @click.stop="emit('refreshFileInfo')"
-        />
+      <div class="flex items-center gap-1">
         <TButton
           :icon="IconClose"
           :tooltip="$t('msgbox.close')"
@@ -25,20 +18,40 @@
     </div>
 
     <!-- Info Content -->
-    <div v-if="fileInfo" class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden space-y-3 flex flex-col bg-base-200/50">
+    <div v-if="fileInfo" class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden flex flex-col">
 
       <!-- Preview Section -->
-      <div class="group/thumbnail rounded-box p-3 space-y-3 bg-base-300/30 border border-base-content/5 shadow-sm">
+      <div class="group/thumbnail border-t border-base-content/5 px-1 py-3 space-y-3">
         <div
-          class="flex items-center gap-2 cursor-pointer text-base-content/70 hover:text-base-content transition-all duration-200 ease-in-out"
+          class="flex items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content transition-all duration-200 ease-in-out"
           @click.stop="togglePreview"
         >
-          <component :is="fileInfo?.file_type === 2 ? IconVideo : IconPhoto" class="w-4 h-4" />
-          <span class="font-bold mr-auto uppercase text-xs tracking-wide">{{ $t('file_info.preview') }}</span>
-          <TButton
-            :icon="showPreviewPanel ? IconArrowDown : IconArrowUp"
-            :buttonSize="'small'"
+          <IconRight
+            class="w-3 h-3 transition-transform duration-200"
+            :class="{ 'rotate-90': showPreviewPanel }"
+            @click.stop="togglePreview"
           />
+          <span class="py-1 font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.preview') }}</span>
+          <div v-if="showPreviewPanel" role="tablist" class="tabs tabs-xs shrink-0">
+            <button
+              role="tab"
+              :class="['tab', !isHistogramPreview ? 'tab-active text-primary' : '']"
+              @click.stop="setPreviewMode('thumbnail')"
+            >{{ $t('file_info.thumbnail') }}</button>
+            <button
+              v-if="canShowHistogram"
+              role="tab"
+              :class="['tab', isHistogramPreview ? 'tab-active text-primary' : '']"
+              @click.stop="setPreviewMode('histogram')"
+            >{{ $t('file_info.histogram') }}</button>
+          </div>
+          <!-- <span
+            v-if="showPreviewPanel && previewTagLabel"
+            class="badge badge-xs flex items-center gap-0.5 bg-base-100/30 text-base-content/70"
+          >
+            <IconLivePhoto v-if="isLivePhoto && !isHistogramPreview" class="h-3 w-3 shrink-0" />
+            {{ previewTagLabel }}
+          </span> -->
         </div>
 
         <Transition
@@ -49,10 +62,15 @@
         >
           <div v-if="showPreviewPanel" class="overflow-hidden">
             <div
-              class="relative w-full overflow-hidden rounded-box border border-base-content/5 bg-base-200/60 shadow-sm transition-[padding-top] duration-200 ease-out"
+              v-if="!isHistogramPreview"
+              class="relative w-full overflow-hidden rounded-box border border-base-content/5 shadow-sm transition-[padding-top] duration-200 ease-out"
               :style="{ paddingTop: `${75 * previewScale}%` }"
+              @pointerenter="playVideoPreviewOnHover"
+              @pointerleave="stopPreviewVideo"
             >
-              <div class="absolute top-2 left-2 flex bg-base-100/30 hover:bg-base-100/70 rounded-box z-10 cursor-pointer opacity-0 pointer-events-none transition-opacity duration-150 group-hover/thumbnail:opacity-100 group-hover/thumbnail:pointer-events-auto">
+              <div
+                class="absolute top-2 left-2 flex bg-base-100/30 hover:bg-base-100/70 rounded-box z-20 cursor-pointer opacity-0 pointer-events-none transition-opacity duration-150 group-hover/thumbnail:opacity-100 group-hover/thumbnail:pointer-events-auto"
+              >
                 <TButton
                   :icon="IconZoomOut"
                   :tooltip="$t('map.zoom_out')"
@@ -66,52 +84,69 @@
                   @click.stop="increasePreviewScale"
                 />
               </div>
-              <div class="absolute top-2 right-2 z-10">
-                <span
-                  v-if="previewFormatLabel"
-                  class="inline-flex items-center rounded-box border border-base-content/20 bg-base-300/80 px-1.5 text-[10px] font-bold uppercase tracking-wide text-base-content/80 backdrop-blur-sm"
-                >
-                  {{ previewFormatLabel }}
-                </span>
-              </div>
               <div class="absolute inset-0">
                 <img
                   v-if="fileInfo?.thumbnail"
                   :src="fileInfo.thumbnail"
-                  class="h-full w-full object-contain bg-base-100/20"
+                  class="h-full w-full object-contain"
                   :style="previewImageStyle"
                 />
-                <div v-else class="flex h-full w-full items-center justify-center bg-base-content/5">
+                <video
+                  v-if="showVideoPreview"
+                  ref="previewVideoRef"
+                  class="pointer-events-none absolute inset-0 h-full w-full object-contain"
+                  :class="isVideoPreviewReady ? 'opacity-100' : 'opacity-0'"
+                  :style="previewImageStyle"
+                  :poster="fileInfo?.thumbnail"
+                  muted
+                  autoplay
+                  loop
+                  playsinline
+                  preload="metadata"
+                  @canplay="isVideoPreviewReady = true"
+                  @playing="isVideoPreviewReady = true"
+                  @error="stopPreviewVideo"
+                ></video> 
+                <div v-if="!fileInfo?.thumbnail && !showVideoPreview" class="flex h-full w-full items-center justify-center bg-base-content/5">
                   <component
                     :is="fileInfo?.file_type === 2 ? IconVideo : IconPhoto"
-                    class="w-10 h-10 text-base-content/20"
+                    class="w-10 h-10 text-base-content/30"
                   />
                 </div>
               </div>
-
-              <!-- <div
-                v-if="fileInfo?.is_favorite"
-                class="absolute top-2 right-2 rounded-full bg-error/90 p-1 shadow-sm"
-              >
-                <IconHeartFilled class="w-3.5 h-3.5 text-white" />
-              </div> -->
+            </div>
+            <div v-else class="rounded-box border border-base-content/5 bg-base-300/30 p-3 shadow-sm">
+              <ImageHistogram :source="fileInfo?.thumbnail || ''" />
             </div>
           </div>
         </Transition>
       </div>
 
       <!-- File Info Section -->
-      <div class="rounded-box p-3 space-y-3 bg-base-300/30 border border-base-content/5 shadow-sm">
+      <div class="group/general border-t border-base-content/5 px-1 py-3 space-y-3">
 
-        <div class="flex items-center gap-2 cursor-pointer text-base-content/70 hover:text-base-content transition-all duration-200 ease-in-out" 
+        <div class="flex items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content transition-all duration-200 ease-in-out" 
           @click.stop="toggleBasicInfo"
         >
-          <IconFile class="w-4 h-4" />
-          <span class="font-bold mr-auto uppercase text-xs tracking-wide">{{ $t('file_info.general') }}</span>
-          <TButton
-            :icon="showBasicInfoPanel ? IconArrowDown : IconArrowUp"
-            :buttonSize="'small'"
+          <IconRight
+            class="w-3 h-3 transition-transform duration-200"
+            :class="{ 'rotate-90': showBasicInfoPanel }"
+            @click.stop="toggleBasicInfo"
           />
+          <span class="py-1 font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.general') }}</span>
+          <div v-if="showBasicInfoPanel && isRawJpegPair" role="tablist" class="tabs tabs-xs shrink-0">
+            <button
+              role="tab"
+              :class="['tab', generalInfoTab === 'raw' ? 'tab-active text-primary' : '']"
+              @click.stop="generalInfoTab = 'raw'"
+            >RAW</button>
+            <button
+              role="tab"
+              :class="['tab', generalInfoTab === 'companion' ? 'tab-active text-primary' : '']"
+              :disabled="!rawJpegCompanion"
+              @click.stop="generalInfoTab = 'companion'"
+            >{{ rawJpegCompanionLabel }}</button>
+          </div>
         </div>
 
         <Transition
@@ -120,18 +155,19 @@
           @after-enter="onAfterEnter"
           @leave="onLeave"
         >
-          <div v-if="showBasicInfoPanel" class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-4 text-xs overflow-hidden">
+          <div v-if="showBasicInfoPanel" class="overflow-hidden">
+            <div class="pl-4 grid grid-cols-[84px_1fr] gap-y-1.5 gap-x-4 text-xs">
             <!-- Name -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.name') }}</div>
-            <div class="group flex items-center gap-1">
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.name') }}</div>
+            <div class="group/field flex items-center gap-1">
               <div
-                v-if="isRenaming"
+                v-if="isPrimaryGeneralInfo && isRenaming"
                 class="flex items-center w-full min-w-0"
               >
                 <input
                   ref="renameInputRef"
                   v-model="renamingName"
-                  class="font-bold text-xs text-base-content input input-xs input-bordered p-1 h-6 leading-6 w-full min-w-0"
+                  class="text-[12px] text-base-content input input-xs input-bordered p-1 h-6 leading-6 w-full min-w-0"
                   @blur="finishRename"
                   @keydown.enter="finishRename"
                   @keydown.esc="cancelRename"
@@ -139,149 +175,137 @@
                 />
                 <span
                   v-if="renamingExt"
-                  class="ml-1 text-xs font-semibold text-base-content/45 whitespace-nowrap"
+                  class="ml-1 text-[12px] text-base-content/70 whitespace-nowrap"
                 >.{{ renamingExt }}</span>
               </div>
-              <span v-else 
-                class="font-semibold text-xs text-base-content/65 break-all flex-1 min-w-0"
-              >{{ fileInfo?.name }}</span>
-              <TButton
-                v-if="!isRenaming"
-                :icon="IconEdit"
-                :tooltip="$t('menu.file.rename')"
-                :buttonSize="'small'"
-                :class="['opacity-0 group-hover:opacity-100 transition-opacity duration-200 ease-in-out']"
-                @click.stop="startRename"
-              />
+              <span v-else
+                class="text-[12px] font-medium text-base-content/80 break-all flex-1 min-w-0"
+                :class="{ 'cursor-text': isPrimaryGeneralInfo }"
+                @dblclick.stop="isPrimaryGeneralInfo && startRename()"
+              >{{ generalFileInfo?.name }}</span>
             </div>
 
-            <!-- Album -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.album_name') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65 break-all">{{ fileInfo?.album_name }}</div>
-
             <!-- Path -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.folder') }}</div>
-            <div class="flex items-center gap-1 min-w-0">
-              <IconFolderExpanded class="w-3.5 h-3.5 shrink-0 text-base-content/65" />
-              <div class="breadcrumbs p-0 min-h-0 overflow-hidden min-w-0">
-                <ul class="min-w-0 flex-nowrap overflow-hidden">
-                <li
-                  v-for="(item, idx) in folderBreadcrumbs"
-                  :key="`${item.path}-${idx}`"
-                  class="min-w-0 max-w-full overflow-hidden"
-                >
-                  <a
-                    v-if="idx < folderBreadcrumbs.length - 1"
-                    class="block max-w-48 truncate cursor-pointer transition-colors text-xs font-semibold text-base-content/65 hover:text-base-content"
-                    @click.stop="emit('navigateFolder', item.path)"
-                  >{{ item.label }}</a>
-                  <span
-                    v-else
-                    class="block max-w-48 truncate text-xs font-semibold text-base-content/65 cursor-pointer hover:text-base-content"
-                    @click.stop="emit('navigateFolder', item.path)"
-                  >{{ item.label }}</span>
-                </li>
-                </ul>
-              </div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.folder') }}</div>
+            <Breadcrumb
+              :icon="IconFolder"
+              :items="generalFolderBreadcrumbs"
+              size="small"
+              @navigate="(path: string) => emit('navigateFolder', path)"
+            />
+
+            <!-- Album -->
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.album_name') }}</div>
+            <div class="flex items-center min-w-0">
+              <span class="min-w-0 text-[12px] font-medium text-base-content/80 break-all">{{ generalFileInfo?.album_name }}</span>
             </div>
 
             <!-- Size -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.size') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatFileSize(fileInfo?.size) }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.size') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ formatFileSize(generalFileInfo?.size) }}</div>
 
             <!-- Dimension -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.dimension') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatDimensionText(fileInfo?.width, fileInfo?.height) }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.dimension') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ formatDimensionText(generalFileInfo?.width, generalFileInfo?.height, true) }}</div>
 
             <!-- Duration -->
-            <template v-if="fileInfo?.file_type === 2">
-              <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.duration') }}</div>
-              <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatDuration(fileInfo?.duration) }}</div>
+            <template v-if="generalFileInfo?.file_type === 2">
+              <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.duration') }}</div>
+              <div class="flex items-center text-[12px] text-base-content/75">{{ formatDuration(generalFileInfo?.duration) }}</div>
             </template>
 
-            <!-- Created At -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.created_at') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatTimestamp(fileInfo?.created_at, $t('format.date_time')) }}</div>
+            <div class="col-span-2">
+              <div class="grid grid-cols-[84px_1fr] gap-y-1.5 gap-x-4">
+                <!-- Created At -->
+                <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.created_at') }}</div>
+                <div class="flex items-center text-[12px] text-base-content/75">{{ formatTimestamp(generalFileInfo?.created_at, $t('format.date_time')) }}</div>
 
-            <!-- Modified At -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.modified_at') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatTimestamp(fileInfo?.modified_at, $t('format.date_time')) }}</div>
+                <!-- Modified At -->
+                <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.modified_at') }}</div>
+                <div class="flex items-center text-[12px] text-base-content/75">{{ formatTimestamp(generalFileInfo?.modified_at, $t('format.date_time')) }}</div>
 
-            <!-- Last Scan -->
-            <template v-if="fileInfo?.last_scan_time && fileInfo.last_scan_time > 0">
-              <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.last_scan_time') }}</div>
-              <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatRelativeTime(fileInfo.last_scan_time / 1000, $t) }}</div>
-            </template>
-
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('menu.meta.favorite') }}</div>
-            <div class="h-6 flex items-center gap-0.5">
-              <button
-                class="btn btn-ghost btn-xs min-h-0 h-6 w-6 p-0 mr-1"
-                :title="fileInfo?.is_favorite ? $t('menu.meta.unfavorite') : $t('menu.meta.favorite')"
-                @click.stop="emit('toggleFavorite')"
-              >
-                <component
-                  :is="fileInfo?.is_favorite ? IconHeartFilled : IconHeart"
-                  class="w-3.5 h-3.5"
-                  :class="fileInfo?.is_favorite ? 'text-error' : 'text-base-content/70'"
-                />
-              </button>
-              <div class="w-px h-4 bg-base-content/10 mr-1"></div>
-              <span class="mr-1 text-[11px] font-medium text-base-content/50">{{ $t('favorite.ratings') }}</span>
-              <button
-                v-for="rating in [1, 2, 3, 4, 5]"
-                :key="rating"
-                class="btn btn-ghost btn-xs min-h-0 h-6 w-6 p-0"
-                :title="getRatingLabel(rating)"
-                @click.stop="emit('setRating', (fileInfo?.rating || 0) === rating ? 0 : rating)"
-              >
-                <component
-                  :is="(fileInfo?.rating || 0) >= rating ? IconStarFilled : IconStar"
-                  class="w-3.5 h-3.5"
-                  :class="(fileInfo?.rating || 0) >= rating ? 'text-warning' : 'text-base-content/30'"
-                />
-              </button>
+                <!-- Last Scan -->
+                <template v-if="generalFileInfo?.last_scan_time && generalFileInfo.last_scan_time > 0">
+                  <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.last_scan_time') }}</div>
+                  <div class="flex min-h-6 items-center gap-2">
+                    <!-- <span class="text-[12px] text-base-content/75">{{ formatTimestamp(fileInfo.last_scan_time / 1000, $t('format.date_time')) }}</span> -->
+                    <span class="text-[11px] text-base-content/40">{{ formatRelativeTime(generalFileInfo.last_scan_time / 1000, $t) }}</span>
+                  </div>
+                </template>
+              </div>
             </div>
 
+            <template v-if="isPrimaryGeneralInfo">
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.marks') }}</div>
+            <FavoriteRatingControl
+              :favorite="Boolean(fileInfo?.is_favorite)"
+              :rating="Number(fileInfo?.rating || 0)"
+              :culling="Number(fileInfo?.culling_flag ?? fileInfo?.cullingFlag ?? 0)"
+              label-class="text-base-content/30"
+              inactive-rating-class="text-base-content/70"
+              @favorite="emit('toggleFavorite')"
+              @rating="(rating) => emit('setRating', rating)"
+              @culling="(cullingFlag) => emit('setCulling', cullingFlag)"
+            />
+
             <!-- Tags -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 min-h-6 py-1">{{ $t('file_info.tags') }}</div>
-            <div class="group flex items-center min-h-6 gap-1">
-              <div class="text-xs font-semibold text-base-content/65 flex flex-wrap gap-1 flex-1 min-w-0">
+            <div class="flex items-center text-[11px] text-base-content/45 min-h-6 py-1.5">{{ $t('file_info.tags') }}</div>
+            <div class="group/field flex items-center min-h-6 gap-1">
+              <TButton
+                v-if="!fileInfo?.tags?.length"
+                :icon="IconEdit"
+                :tooltip="$t('settings.shortcuts.actions.edit_tags')"
+                :buttonSize="'small'"
+                class="shrink-0"
+                @click.stop="emit('quickEditTag')"
+              />
+              <div class="text-[12px] text-base-content/75 flex flex-wrap gap-1 flex-1 min-w-0 cursor-pointer" @click.stop="fileInfo?.tags?.length && emit('quickEditTag')">
                 <template v-if="fileInfo?.tags && fileInfo.tags.length">
                   <span
                     v-for="tag in fileInfo.tags"
                     :key="tag.id"
-                    class="badge badge-sm badge-outline border-base-content/30 bg-base-content/30 font-medium"
+                    class="badge badge-sm badge-outline border-base-content/20 bg-base-content/5 font-medium text-base-content/75"
                   >{{ tag.name }}</span>
                 </template>
               </div>
-              <TButton
-                :icon="IconEdit"
-                :tooltip="$t('menu.meta.tag')"
-                :buttonSize="'small'"
-                :class="['opacity-0 group-hover:opacity-100 transition-opacity duration-200 ease-in-out']"
-                @click.stop="emit('quickEditTag')"
-              />
             </div>
 
             <!-- Comment -->
-            <div class="flex items-start text-[10px] uppercase tracking-widest font-bold text-base-content/25 py-1">{{ $t('file_info.comment') }}</div>
-            <div class="group flex items-start gap-1">
-              <div class="text-xs font-semibold text-base-content/65 wrap-break-words whitespace-pre-wrap flex-1 min-w-0">{{ fileInfo?.comments }}</div>
+            <div class="flex items-start text-[11px] text-base-content/45 py-1.5">{{ $t('file_info.comment') }}</div>
+            <div class="group/field flex items-start gap-1">
               <TButton
+                v-if="!fileInfo?.comments"
                 :icon="IconEdit"
-                :tooltip="$t('menu.meta.comment')"
+                :tooltip="$t('settings.shortcuts.actions.edit_comment')"
                 :buttonSize="'small'"
-                :class="['opacity-0 group-hover:opacity-100 transition-opacity duration-200 ease-in-out']"
+                class="shrink-0"
                 @click.stop="emit('quickEditComment')"
               />
+              <div class="text-[12px] leading-5 text-base-content/75 wrap-break-words whitespace-pre-wrap flex-1 min-w-0 cursor-pointer" @click.stop="fileInfo?.comments && emit('quickEditComment')">{{ fileInfo?.comments }}</div>
             </div>
+
+            <!-- Collections -->
+            <template v-if="fileCollections.length > 0">
+              <div class="flex items-center text-[11px] text-base-content/45 min-h-6 py-1.5">{{ $t('collection.title') }}</div>
+              <div class="flex items-center min-h-6 gap-x-3 gap-y-1 flex-wrap">
+                <button
+                  v-for="collection in fileCollections"
+                  :key="collection.id"
+                  type="button"
+                  class="inline-flex items-center gap-1 text-[12px] font-medium text-base-content/70 transition-colors hover:text-base-content cursor-pointer"
+                  @click.stop="emit('navigateCollection', collection.id)"
+                >
+                  <IconBookmark class="h-3.5 w-3.5 shrink-0" />
+                  {{ collection.name }}
+                </button>
+              </div>
+            </template>
 
             <!-- Rotate Display -->
             <template v-if="fileInfo?.rotate && fileInfo?.rotate !== 0">
-              <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('menu.meta.rotate') }}</div>
+              <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('menu.meta.rotate') }}</div>
               <div class="flex items-center gap-2 min-h-6">
-                <span class="text-xs font-semibold text-base-content/65">{{ normalizedRotate }}°</span>
+                <span class="text-[12px] text-base-content/75">{{ normalizedRotate }}°</span>
                 <TButton
                   :icon="IconRotate"
                   :tooltip="$t('menu.meta.rotate')"
@@ -290,20 +314,23 @@
                 />
               </div>
             </template>
+            </template>
+            
+            </div>
           </div>
         </Transition>
       </div>
 
       <!-- Metadata Section -->
-      <div class="rounded-box p-3 space-y-3 bg-base-300/30 border border-base-content/5 shadow-sm">
+      <div class="border-t border-base-content/5 px-1 py-4 space-y-3">
 
-        <div class="flex items-center gap-2 cursor-pointer text-base-content/70 hover:text-base-content" @click.stop="toggleMetadata">
-          <IconCameraAperture class="w-4 h-4 " /> 
-          <span class="font-bold mr-auto uppercase text-xs tracking-wide">{{ $t('file_info.metadata') }}</span>
-          <TButton
-            :icon="showMetadataPanel ? IconArrowDown : IconArrowUp"
-            :buttonSize="'small'"
+        <div class="flex items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" @click.stop="toggleMetadata">
+          <IconRight
+            class="w-3 h-3 transition-transform duration-200"
+            :class="{ 'rotate-90': showMetadataPanel }"
+            @click.stop="toggleMetadata"
           />
+          <span class="font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.metadata') }}</span>
         </div>
 
         <Transition
@@ -312,57 +339,57 @@
           @after-enter="onAfterEnter"
           @leave="onLeave"
         >
-          <div v-if="showMetadataPanel" class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-4 text-xs overflow-hidden">
+          <div v-if="showMetadataPanel" class="pl-4 grid grid-cols-[84px_1fr] gap-y-1.5 gap-x-4 text-xs overflow-hidden">
             <!-- Camera -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.camera') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatCameraInfo(fileInfo?.e_make, fileInfo?.e_model) }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.camera') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ formatCameraInfo(fileInfo?.e_make, fileInfo?.e_model) }}</div>
 
             <!-- Lens -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.lens') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ fileInfo?.e_lens_model }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.lens') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ fileInfo?.e_lens_model }}</div>
 
             <!-- Capture Settings -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.capture_settings') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatCaptureSettings(fileInfo?.e_focal_length, fileInfo?.e_exposure_time, fileInfo?.e_f_number, fileInfo?.e_iso_speed, fileInfo?.e_exposure_bias) }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.capture_settings') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ formatCaptureSettings(fileInfo?.e_focal_length, fileInfo?.e_exposure_time, fileInfo?.e_f_number, fileInfo?.e_iso_speed, fileInfo?.e_exposure_bias) }}</div>
 
             <!-- Software -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.software') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ fileInfo?.e_software }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.software') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ fileInfo?.e_software }}</div>
 
             <!-- Taken By -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.taken_by') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ fileInfo?.e_artist }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.taken_by') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ fileInfo?.e_artist }}</div>
 
             <!-- Copyright -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.copyright') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ fileInfo?.e_copyright }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.copyright') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ fileInfo?.e_copyright }}</div>
 
             <!-- Taken At -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.taken_at') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ fileInfo?.e_date_time }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.taken_at') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ fileInfo?.e_date_time }}</div>
 
             <!-- Description -->
-            <div class="flex items-start text-[10px] uppercase tracking-widest font-bold text-base-content/25 py-1">{{ $t('file_info.description') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65 wrap-break-words py-1">{{ fileInfo?.e_description }}</div>
+            <div class="flex items-start text-[11px] text-base-content/45 py-1.5">{{ $t('file_info.description') }}</div>
+            <div class="flex items-center text-[12px] leading-5 text-base-content/75 wrap-break-words py-1.5">{{ fileInfo?.e_description }}</div>
 
             <!-- Geo Location -->
-            <div class="flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25 h-6">{{ $t('file_info.geo_location') }}</div>
-            <div class="flex items-center text-xs font-semibold text-base-content/65">{{ formatGeoLocation() }}</div>
+            <div class="flex items-center text-[11px] text-base-content/45 h-6">{{ $t('file_info.geo_location') }}</div>
+            <div class="flex items-center text-[12px] text-base-content/75">{{ formatGeoLocation() }}</div>
           </div>
         </Transition>
       </div>
 
       <!-- Map View -->
       <div v-if="fileInfo?.gps_latitude && fileInfo?.gps_longitude" 
-        class="rounded-box p-3 space-y-3 bg-base-300/30 border border-base-content/5 shadow-sm flex flex-col transition-[flex-grow]" 
-        :class="{ 'flex-1 min-h-[300px] flex-shrink-0': showMapPanel }">
-        <div class="flex items-center gap-2 cursor-pointer text-base-content/70 hover:text-base-content shrink-0" @click.stop="toggleMapPanel">
-          <IconLocation class="w-4 h-4 " /> 
-          <span class="font-bold mr-auto uppercase text-xs tracking-wide">{{ $t('file_info.map') }}</span>
-          <TButton
-            :icon="showMapPanel ? IconArrowDown : IconArrowUp"
-            :buttonSize="'small'"
+        class="border-t border-base-content/5 px-1 py-4 space-y-3 flex flex-col transition-[flex-grow]" 
+        :class="{ 'flex-1 min-h-75 shrink-0': showMapPanel }">
+        <div class="flex items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content shrink-0" @click.stop="toggleMapPanel">
+          <IconRight
+            class="w-3 h-3 transition-transform duration-200"
+            :class="{ 'rotate-90': showMapPanel }"
+            @click.stop="toggleMapPanel"
           />
+          <span class="font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.map') }}</span>
         </div>
 
         <Transition
@@ -384,12 +411,12 @@
       </div>
     </div>
 
-    <div v-else class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden space-y-3 flex flex-col bg-base-200/50">
-      <div class="rounded-box p-4 bg-base-300/30 border border-base-content/5 shadow-sm flex-1 flex items-center justify-center">
-        <div class="text-center text-base-content/40 space-y-3 max-w-[260px]">
+    <div v-else class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden flex flex-col">
+      <div class="p-4 flex-1 flex items-center justify-center">
+        <div class="text-center text-base-content/30 space-y-3 max-w-[260px]">
           <IconFile class="w-8 h-8 mx-auto text-base-content/30" />
           <p class="text-xs font-medium">{{ $t('file_info.empty_title') }}</p>
-          <p class="text-xs text-base-content/40">{{ $t('file_info.empty_desc') }}</p>
+          <p class="text-xs text-base-content/30">{{ $t('file_info.empty_desc') }}</p>
         </div>
       </div>
     </div>
@@ -397,17 +424,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, computed, watch } from 'vue';
+import { ref, nextTick, computed, watch, onBeforeUnmount } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
-import { renameFile, editImage, getAlbum } from '@/common/api';
+import { isWebViewVideoPlaybackDisabled } from '@/common/video';
+import { renameFile, editImage, getAlbum, getFileCollections, getFileInfo, revealPath } from '@/common/api';
 import { 
   extractFileName, 
   getFileExtension,
-  getFolderPath, 
-  getFolderName,
+  getFolderPath,
   buildFolderBreadcrumbs,
   formatDimensionText, 
   formatFileSize, 
@@ -418,20 +445,27 @@ import {
   formatCameraInfo,
   getCountryName,
   combineFileName,
-  isValidFileName
+  isValidFileName,
+  getAssetSrc,
 } from '@/common/utils';
 import { 
-  IconClose, IconLocation, IconArrowDown, IconArrowUp, IconCameraAperture, 
-  IconFile, IconFolderSearch, IconHeart, IconHeartFilled, IconStar, IconStarFilled, IconEdit,
-  IconFolderExpanded,
+  IconClose,
+  IconRight, 
+  IconFile,
+  IconEdit,
+  IconFolder,
   IconPhoto,
-  IconRefresh,
   IconRotate,
   IconVideo,
   IconZoomIn,
   IconZoomOut,
+  IconLivePhoto,
+  IconBookmark,
 } from '@/common/icons';
+import Breadcrumb from '@/components/Breadcrumb.vue';
 import TButton from '@/components/TButton.vue';
+import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
+import ImageHistogram from '@/components/ImageHistogram.vue';
 import MapView from '@/components/MapView.vue';
 
 const props = defineProps({
@@ -451,11 +485,12 @@ const emit = defineEmits([
   'success',
   'toggleFavorite',
   'setRating',
+  'setCulling',
   'rotate',
   'quickEditTag',
   'quickEditComment',
   'navigateFolder',
-  'refreshFileInfo',
+  'navigateCollection',
 ]);
 
 const toast = useToast();
@@ -471,6 +506,60 @@ const previewScale = computed({
 const showBasicInfoPanel = computed(() => config.infoPanel.showBasicInfo);
 const showMetadataPanel = computed(() => config.infoPanel.showMetadata);
 const showMapPanel = computed(() => config.infoPanel.showMap);
+const isVideoFile = computed(() => Number(props.fileInfo?.file_type || 0) === 2);
+const isLivePhoto = computed(() => (
+  props.fileInfo?.media_subtype === 'live_photo' && !!props.fileInfo?.live_photo_video_path
+));
+const isRawJpegPair = computed(() => (
+  props.fileInfo?.media_subtype === 'raw_jpeg_pair' && !!props.fileInfo?.live_photo_video_id
+));
+const rawJpegCompanion = ref<any>(null);
+const generalInfoTab = ref<'raw' | 'companion'>('raw');
+let rawJpegCompanionRequestSeq = 0;
+const rawJpegCompanionLabel = computed(() => {
+  const extension = getFileExtension(
+    rawJpegCompanion.value?.name || props.fileInfo?.live_photo_video_path || '',
+  ).toLowerCase();
+  return ['heic', 'heif', 'hif'].includes(extension) ? 'HEIC' : 'JPEG';
+});
+const generalFileInfo = computed(() => (
+  generalInfoTab.value === 'companion' && rawJpegCompanion.value
+    ? rawJpegCompanion.value
+    : props.fileInfo
+));
+const isPrimaryGeneralInfo = computed(() => generalInfoTab.value === 'raw');
+const previewVideoPath = computed(() => (
+  isLivePhoto.value ? props.fileInfo?.live_photo_video_path : props.fileInfo?.file_path
+));
+const canPreviewVideo = computed(() => (
+  (isVideoFile.value || isLivePhoto.value)
+  && !!previewVideoPath.value
+  && !isWebViewVideoPlaybackDisabled(previewVideoPath.value)
+));
+const canShowHistogram = computed(() => !isVideoFile.value);
+const activePreviewMode = computed(() => canShowHistogram.value ? config.infoPanel.previewMode : 'thumbnail');
+const isHistogramPreview = computed(() => activePreviewMode.value === 'histogram');
+const histogramChannelLabel = computed(() => {
+  const storedMask = Number(config.infoPanel.histogramChannels);
+  const mask = storedMask === 16 || !Number.isInteger(storedMask) || storedMask < 0 || storedMask > 15
+    ? 15
+    : storedMask;
+  const labels = [
+    { bit: 1, label: 'L' },
+    { bit: 2, label: 'R' },
+    { bit: 4, label: 'G' },
+    { bit: 8, label: 'B' },
+  ];
+  return labels
+    .filter((item) => Boolean(mask & item.bit))
+    .map((item) => item.label)
+    .join('');
+});
+const previewVideoRef = ref<HTMLVideoElement | null>(null);
+const showVideoPreview = ref(false);
+const isVideoPreviewReady = ref(false);
+const fileCollections = ref<Array<{ id: number; name: string }>>([]);
+let fileCollectionsRequestSeq = 0;
 const normalizedRotate = computed(() => {
   const rotate = Number(props.fileInfo?.rotate || 0) % 360;
   return rotate < 0 ? rotate + 360 : rotate;
@@ -484,8 +573,13 @@ const previewImageStyle = computed(() => {
   };
 });
 const previewFormatLabel = computed(() => {
+  if (props.fileInfo?.media_subtype === 'live_photo') {
+    return 'LIVE';
+  }
+
   const formatLabel = (props.fileInfo?.format_label || '').trim();
-  if (formatLabel) {
+  const isRaw = Number(props.fileInfo?.file_type || 0) === 3;
+  if (formatLabel && !(isRaw && formatLabel.toUpperCase() === 'RAW')) {
     return formatLabel.toUpperCase();
   }
 
@@ -493,13 +587,82 @@ const previewFormatLabel = computed(() => {
   const filePath = props.fileInfo?.file_path || '';
   const extension = getFileExtension(name || filePath).trim();
   if (!extension) return '';
-  if (Number(props.fileInfo?.file_type || 0) === 3) return 'RAW';
   return extension.toUpperCase();
 });
-
+const previewTagLabel = computed(() => (
+  isHistogramPreview.value ? histogramChannelLabel.value : previewFormatLabel.value
+));
 function togglePreview() {
   config.infoPanel.showPreview = !config.infoPanel.showPreview;
 }
+
+function setPreviewMode(mode: 'thumbnail' | 'histogram') {
+  if (mode === 'histogram' && !canShowHistogram.value) return;
+  config.infoPanel.previewMode = mode;
+}
+
+async function playPreviewVideo() {
+  if (!canPreviewVideo.value || !previewVideoPath.value || showVideoPreview.value) return;
+  isVideoPreviewReady.value = false;
+  showVideoPreview.value = true;
+  await nextTick();
+
+  const video = previewVideoRef.value;
+  if (!video) return;
+
+  video.src = getAssetSrc(previewVideoPath.value);
+  video.muted = true;
+
+  try {
+    await video.play();
+  } catch {
+    stopPreviewVideo();
+  }
+}
+
+function playVideoPreviewOnHover() {
+  if (canPreviewVideo.value) {
+    void playPreviewVideo();
+  }
+}
+
+function stopPreviewVideo() {
+  const video = previewVideoRef.value;
+  if (video) {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  }
+
+  isVideoPreviewReady.value = false;
+  showVideoPreview.value = false;
+}
+
+watch(
+  () => [
+    props.fileInfo?.id,
+    props.fileInfo?.file_path,
+    props.fileInfo?.live_photo_video_path,
+    showPreviewPanel.value,
+    isHistogramPreview.value,
+  ],
+  stopPreviewVideo
+);
+
+onBeforeUnmount(stopPreviewVideo);
+
+watch(
+  () => [props.fileInfo?.id, Boolean(props.fileInfo?.has_collections), props.fileInfo?.collectionVersion] as const,
+  async ([fileId, hasCollections]) => {
+    const requestSeq = ++fileCollectionsRequestSeq;
+    fileCollections.value = [];
+    if (!fileId || !hasCollections) return;
+    const collections = await getFileCollections(Number(fileId));
+    if (requestSeq !== fileCollectionsRequestSeq || Number(props.fileInfo?.id) !== Number(fileId)) return;
+    fileCollections.value = Array.isArray(collections) ? collections : [];
+  },
+  { immediate: true }
+);
 
 function increasePreviewScale() {
   const index = previewScaleOptions.indexOf(previewScale.value);
@@ -527,25 +690,13 @@ function toggleMapPanel() {
   config.infoPanel.showMap = !config.infoPanel.showMap;
 }
 
-function getRatingLabel(rating: number) {
-  const keys: Record<number, string> = {
-    5: 'five_stars',
-    4: 'four_stars',
-    3: 'three_stars',
-    2: 'two_stars',
-    1: 'one_star',
-  };
-  const key = keys[rating];
-  return localeMsg.value.favorite?.[key] || `${rating}★`;
-}
-
 const quickSave = async (): Promise<boolean> => {
   if (!props.fileInfo) return false;
   if (uiStore.activeAdjustments.filePath !== props.fileInfo.file_path) return true;
 
   const adj = uiStore.activeAdjustments as any;
   const ext = getFileExtension(props.fileInfo.name).toLowerCase();
-  const outputFormat = (ext === 'jpg' || ext === 'jpeg') ? 'jpg' : ext;
+  const outputFormat = ['jpg', 'jpeg', 'jfif'].includes(ext) ? 'jpg' : ext;
 
   const editParams = {
     sourceFilePath: props.fileInfo.file_path,
@@ -595,11 +746,16 @@ const renameInputRef = ref<HTMLInputElement | null>(null);
 const albumRootPath = ref('');
 let albumRootRequestSeq = 0;
 
-const folderBreadcrumbs = computed(() => {
-  const folderPath = getFolderPath(props.fileInfo?.file_path);
+const generalFolderBreadcrumbs = computed(() => {
+  const folderPath = getFolderPath(generalFileInfo.value?.file_path);
   if (!folderPath) return [];
-  return buildFolderBreadcrumbs(folderPath, albumRootPath.value, props.fileInfo?.album_name || getFolderName(albumRootPath.value));
+  return buildFolderBreadcrumbs(folderPath, albumRootPath.value);
 });
+function revealFileInFolder() {
+  if (props.fileInfo?.file_path) {
+    revealPath(props.fileInfo.file_path);
+  }
+}
 
 watch(
   () => props.fileInfo?.album_id,
@@ -613,6 +769,20 @@ watch(
     albumRootPath.value = album?.path || '';
   },
   { immediate: true }
+);
+
+watch(
+  () => [props.fileInfo?.id, props.fileInfo?.media_subtype, props.fileInfo?.live_photo_video_id] as const,
+  async ([fileId, mediaSubtype, companionId]) => {
+    const requestSeq = ++rawJpegCompanionRequestSeq;
+    generalInfoTab.value = 'raw';
+    rawJpegCompanion.value = null;
+    if (!fileId || mediaSubtype !== 'raw_jpeg_pair' || !companionId) return;
+    const companion = await getFileInfo(Number(companionId));
+    if (requestSeq !== rawJpegCompanionRequestSeq || Number(props.fileInfo?.id) !== Number(fileId)) return;
+    rawJpegCompanion.value = companion || null;
+  },
+  { immediate: true },
 );
 
 const startRename = () => {

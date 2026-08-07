@@ -15,6 +15,7 @@ It works directly with your existing folders, keeps your library on your own dev
 - **Local First**: Your photos stay on your own disk. No mandatory cloud upload, no cloud indexing.
 - **Fast Browsing**: Built with Rust and Tauri, with a rebuilt scanner and optimized local database for large libraries.
 - **AI Search on Device**: Search with natural language, similar-image search, face clustering, and smart tags, all processed locally.
+- **Multilingual Search**: Search in 50+ languages with optional multilingual models, available as an additional download when needed.
 - **Practical Organization**: Use favorites, ratings, tags, comments, camera and lens grouping, and duplicate detection to keep collections organized.
 - **Broad Video Support**: Open MP4, MOV, AVI, MKV, and 20+ other video formats across platforms.
 - **Built-in Editing Tools**: Quickly crop, rotate, adjust, and save changes without leaving the app.
@@ -25,7 +26,7 @@ It works directly with your existing folders, keeps your library on your own dev
 Lap is currently available for macOS, Linux, and Windows.
 
 - [Download the latest release](https://github.com/julyx10/lap/releases)
-- macOS: Download the `_aarch64.dmg` or `_x64.dmg` file and drag **Lap** into **Applications**.
-- Linux: Download the `_amd64.deb` package and install it with your package manager.
+- macOS: Install with Homebrew: `brew tap julyx10/lap && brew install --cask lap`, or download the `_aarch64.dmg` / `_x64.dmg` file manually.
+- Linux: Download the `_amd64.deb` or `_arm64.deb` package and install it with your package manager.
 - Windows: Download the `_x64_en-US.msi` or `_arm64_en-US.msi` installer and complete the setup wizard.
-- [Check out what's new in v0.2.1](/guide/release-notes/v0.2.1)
+- [Check out what's new in v0.3.0](/guide/release-notes/v0.3.0)

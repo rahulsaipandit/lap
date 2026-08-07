@@ -16,15 +16,22 @@ export { default as IconScrollDown } from '@/assets/icons/scroll-down.svg';
 export { default as IconStack } from '@/assets/icons/stack.svg';
 export { default as IconFolders } from '@/assets/icons/folders.svg';
 export { default as IconFolder } from '@/assets/icons/folder.svg';
+export { default as IconFolderCog } from '@/assets/icons/folder-cog.svg';
 export { default as IconFolderExpanded } from '@/assets/icons/folder-expanded.svg';
 export { default as IconFolderCollapsed } from '@/assets/icons/folder-collapsed.svg';
 export { default as IconNewFolder } from '@/assets/icons/folder-plus.svg';
 export { default as IconFolderFavorite } from '@/assets/icons/folder-heart.svg';
 export { default as IconFolderSearch } from '@/assets/icons/folder-search.svg';
+export { default as IconFolderMoveTo } from '@/assets/icons/folder-move-to.svg';
+export { default as IconFolderError } from '@/assets/icons/folder-error.svg';
 export { default as IconOrder } from '@/assets/icons/order.svg';
 export { default as IconCopy } from '@/assets/icons/copy.svg';
-export { default as IconMoveTo } from '@/assets/icons/move-to.svg';
-export { default as IconCopyTo } from '@/assets/icons/copy-to.svg';
+export { default as IconMove } from '@/assets/icons/arrow-move.svg';
+export { default as IconClipboard } from '@/assets/icons/clipboard.svg';
+export { default as IconFileArrowRight } from '@/assets/icons/file-arrow-right.svg';
+export { default as IconFilePlus } from '@/assets/icons/file-plus.svg';
+export { default as IconFileMinus } from '@/assets/icons/file-minus.svg';
+export { default as IconDragDrop } from '@/assets/icons/drag-drop.svg';
 export { default as IconRename } from '@/assets/icons/rename.svg';
 export { default as IconTrash } from '@/assets/icons/trash.svg';
 export { default as IconFiles } from '@/assets/icons/files.svg';
@@ -41,6 +48,8 @@ export { default as IconSave } from '@/assets/icons/save.svg';
 export { default as IconPalette } from '@/assets/icons/palette.svg';
 export { default as IconResize } from '@/assets/icons/resize.svg';
 export { default as IconAdjustments } from '@/assets/icons/adjustments.svg';
+export { default as IconDownload } from '@/assets/icons/download.svg';
+export { default as IconUpload } from '@/assets/icons/upload.svg';
 
 // ======================
 // VIEW CONTROL ICONS
@@ -72,6 +81,7 @@ export { default as IconLeftPaneOn } from '@/assets/icons/left-pane-on.svg';
 export { default as IconLeftPaneOff } from '@/assets/icons/left-pane-off.svg';
 export { default as IconSplitOn } from '@/assets/icons/layout-split.svg';
 export { default as IconSplitOff } from '@/assets/icons/layout-split-off.svg';
+export { default as IconSplitOn4 } from '@/assets/icons/layout-split-4.svg';
 
 // ======================
 // WINDOW ONLY CONTROL ICONS
@@ -107,6 +117,8 @@ export { default as IconSeparator } from '@/assets/icons/separator.svg';
 export { default as IconDragHandle } from '@/assets/icons/drag-handle.svg';
 export { default as IconExternal } from '@/assets/icons/external.svg';
 export { default as IconOk } from '@/assets/icons/ok.svg';
+export { default as IconList } from '@/assets/icons/list.svg';
+export { default as IconFilter } from '@/assets/icons/filter.svg';
 
 // ======================
 // IMAGE EDITOR ICONS
@@ -137,6 +149,9 @@ export { default as IconStar } from '@/assets/icons/star.svg';
 export { default as IconStarFilled } from '@/assets/icons/star-filled.svg';
 export { default as IconHeart } from '@/assets/icons/heart.svg';
 export { default as IconHeartFilled } from '@/assets/icons/heart-fill.svg';
+export { default as IconFlag } from '@/assets/icons/flag.svg';
+export { default as IconFlagFilled } from '@/assets/icons/flag-fill.svg';
+export { default as IconFlagOff } from '@/assets/icons/flag-off.svg';
 export { default as IconPin } from '@/assets/icons/pin-filled.svg';
 export { default as IconUnPin } from '@/assets/icons/pin.svg';
 export { default as IconSortingAsc } from '@/assets/icons/sorting-asc.svg';
@@ -160,7 +175,7 @@ export { default as IconVideo } from '@/assets/icons/video.svg';
 export { default as IconVideoSlash } from '@/assets/icons/video-slash.svg';
 export { default as IconMusic } from '@/assets/icons/musical.svg';
 export { default as IconTag } from '@/assets/icons/tag.svg';
-export { default as IconSmartTag } from '@/assets/icons/tag-smart.svg';
+export { default as IconBox } from '@/assets/icons/box.svg';
 export { default as IconCalendar } from '@/assets/icons/calendar.svg';
 export { default as IconLocation } from '@/assets/icons/map-pin.svg';
 export { default as IconPerson } from '@/assets/icons/user.svg';
@@ -171,7 +186,13 @@ export { default as IconGps } from '@/assets/icons/gps.svg';
 export { default as IconSettings } from '@/assets/icons/settings.svg';
 export { default as IconInformation } from '@/assets/icons/information.svg';
 export { default as IconGithub } from '@/assets/icons/github.svg';
-
+export { default as IconBolt } from '@/assets/icons/bolt.svg';
+export { default as IconSparkles } from '@/assets/icons/sparkles.svg';
+export { default as IconBookmark } from '@/assets/icons/bookmark.svg';
+export { default as IconBookmarks } from '@/assets/icons/bookmarks.svg';
+export { default as IconBookmarkOff } from '@/assets/icons/bookmark-off.svg';
+export { default as IconLivePhoto } from '@/assets/icons/live-photo.svg';
+export { default as IconAspectRatio } from '@/assets/icons/aspect-ratio.svg';
 
 // ======================
 // MEDIA CONTROL ICONS
@@ -181,11 +202,3 @@ export { default as IconPause } from '@/assets/icons/pause.svg';
 export { default as IconVideoPlay } from '@/assets/icons/video-play.svg';
 export { default as IconVideoReplay } from '@/assets/icons/video-replay.svg';
 export { default as IconVideoFill } from '@/assets/icons/video-fill.svg';
-
-// ======================
-// AI ICONS
-// ======================
-export { default as IconBolt } from '@/assets/icons/bolt.svg';
-export { default as IconIndexReady } from '@/assets/icons/index-ready.svg';
-export { default as IconIndexWaiting } from '@/assets/icons/index-waiting.svg';
-export { default as IconIndexRunning } from '@/assets/icons/index-running.svg';

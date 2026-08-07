@@ -6,6 +6,8 @@
  * date:    2026-01-15
  */
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -41,44 +43,156 @@ pub struct AlbumState {
     pub selected: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartAlbumState {
+    #[serde(default = "default_smart_album_type")]
+    pub r#type: String,
+    pub id: Option<Value>,
+}
+
+fn default_smart_album_type() -> String {
+    "system".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartAlbumRuleState {
+    pub id: String,
+    pub field: String,
+    pub operator: String,
+    pub value: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FavoriteState {
-    #[serde(default = "default_favorite_tab")]
-    pub tab: String,
-    #[serde(alias = "album_id")]
-    pub album_id: Option<i64>,
-    #[serde(alias = "folder_id")]
-    pub folder_id: i64,
-    #[serde(alias = "folder_path")]
-    pub folder_path: Option<String>,
+pub struct SmartAlbumQueryState {
+    #[serde(default = "default_smart_album_query_version")]
+    pub version: i32,
+    #[serde(default = "default_smart_album_match")]
+    pub r#match: String,
     #[serde(default)]
-    pub rating: Option<i32>,
+    pub rules: Vec<SmartAlbumRuleState>,
 }
 
-fn default_favorite_tab() -> String {
-    "favorite".to_string()
+fn default_smart_album_query_version() -> i32 {
+    1
 }
 
-impl Default for FavoriteState {
+fn default_smart_album_match() -> String {
+    "all".to_string()
+}
+
+impl Default for SmartAlbumQueryState {
     fn default() -> Self {
         Self {
-            tab: default_favorite_tab(),
-            album_id: None,
-            folder_id: 0,
-            folder_path: None,
-            rating: None,
+            version: default_smart_album_query_version(),
+            r#match: default_smart_album_match(),
+            rules: Vec::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SmartAlbumSortState {
+    pub r#type: i64,
+    pub order: i64,
+}
+
+impl Default for SmartAlbumSortState {
+    fn default() -> Self {
+        Self {
+            r#type: 0,
+            order: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartAlbumGroupState {
+    pub r#type: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomSmartAlbumState {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_smart_album_source")]
+    pub source: String,
+    #[serde(default)]
+    pub query: SmartAlbumQueryState,
+    #[serde(default)]
+    pub sort: SmartAlbumSortState,
+    #[serde(default)]
+    pub group: SmartAlbumGroupState,
+    #[serde(default)]
+    pub cover_file_id: Option<i64>,
+    #[serde(default)]
+    pub count: Option<i64>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+fn default_smart_album_source() -> String {
+    "rules".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPanelState {
+    #[serde(default = "default_library_item")]
+    pub item: String,
+    #[serde(default, alias = "smart_id")]
+    pub smart_id: Option<String>,
+    #[serde(default = "default_ratings_expanded", alias = "ratings_expanded")]
+    pub ratings_expanded: bool,
+    #[serde(default = "default_subjects_expanded", alias = "subjects_expanded")]
+    pub subjects_expanded: bool,
+    #[serde(default, alias = "subject_counts")]
+    pub subject_counts: HashMap<String, i64>,
+}
+
+fn default_library_item() -> String {
+    "all-files".to_string()
+}
+
+fn default_subjects_expanded() -> bool {
+    true
+}
+
+fn default_ratings_expanded() -> bool {
+    true
+}
+
+impl Default for LibraryPanelState {
+    fn default() -> Self {
+        Self {
+            item: default_library_item(),
+            smart_id: None,
+            ratings_expanded: default_ratings_expanded(),
+            subjects_expanded: default_subjects_expanded(),
+            subject_counts: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RatingState {
+    pub item: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TagState {
     pub id: Option<i64>,
-    pub smart_id: Option<String>,
-    #[serde(default = "default_tag_tab")]
-    pub tab: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,36 +206,21 @@ pub struct CalendarState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CameraState {
-    #[serde(default = "default_camera_tab")]
-    pub tab: String,
     pub make: Option<String>,
     pub model: Option<String>,
     pub lens_make: Option<String>,
     pub lens_model: Option<String>,
 }
 
-fn default_camera_tab() -> String {
-    "camera".to_string()
-}
-
-fn default_tag_tab() -> String {
-    "custom".to_string()
-}
-
 impl Default for TagState {
     fn default() -> Self {
-        Self {
-            id: None,
-            smart_id: None,
-            tab: default_tag_tab(),
-        }
+        Self { id: None }
     }
 }
 
 impl Default for CameraState {
     fn default() -> Self {
         Self {
-            tab: default_camera_tab(),
             make: None,
             model: None,
             lens_make: None,
@@ -150,6 +249,8 @@ pub enum SearchHistoryEntry {
 pub struct SearchHistoryItem {
     pub text: String,
     pub file_id: Option<i64>,
+    #[serde(default)]
+    pub count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -169,6 +270,13 @@ pub struct SearchState {
     pub similar_image_history_index: i32,
     #[serde(alias = "file_name")]
     pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionState {
+    #[serde(default, alias = "selected_id")]
+    pub selected_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -208,14 +316,23 @@ pub struct PersonState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryState {
+    #[serde(default)]
+    pub library: LibraryPanelState,
     pub album: AlbumState,
-    pub favorite: FavoriteState,
+    #[serde(default)]
+    pub smart_album: SmartAlbumState,
+    #[serde(default)]
+    pub smart_albums: Vec<CustomSmartAlbumState>,
+    #[serde(default)]
+    pub rating: RatingState,
     pub tag: TagState,
     pub calendar: CalendarState,
     pub camera: CameraState,
     pub location: LocationState,
     #[serde(default)]
     pub person: PersonState,
+    #[serde(default)]
+    pub collection: CollectionState,
     pub search: SearchState,
     #[serde(alias = "dest_folder")]
     pub dest_folder: DestFolderState,
@@ -738,7 +855,12 @@ pub fn get_library_state(id: &str) -> Result<LibraryState, String> {
 /// Get current library state
 pub fn get_current_library_state() -> Result<LibraryState, String> {
     let config = load_app_config()?;
-    get_library_state(&config.current_library_id)
+    config
+        .libraries
+        .iter()
+        .find(|lib| lib.id == config.current_library_id)
+        .map(|lib| lib.state.clone())
+        .ok_or_else(|| "Library not found".to_string())
 }
 
 /// Hide/Show a library

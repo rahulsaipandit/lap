@@ -16,12 +16,13 @@
         showEmbeddedStatusBar ? 'pb-8' : '',
       ]"
     >
-      <template v-if="!isSplit && fileIndex >= 0">
+      <template v-if="splitCount === 1 && fileIndex >= 0">
         <MediaViewer
           ref="mediaViewerRef"
           :mode="2"
           :isFullScreen="isFullScreen"
           :file="fileInfo"
+          :showThumbnailPlaceholder="true"
           :nextFilePath="nextFilePath"
           :hasPrevious="fileIndex > 0"
           :hasNext="fileIndex < fileCount - 1"
@@ -35,7 +36,6 @@
           :imageMinScale="imageMinScale"
           :imageMaxScale="imageMaxScale"
           :isZoomFit="isZoomFit"
-          :isSplit="isSplit"
           :isSyncViewport="isSyncViewport"
           :showWindowControls="true"
           @prev="clickPrev()"
@@ -45,6 +45,7 @@
           @item-action="handleItemAction"
           @scale="clickScale"
           @update:isZoomFit="(val) => handleZoomFitUpdate(val, 'left')"
+          @view-background-change="setViewerBackground"
           @media-dblclick="toggleZoomFit()"
           @toggle-full-screen="toggleNativeFullScreen"
           @close="closeWindow"
@@ -61,7 +62,7 @@
         -->
       </template>
 
-      <template v-else-if="isSplit && fileIndex >= 0">
+      <template v-else-if="splitCount > 1 && fileIndex >= 0">
         <div class="w-full h-full flex flex-col">
           <!-- Shared toolbar above both panes -->
           <MediaViewer
@@ -70,21 +71,21 @@
             :showToolbar="true"
             :showWindowControls="true"
             :isFullScreen="isFullScreen"
-            :file="activePane === 'left' ? fileInfo : rightFileInfo"
-            :nextFilePath="activePane === 'left' ? nextFilePath : rightNextFilePath"
-            :hasPrevious="activePane === 'left' ? fileIndex > 0 : rightFileIndex > 0"
-            :hasNext="activePane === 'left' ? fileIndex < fileCount - 1 : rightFileIndex < fileCount - 1"
-            :fileIndex="activePane === 'left' ? fileIndex : rightFileIndex"
+            :file="getFileInfoByPane(activePane)"
+            :nextFilePath="getNextFilePathByPane(activePane)"
+            :hasPrevious="getFileIndexByPane(activePane) > 0"
+            :hasNext="getFileIndexByPane(activePane) < fileCount - 1"
+            :fileIndex="getFileIndexByPane(activePane)"
             :fileCount="fileCount"
             :isSlideShow="false"
             :canSlideShow="false"
             :canInteract="true"
-            :imageScale="activePane === 'left' ? imageScale : rightImageScale"
-            :imageMinScale="activePane === 'left' ? imageMinScale : rightImageMinScale"
-            :imageMaxScale="activePane === 'left' ? imageMaxScale : rightImageMaxScale"
-            :isZoomFit="activePane === 'left' ? isZoomFit : rightIsZoomFit"
-            :isSplit="isSplit"
+            :imageScale="getPaneScale(activePane).scale"
+            :imageMinScale="getPaneScale(activePane).min"
+            :imageMaxScale="getPaneScale(activePane).max"
+            :isZoomFit="getZoomFitByPane(activePane)"
             :isSyncViewport="isSyncViewport"
+            :showSyncViewportControl="isCompareModeSession"
             :forceToolbarVisible="isFullScreen && splitToolbarVisible"
             @prev="clickPrev(activePane)"
             @next="clickNext(activePane)"
@@ -98,101 +99,54 @@
           />
 
           <!-- Split Panes -->
-          <div class="flex-1 flex min-h-0">
+          <div
+            class="flex-1 grid min-h-0"
+            :class="splitCount === 4 ? 'grid-cols-2 grid-rows-2' : 'grid-cols-2 grid-rows-1'"
+          >
             <div
-              class="relative w-1/2 h-full border-r border-base-content/10"
-              @mousedown="setActivePane('left')"
+              v-for="pane in visiblePanes"
+              :key="pane"
+              class="relative min-w-0 min-h-0"
+              :class="[paneBorderClass(pane), !isPaneAvailable(pane) ? 'pointer-events-none opacity-40' : '']"
+              @mousedown="setActivePane(pane)"
             >
-              <IconDot
-                v-if="activePane === 'left'"
-                class="absolute right-2 top-2 z-90 t-icon-size-sm text-primary pointer-events-none"
-              />
               <MediaViewer
-                ref="mediaViewerRef"
+                :ref="(el) => setPaneViewerRef(pane, el)"
                 :mode="2"
                 :isFullScreen="isFullScreen"
-                :file="fileInfo"
-                :nextFilePath="nextFilePath"
-                :hasPrevious="fileIndex > 0"
-                :hasNext="fileIndex < fileCount - 1"
-                :fileIndex="fileIndex"
+                :file="getFileInfoByPane(pane)"
+                :showThumbnailPlaceholder="true"
+                :nextFilePath="getNextFilePathByPane(pane)"
+                :hasPrevious="getFileIndexByPane(pane) > 0"
+                :hasNext="getFileIndexByPane(pane) < fileCount - 1"
+                :fileIndex="getFileIndexByPane(pane)"
                 :fileCount="fileCount"
                 :isSlideShow="false"
                 :canSlideShow="false"
-                :canInteract="activePane === 'left'"
+                :canInteract="isPaneAvailable(pane) && activePane === pane"
+                :isPlaybackActive="isPaneAvailable(pane) && activePane === pane"
                 :showToolbar="false"
-                :imageScale="imageScale"
-                :imageMinScale="imageMinScale"
-                :imageMaxScale="imageMaxScale"
-                :isZoomFit="isZoomFit"
-                @prev="clickPrev('left')"
-                @next="clickNext('left')"
-                @toggle-slide-show="clickSlideShow('left')"
+                :imageScale="getPaneScale(pane).scale"
+                :imageMinScale="getPaneScale(pane).min"
+                :imageMaxScale="getPaneScale(pane).max"
+                :isZoomFit="getZoomFitByPane(pane)"
+                @prev="clickPrev(pane)"
+                @next="clickNext(pane)"
+                @toggle-slide-show="clickSlideShow(pane)"
                 @item-action="handleItemAction"
-                @scale="clickScale($event, 'left')"
-                @update:isZoomFit="(val) => handleZoomFitUpdate(val, 'left')"
-                @media-dblclick="toggleZoomFit('left')"
-                @viewport-change="handleViewportChange($event, 'left')"
+                @scale="clickScale($event, pane)"
+                @update:isZoomFit="(val) => handleZoomFitUpdate(val, pane)"
+                @view-background-change="setViewerBackground"
+                @media-dblclick="toggleZoomFit(pane)"
+                @viewport-change="handleViewportChange($event, pane)"
                 @toggle-full-screen="toggleNativeFullScreen"
                 @close="closeWindow"
                 @slideshow-next="handleSlideshowNext"
               />
-              <!--
-              <div v-if="config.settings.showComment && fileInfo?.comments?.length > 0" 
-                class="absolute flex m-2 p-2 bottom-0 left-0 right-0 text-sm bg-base-100/30 rounded-box select-text"
-              >
-                <IconComment class="t-icon-size-sm shrink-0 mr-2"></IconComment>
-                {{ fileInfo?.comments }}
-              </div>
-              -->
-            </div>
-
-            <div
-              class="relative w-1/2 h-full"
-              @mousedown="setActivePane('right')"
-            >
-              <IconDot
-                v-if="activePane === 'right'"
-                class="absolute left-2 top-2 z-90 t-icon-size-sm text-primary pointer-events-none"
+              <div
+                v-if="isPaneAvailable(pane) && activePane === pane"
+                class="absolute inset-0 z-90 border border-primary/70 pointer-events-none"
               />
-              <MediaViewer
-                ref="rightMediaViewerRef"
-                :mode="2"
-                :isFullScreen="isFullScreen"
-                :file="rightFileInfo"
-                :nextFilePath="rightNextFilePath"
-                :hasPrevious="rightFileIndex > 0"
-                :hasNext="rightFileIndex < fileCount - 1"
-                :fileIndex="rightFileIndex"
-                :fileCount="fileCount"
-                :isSlideShow="false"
-                :canSlideShow="false"
-                :canInteract="activePane === 'right'"
-                :showToolbar="false"
-                :imageScale="rightImageScale"
-                :imageMinScale="rightImageMinScale"
-                :imageMaxScale="rightImageMaxScale"
-                :isZoomFit="rightIsZoomFit"
-                @prev="clickPrev('right')"
-                @next="clickNext('right')"
-                @toggle-slide-show="clickSlideShow('right')"
-                @item-action="handleItemAction"
-                @scale="clickScale($event, 'right')"
-                @update:isZoomFit="(val) => handleZoomFitUpdate(val, 'right')"
-                @media-dblclick="toggleZoomFit('right')"
-                @viewport-change="handleViewportChange($event, 'right')"
-                @toggle-full-screen="toggleNativeFullScreen"
-                @close="closeWindow"
-                @slideshow-next="handleSlideshowNext"
-              />
-              <!--
-              <div v-if="config.settings.showComment && rightFileInfo?.comments?.length > 0" 
-                class="absolute flex m-2 p-2 bottom-0 left-0 right-0 text-sm bg-base-100/30 rounded-box select-text"
-              >
-                <IconComment class="t-icon-size-sm shrink-0 mr-2"></IconComment>
-                {{ rightFileInfo?.comments }}
-              </div>
-              -->
             </div>
           </div>
         </div>
@@ -209,43 +163,15 @@
       v-if="showEmbeddedStatusBar"
       class="absolute bottom-0 left-0 right-0 z-30 h-8 bg-base-300/80 backdrop-blur-md"
     >
-      <template v-if="!isSplit">
-        <StatusBar
-          :selected-file="fileInfo"
-          :selected-item-index="fileIndex"
-          :total-file-count="fileCount"
-          :total-file-size="fileInfo?.size || 0"
-          :image-scale="imageScale"
-          :show-scale="true"
-          :is-embedded="true"
-        />
-      </template>
-      <template v-else>
-        <div class="h-8 flex">
-          <div class="w-1/2 border-r border-base-content/10">
-            <StatusBar
-              :selected-file="fileInfo"
-              :selected-item-index="fileIndex"
-              :total-file-count="fileCount"
-              :total-file-size="fileInfo?.size || 0"
-              :image-scale="imageScale"
-              :show-scale="true"
-              :is-embedded="true"
-            />
-          </div>
-          <div class="w-1/2">
-            <StatusBar
-              :selected-file="rightFileInfo"
-              :selected-item-index="rightFileIndex"
-              :total-file-count="fileCount"
-              :total-file-size="rightFileInfo?.size || 0"
-              :image-scale="rightImageScale"
-              :show-scale="true"
-              :is-embedded="true"
-            />
-          </div>
-        </div>
-      </template>
+      <StatusBar
+        :selected-file="activeFileInfo"
+        :selected-item-index="getFileIndexByPane(statusPane)"
+        :total-file-count="fileCount"
+        :total-file-size="activeFileInfo?.size || 0"
+        :image-scale="getPaneScale(statusPane).display"
+        :show-scale="true"
+        :is-embedded="true"
+      />
     </div>
 
     <TaggingDialog
@@ -253,6 +179,13 @@
       :fileIds="taggingFileIds"
       @ok="updateFileHasTags"
       @cancel="showTaggingDialog = false"
+    />
+
+    <AddToCollectionDialog
+      v-if="showAddToCollectionDialog"
+      :fileIds="collectionFileIds"
+      @applied="handleCollectionsAdded"
+      @cancel="showAddToCollectionDialog = false"
     />
 
     <MessageBox
@@ -274,19 +207,22 @@
 
 <script setup lang="ts">
 
-import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted, reactive } from 'vue';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit, listen } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
+import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
-import { isWin, isMac, setTheme, getSlideShowInterval, SCALE_VALUES } from '@/common/utils';
+import { isWin, isMac, isLinux, setTheme, getSlideShowInterval, SCALE_VALUES } from '@/common/utils';
+import { matchesShortcut, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import {
   editFileComment,
   getFileInfo,
   getTagsForFile,
   setFileFavorite,
   setFileRating,
+  setFileCullingFlag,
   setFileRotate,
 } from '@/common/api';
 
@@ -295,19 +231,21 @@ import MessageBox from '@/components/MessageBox.vue';
 import TButton from '@/components/TButton.vue';
 import StatusBar from '@/components/StatusBar.vue';
 import TaggingDialog from '@/components/TaggingDialog.vue';
+import AddToCollectionDialog from '@/components/AddToCollectionDialog.vue';
 
 import { 
   IconSearch,
   IconComment,
-  IconDot,
  } from '@/common/icons';
 
 /// i18n
-const { locale, messages } = useI18n();
+const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
+const toast = useToast();
 
 const appWindow = getCurrentWebviewWindow()
+const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
 
 // input parameters
 const fileId = ref(0);       // File ID
@@ -321,14 +259,19 @@ const isTransitionDisabled = ref(true);
 
 const mediaViewerRef = ref<any>(null); // media viewer reference
 const rightMediaViewerRef = ref<any>(null); // right media viewer reference (split mode)
+type Pane = 'left' | 'right' | 'bottomLeft' | 'bottomRight';
+const allPanes: Pane[] = ['left', 'right', 'bottomLeft', 'bottomRight'];
+const paneViewerRefs = new Map<Pane, any>();
 const isFullScreen = ref(false);
+const wasMaximizedBeforeFullScreen = ref(false);
 const isZoomFit = ref(true);
 const rightIsZoomFit = ref(true);
-const isSplit = ref(false);
-const activePane = ref<'left' | 'right'>('left');
+const splitCount = ref<1 | 2 | 4>(1);
+const activePane = ref<Pane>('left');
 const isSyncViewport = ref(false);
 const isCompareModeSession = ref(false);
-const syncingPane = ref<'left' | 'right' | ''>('');
+const compareFileCount = ref(0);
+const syncingPane = ref<Pane | ''>('');
 const animateSyncOnce = ref(false);
 const splitToolbarVisible = ref(false);
 
@@ -337,9 +280,11 @@ const slideShowIntervalIndex = ref(Number(config.settings.slideShowInterval ?? 0
 let timer: NodeJS.Timeout | null = null;  // Timer for slide show
 
 const imageScale = ref(1);          // Image scale
+const imageDisplayScale = ref(1);   // User-facing image scale
 const imageMinScale = ref(0);       // Minimum image scale
 const imageMaxScale = ref(10);      // Maximum image scale
 const rightImageScale = ref(1);     // Right image scale
+const rightImageDisplayScale = ref(1); // User-facing right image scale
 const rightImageMinScale = ref(0);  // Right minimum scale
 const rightImageMaxScale = ref(10); // Right maximum scale
 
@@ -347,25 +292,56 @@ const rightFileId = ref(0);         // Right file ID
 const rightFileIndex = ref(-1);     // Right file index
 const rightFileInfo = ref<any>(null);
 const rightNextFilePath = ref('');
+const extraPaneState = reactive<Record<'bottomLeft' | 'bottomRight', {
+  fileId: number;
+  fileIndex: number;
+  fileInfo: any;
+  nextFilePath: string;
+  isZoomFit: boolean;
+  scale: number;
+  displayScale: number;
+  minScale: number;
+  maxScale: number;
+}>>({
+  bottomLeft: {
+    fileId: 0, fileIndex: -1, fileInfo: null, nextFilePath: '',
+    isZoomFit: true, scale: 1, displayScale: 1, minScale: 0, maxScale: 10,
+  },
+  bottomRight: {
+    fileId: 0, fileIndex: -1, fileInfo: null, nextFilePath: '',
+    isZoomFit: true, scale: 1, displayScale: 1, minScale: 0, maxScale: 10,
+  },
+});
+const visiblePanes = computed<Pane[]>(() =>
+  splitCount.value === 4 ? allPanes : ['left', 'right']
+);
 const showTaggingDialog = ref(false);
+const showAddToCollectionDialog = ref(false);
 const showCommentMsgbox = ref(false);
 const taggingFileIds = ref<number[]>([]);
+const collectionFileIds = ref<number[]>([]);
 
 let unlistenImg: () => void;
 let unlistenGridView: () => void;
 let unlistenFilesDeleted: (() => void) | null = null;
 
 const activeFileInfo = computed(() => {
-  return isSplit.value && activePane.value === 'right' ? rightFileInfo.value : fileInfo.value;
+  return getFileInfoByPane(splitCount.value > 1 ? activePane.value : 'left');
 });
 
 const activeFileId = computed(() => {
-  return isSplit.value && activePane.value === 'right' ? rightFileId.value : fileId.value;
+  return getFileIdByPane(splitCount.value > 1 ? activePane.value : 'left');
 });
+const statusPane = computed<Pane>(() => splitCount.value > 1 ? activePane.value : 'left');
 const showEmbeddedStatusBar = computed(() => config.settings.showStatusBar && !isFullScreen.value);
 
 function normalizeScale(value: number) {
   return SCALE_VALUES.find((item) => item === Number(value)) ?? 1;
+}
+
+function normalizeSplitCount(value: unknown): 1 | 2 | 4 {
+  const count = Number(value);
+  return count === 2 || count === 4 ? count : 1;
 }
 
 function applyViewerScale(scale: number) {
@@ -374,7 +350,7 @@ function applyViewerScale(scale: number) {
 }
 
 function handleRootMouseMove(event: MouseEvent) {
-  if (!isFullScreen.value || !isSplit.value) {
+  if (!isFullScreen.value || splitCount.value === 1) {
     splitToolbarVisible.value = false;
     return;
   }
@@ -403,15 +379,16 @@ onMounted(async() => {
   const initialRightFileId = Number(urlParams.get('rightFileId') || '0');
   const initialRightFileIndex = Number(urlParams.get('rightFileIndex') || '-1');
   rightNextFilePath.value = decodeURIComponent(urlParams.get('rightNextFilePath') || '');
-  const forceSplit = urlParams.get('forceSplit') === '1';
+  const forceSplitCount = normalizeSplitCount(urlParams.get('forceSplitCount'));
   isCompareModeSession.value = urlParams.get('compareMode') === '1';
+  compareFileCount.value = isCompareModeSession.value ? Number(urlParams.get('compareFileCount') || '0') : 0;
 
-  isSplit.value = forceSplit ? true : !!config.imageViewer?.isSplit;
+  splitCount.value = 1;
   if (isCompareModeSession.value) {
-    isSplit.value = true;
-    isSyncViewport.value = true;
+    splitCount.value = forceSplitCount > 1 ? forceSplitCount : 2;
+    isSyncViewport.value = !!config.imageViewer?.isSyncViewport;
   } else {
-    isSyncViewport.value = isSplit.value ? !!config.imageViewer?.isSyncViewport : false;
+    isSyncViewport.value = false;
   }
   rightFileId.value = initialRightFileId > 0 ? initialRightFileId : 0;
   rightFileIndex.value = initialRightFileId > 0 ? initialRightFileIndex : -1;
@@ -426,37 +403,31 @@ onMounted(async() => {
       return;
     }
 
-    const pane = event.payload?.pane === 'right' ? 'right' : 'left';
+    const requestedPane = String(event.payload?.pane || 'left');
+    const pane: Pane = allPanes.includes(requestedPane as Pane) ? requestedPane as Pane : 'left';
     if (typeof event.payload?.compareMode === 'boolean') {
       isCompareModeSession.value = !!event.payload.compareMode;
     }
-    if (typeof event.payload?.forceSplit === 'boolean') {
-      isSplit.value = !!event.payload.forceSplit;
-      if (isSplit.value && typeof event.payload?.forceSyncViewport === 'boolean') {
-        isSyncViewport.value = !!event.payload.forceSyncViewport;
-      }
-      if (!isSplit.value) {
-        rightFileId.value = 0;
-        rightFileIndex.value = -1;
-        rightFileInfo.value = null;
-        rightNextFilePath.value = '';
-        rightIsZoomFit.value = true;
-      }
+    if (typeof event.payload?.compareFileCount === 'number') {
+      compareFileCount.value = Number(event.payload.compareFileCount);
+    } else if (!isCompareModeSession.value) {
+      compareFileCount.value = 0;
+    }
+    const requestedSplitCount = normalizeSplitCount(event.payload?.forceSplitCount);
+    if (requestedSplitCount > 1) {
+      splitCount.value = requestedSplitCount;
     }
     if (event.payload?.resetSplit) {
+      if (isCompareModeSession.value) clearSecondaryPanes();
       if (isCompareModeSession.value) {
-        isSplit.value = true;
-        isSyncViewport.value = true;
+        splitCount.value = requestedSplitCount > 1 ? requestedSplitCount : splitCount.value > 1 ? splitCount.value : 2;
+        isSyncViewport.value = !!config.imageViewer?.isSyncViewport;
       } else {
-        isSplit.value = !!config.imageViewer?.isSplit;
-        isSyncViewport.value = isSplit.value ? !!config.imageViewer?.isSyncViewport : false;
+        splitCount.value = 1;
+        isSyncViewport.value = false;
       }
-      if (!isSplit.value) {
-        rightFileId.value = 0;
-        rightFileIndex.value = -1;
-        rightFileInfo.value = null;
-        rightNextFilePath.value = '';
-        rightIsZoomFit.value = true;
+      if (splitCount.value === 1) {
+        clearSecondaryPanes();
       }
     }
 
@@ -465,12 +436,19 @@ onMounted(async() => {
       rightFileId.value = Number(event.payload.fileId);
       rightFileIndex.value = Number(event.payload.fileIndex);
       rightNextFilePath.value = event.payload.nextFilePath || '';
+      if (rightFileId.value <= 0) rightFileInfo.value = null;
+    } else if (pane === 'bottomLeft' || pane === 'bottomRight') {
+      extraPaneState[pane].fileId = Number(event.payload.fileId);
+      extraPaneState[pane].fileIndex = Number(event.payload.fileIndex);
+      extraPaneState[pane].nextFilePath = event.payload.nextFilePath || '';
+      if (extraPaneState[pane].fileId <= 0) extraPaneState[pane].fileInfo = null;
     } else {
       fileId.value = Number(event.payload.fileId);
       fileIndex.value = Number(event.payload.fileIndex);
       nextFilePath.value = event.payload.nextFilePath || '';
     }
   });
+  ensureFourPanesLoaded();
 
 
   unlistenGridView = await listen('message-from-content', (event) => {
@@ -478,25 +456,22 @@ onMounted(async() => {
     console.log('message-from-content:', message, targetFileId);
     switch (message) {
       case 'rotate':
+        for (const pane of allPanes) {
+          if (targetFileId !== getFileIdByPane(pane)) continue;
+          getViewerRef(pane)?.rotateRight();
+          const target = getFileInfoByPane(pane);
+          if (target) target.rotate = (target.rotate || 0) + 90;
+        }
         if (targetFileId === fileId.value) {
-          mediaViewerRef.value?.rotateRight();
           iconRotate.value += 90;
-          if (fileInfo.value) {
-            fileInfo.value.rotate = (fileInfo.value.rotate || 0) + 90;
-          }
-        } else if (targetFileId === rightFileId.value) {
-          rightMediaViewerRef.value?.rotateRight();
-          if (rightFileInfo.value) {
-            rightFileInfo.value.rotate = (rightFileInfo.value.rotate || 0) + 90;
-          }
         }
         break;
       case 'update-file-meta':
-        if (targetFileId === fileId.value && fileInfo.value) {
-          Object.assign(fileInfo.value, changes || {});
-        }
-        if (targetFileId === rightFileId.value && rightFileInfo.value) {
-          Object.assign(rightFileInfo.value, changes || {});
+        for (const pane of allPanes) {
+          const target = getFileInfoByPane(pane);
+          if (targetFileId === getFileIdByPane(pane) && target) {
+            Object.assign(target, changes || {});
+          }
         }
         break;
       default:
@@ -508,6 +483,31 @@ onMounted(async() => {
     const deletedIds = Array.isArray(event?.payload?.fileIds)
       ? event.payload.fileIds.map((id: any) => Number(id)).filter((id: number) => id > 0)
       : [];
+    const comparisonNextCount = Number(event?.payload?.compareFileCount);
+    // An external deletion arrives before Content has updated and rebroadcast
+    // the comparison snapshot. Ignore that first event instead of applying the
+    // full file list count to this isolated session.
+    if (isCompareModeSession.value && Number.isNaN(comparisonNextCount)) return;
+    if (isCompareModeSession.value) {
+      compareFileCount.value = comparisonNextCount;
+      fileCount.value = comparisonNextCount;
+      fileId.value = 0;
+      fileIndex.value = -1;
+      fileInfo.value = null;
+      nextFilePath.value = '';
+      clearSecondaryPanes();
+      activePane.value = 'left';
+
+      // Compare always restarts with the first visible items in the updated
+      // selection, rather than preserving stale per-pane positions.
+      if (comparisonNextCount > 0) {
+        requestFileAtIndex(0, 'left');
+        if (comparisonNextCount > 1) requestFileAtIndex(1, 'right');
+        if (splitCount.value === 4 && comparisonNextCount > 2) requestFileAtIndex(2, 'bottomLeft');
+        if (splitCount.value === 4 && comparisonNextCount > 3) requestFileAtIndex(3, 'bottomRight');
+      }
+      return;
+    }
     const nextCount = Number(event?.payload?.fileCount);
     if (!Number.isNaN(nextCount) && nextCount >= 0) {
       fileCount.value = nextCount;
@@ -521,6 +521,12 @@ onMounted(async() => {
       rightFileIndex.value = -1;
       rightFileInfo.value = null;
       rightNextFilePath.value = '';
+      for (const pane of ['bottomLeft', 'bottomRight'] as const) {
+        extraPaneState[pane].fileId = 0;
+        extraPaneState[pane].fileIndex = -1;
+        extraPaneState[pane].fileInfo = null;
+        extraPaneState[pane].nextFilePath = '';
+      }
       return;
     }
 
@@ -532,10 +538,17 @@ onMounted(async() => {
       requestFileAtIndex(targetIndex, 'left');
     }
 
-    if (isSplit.value && (rightDeleted || rightFileIndex.value >= fileCount.value)) {
+    if (splitCount.value > 1 && (rightDeleted || rightFileIndex.value >= fileCount.value)) {
       const fallbackBase = rightFileIndex.value >= 0 ? rightFileIndex.value : (fileIndex.value + 1);
       const targetIndex = Math.max(0, Math.min(fallbackBase, fileCount.value - 1));
       requestFileAtIndex(targetIndex, 'right');
+    }
+
+    for (const pane of ['bottomLeft', 'bottomRight'] as const) {
+      const state = extraPaneState[pane];
+      if (splitCount.value !== 4 || (!deletedIds.includes(state.fileId) && state.fileIndex < fileCount.value)) continue;
+      const targetIndex = Math.max(0, Math.min(state.fileIndex, fileCount.value - 1));
+      requestFileAtIndex(targetIndex, pane);
     }
   });
 
@@ -571,145 +584,271 @@ function handleKeyDown(event: KeyboardEvent) {
     return;
   }
 
-  // Disable keyboard events during slideshow except the toggle shortcut.
-  if (isSlideShow.value && event.key !== 'Escape' && event.code !== 'KeyP') {
+  if (event.key === 'Tab' && splitCount.value > 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    const panes = getAvailablePanes();
+    if (panes.length === 0) return;
+    const currentIndex = panes.indexOf(activePane.value);
+    const direction = event.shiftKey ? -1 : 1;
+    const startIndex = currentIndex >= 0 ? currentIndex : 0;
+    setActivePane(panes[(startIndex + direction + panes.length) % panes.length]);
     return;
   }
 
-  const ratingShortcut = Number.parseInt(event.key, 10);
-  const hasModifier = event.metaKey || event.ctrlKey || event.altKey;
+  // Disable keyboard events during slideshow except close and toggle slideshow.
+  if (
+    isSlideShow.value &&
+    !matchesShortcut('view.close', event, shortcutPlatform) &&
+    !matchesShortcut('view.cycleBackground', event, shortcutPlatform) &&
+    getMatchedViewBackground(event) === null &&
+    !matchesShortcut('slideshow.toggle', event, shortcutPlatform)
+  ) {
+    return;
+  }
 
-  if (!hasModifier && Number.isInteger(ratingShortcut) && ratingShortcut >= 0 && ratingShortcut <= 5) {
+  const ratingShortcut = getMatchedRating(event);
+  if (ratingShortcut !== null) {
     event.preventDefault();
     void setCurrentFileRating(ratingShortcut, getActiveFilePane());
     return;
   }
 
-  if (!hasModifier) {
-    if (event.code === 'KeyP') {
-      event.preventDefault();
-      clickSlideShow(getActiveFilePane());
-      return;
-    }
-
-    if (event.code === 'KeyF') {
-      event.preventDefault();
-      void toggleFavorite(getActiveFilePane());
-      return;
-    }
-
-    if (event.code === 'KeyT') {
-      event.preventDefault();
-      clickTag(getActiveFilePane());
-      return;
-    }
-
-    if (event.code === 'KeyC') {
-      event.preventDefault();
-      openCommentEditor(getActiveFilePane());
-      return;
-    }
-
-    if (event.code === 'KeyR') {
-      event.preventDefault();
-      void clickRotate(getActiveFilePane());
-      return;
-    }
-  }
-
-  if (event.key === 'Tab' && isSplit.value) {
+  const cullingShortcut = getMatchedCulling(event);
+  if (cullingShortcut !== null) {
     event.preventDefault();
-    setActivePane(activePane.value === 'left' ? 'right' : 'left');
+    void setCurrentFileCullingFlag(cullingShortcut, getActiveFilePane());
     return;
   }
 
-  const key = event.key;
-  if ((keyActions as any)[key]) {
+  if (matchesShortcut('slideshow.toggle', event, shortcutPlatform)) {
     event.preventDefault();
-    (keyActions as any)[key]();
+    clickSlideShow(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('view.cycleBackground', event, shortcutPlatform)) {
+    event.preventDefault();
+    config.cycleViewBackground();
+    void emit('settings-viewBackground-changed', config.settings.viewBackground);
+    return;
+  }
+
+  const viewBackground = getMatchedViewBackground(event);
+  if (viewBackground !== null) {
+    event.preventDefault();
+    setViewerBackground(viewBackground);
+    return;
+  }
+
+  if (matchesShortcut('meta.favorite', event, shortcutPlatform)) {
+    event.preventDefault();
+    void toggleFavorite(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('meta.tag', event, shortcutPlatform)) {
+    event.preventDefault();
+    clickTag(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('meta.collection', event, shortcutPlatform)) {
+    event.preventDefault();
+    clickAddToCollection(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('meta.comment', event, shortcutPlatform)) {
+    event.preventDefault();
+    openCommentEditor(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('meta.rotate', event, shortcutPlatform)) {
+    event.preventDefault();
+    void clickRotate(getActiveFilePane());
+    return;
+  }
+
+  if (matchesShortcut('view.togglePane', event, shortcutPlatform) && splitCount.value > 1) {
+    event.preventDefault();
+    const panes = getAvailablePanes();
+    if (panes.length === 0) return;
+    const currentIndex = panes.indexOf(activePane.value);
+    setActivePane(panes[((currentIndex >= 0 ? currentIndex : -1) + 1) % panes.length]);
+    return;
+  }
+
+  const matchedAction = getMatchedViewAction(event);
+  if (matchedAction) {
+    event.preventDefault();
+    viewActions[matchedAction]?.();
   }
 }
 
-const keyActions = {
-  ArrowLeft:  () => clickPrev(getActivePane()),
-  ArrowRight: () => clickNext(getActivePane()),
-  Home:       () => clickHome(getActivePane()),
-  End:        () => clickEnd(getActivePane()),
-  ArrowUp:    () => clickZoomIn(getActivePane()),
-  ArrowDown:  () => clickZoomOut(getActivePane()),
-  '=':        () => clickZoomIn(getActivePane()),
-  '-':        () => clickZoomOut(getActivePane()),
-  ' ':        () => toggleZoomFit(getActivePane()),
-  Escape:     () => closeWindow(),
-};
+const ratingActions: Array<{ actionId: ShortcutActionId; rating: number }> = [
+  { actionId: 'meta.rating.clear', rating: 0 },
+  { actionId: 'meta.rating.one', rating: 1 },
+  { actionId: 'meta.rating.two', rating: 2 },
+  { actionId: 'meta.rating.three', rating: 3 },
+  { actionId: 'meta.rating.four', rating: 4 },
+  { actionId: 'meta.rating.five', rating: 5 },
+];
+const cullingActions: Array<{ actionId: ShortcutActionId; cullingFlag: number }> = [
+  { actionId: 'meta.culling.pick', cullingFlag: 1 },
+  { actionId: 'meta.culling.reject', cullingFlag: 2 },
+  { actionId: 'meta.culling.unreviewed', cullingFlag: 0 },
+];
 
-function getActivePane(): 'left' | 'right' {
-  return isSplit.value ? activePane.value : 'left';
+function getMatchedRating(event: KeyboardEvent) {
+  const match = ratingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
+  return match ? match.rating : null;
 }
 
-function setActivePane(pane: 'left' | 'right') {
+function getMatchedCulling(event: KeyboardEvent) {
+  const match = cullingActions.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
+  return match ? match.cullingFlag : null;
+}
+
+function getMatchedViewBackground(event: KeyboardEvent): number | null {
+  const match = VIEW_BACKGROUND_SHORTCUTS.find(({ actionId }) => matchesShortcut(actionId, event, shortcutPlatform));
+  return match?.value ?? null;
+}
+
+const viewActions: Partial<Record<ShortcutActionId, () => void>> = {
+  'view.previous': () => clickPrev(getActivePane()),
+  'view.next': () => clickNext(getActivePane()),
+  'view.first': () => clickHome(getActivePane()),
+  'view.last': () => clickEnd(getActivePane()),
+  'view.zoomIn': () => clickZoomIn(getActivePane()),
+  'view.zoomOut': () => clickZoomOut(getActivePane()),
+  'view.zoomInDirectional': () => clickZoomIn(getActivePane()),
+  'view.zoomOutDirectional': () => clickZoomOut(getActivePane()),
+  'view.zoomFit': () => toggleZoomFit(getActivePane()),
+  'view.close': () => closeWindow(),
+};
+
+const viewActionOrder: ShortcutActionId[] = [
+  'view.previous',
+  'view.next',
+  'view.first',
+  'view.last',
+  'view.zoomIn',
+  'view.zoomOut',
+  'view.zoomInDirectional',
+  'view.zoomOutDirectional',
+  'view.zoomFit',
+  'view.close',
+];
+
+function getMatchedViewAction(event: KeyboardEvent) {
+  if (isMac && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+    if (event.key === 'ArrowUp') return 'view.first';
+    if (event.key === 'ArrowDown') return 'view.last';
+  }
+  return viewActionOrder.find((actionId) => matchesShortcut(actionId, event, shortcutPlatform));
+}
+
+function getActivePane(): Pane {
+  return splitCount.value > 1 ? activePane.value : 'left';
+}
+
+function setActivePane(pane: Pane) {
+  if (!isPaneAvailable(pane)) return;
   activePane.value = pane;
 }
 
-function getViewerRef(pane: 'left' | 'right') {
-  return pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
+function isPaneAvailable(pane: Pane) {
+  return getFileIdByPane(pane) > 0;
 }
 
-function haveMatchingSyncableMedia() {
-  const leftType = fileInfo.value?.file_type;
-  const rightType = rightFileInfo.value?.file_type;
-  const isImageType = (t: number) => t === 1 || t === 3;
-  if (isImageType(leftType) && isImageType(rightType)) return true;
-  return leftType === 2 && rightType === 2;
+function getAvailablePanes() {
+  return visiblePanes.value.filter(isPaneAvailable);
 }
 
-function syncViewportFrom(pane: 'left' | 'right', animate = false) {
-  if (!isSplit.value || !isSyncViewport.value) return;
-  if (!haveMatchingSyncableMedia()) return;
+function setPaneViewerRef(pane: Pane, viewer: any) {
+  if (viewer) paneViewerRefs.set(pane, viewer);
+  else paneViewerRefs.delete(pane);
+  if (pane === 'left') mediaViewerRef.value = viewer;
+  if (pane === 'right') rightMediaViewerRef.value = viewer;
+}
+
+function getViewerRef(pane: Pane) {
+  return paneViewerRefs.get(pane)
+    || (pane === 'right' ? rightMediaViewerRef.value : pane === 'left' ? mediaViewerRef.value : null);
+}
+
+function paneBorderClass(pane: Pane) {
+  if (splitCount.value !== 4) return pane === 'left' ? 'border-r border-base-content/10' : '';
+  return {
+    left: 'border-r border-b border-base-content/10',
+    right: 'border-b border-base-content/10',
+    bottomLeft: 'border-r border-base-content/10',
+    bottomRight: '',
+  }[pane];
+}
+
+function syncViewportFrom(pane: Pane, animate = false) {
+  if (splitCount.value === 1 || !isSyncViewport.value) return;
 
   const sourceRef = getViewerRef(pane);
-  const targetPane = pane === 'left' ? 'right' : 'left';
-  const targetRef = getViewerRef(targetPane);
   const viewport = sourceRef?.getViewportState?.();
   if (!viewport) return;
 
   syncingPane.value = pane;
-  targetRef?.applyViewportState?.(viewport, !animate);
+  for (const targetPane of visiblePanes.value) {
+    if (targetPane !== pane) {
+      getViewerRef(targetPane)?.applyViewportState?.(viewport, !animate);
+    }
+  }
   syncingPane.value = '';
 }
 
-function handleViewportChange(viewport: any, pane: 'left' | 'right') {
-  if (!isSplit.value || !isSyncViewport.value) return;
+function handleViewportChange(viewport: any, pane: Pane) {
+  if (splitCount.value === 1 || !isSyncViewport.value) return;
   if (syncingPane.value) return;
-  if (!haveMatchingSyncableMedia()) return;
 
-  const targetPane = pane === 'left' ? 'right' : 'left';
   const shouldAnimate = animateSyncOnce.value;
   animateSyncOnce.value = false;
   syncingPane.value = pane;
   // Drag/wheel sync stays no-animation; zoom-fit sync can opt-in animation.
-  getViewerRef(targetPane)?.applyViewportState?.(viewport, !shouldAnimate);
+  for (const targetPane of visiblePanes.value) {
+    if (targetPane !== pane) {
+      getViewerRef(targetPane)?.applyViewportState?.(viewport, !shouldAnimate);
+    }
+  }
   syncingPane.value = '';
 }
 
-function getZoomFitByPane(pane: 'left' | 'right') {
-  return pane === 'right' ? rightIsZoomFit.value : isZoomFit.value;
+function getZoomFitByPane(pane: Pane) {
+  if (pane === 'right') return rightIsZoomFit.value;
+  if (pane === 'bottomLeft' || pane === 'bottomRight') return extraPaneState[pane].isZoomFit;
+  return isZoomFit.value;
 }
 
-function setZoomFitByPane(pane: 'left' | 'right', val: boolean) {
+function setZoomFitByPane(pane: Pane, val: boolean) {
   if (pane === 'right') {
     rightIsZoomFit.value = val;
+    return;
+  }
+  if (pane === 'bottomLeft' || pane === 'bottomRight') {
+    extraPaneState[pane].isZoomFit = val;
     return;
   }
   isZoomFit.value = val;
 }
 
-function handleZoomFitUpdate(val: boolean, pane: 'left' | 'right') {
+function handleZoomFitUpdate(val: boolean, pane: Pane) {
   setActivePane(pane);
   setZoomFitByPane(pane, val);
-  if (isSplit.value && isSyncViewport.value && haveMatchingSyncableMedia()) {
+  if (splitCount.value > 1 && isSyncViewport.value) {
     animateSyncOnce.value = true;
   }
+}
+
+function setViewerBackground(value: number) {
+  config.setViewBackground(value);
+  void emit('settings-viewBackground-changed', config.settings.viewBackground);
 }
 
 // Handle resize event
@@ -751,20 +890,53 @@ watch(() => config.settings.language, (newLanguage) => {
 // watch full screen
 watch(() => isFullScreen.value, async (newFullScreen) => {
   if (!config.imageViewer) {
-    (config as any).imageViewer = { isSplit: false, isSyncViewport: false, isFullScreen: false };
+    (config as any).imageViewer = { isSyncViewport: false, isFullScreen: false };
   }
   config.imageViewer.isFullScreen = newFullScreen;
 
   if(isWin) {
-    await appWindow.setFullscreen(newFullScreen);
-    await appWindow.setResizable(!newFullScreen);
-    // await appWindow.setDecorations(false);
+    const pauseWindowTransition = () => new Promise(resolve => setTimeout(resolve, 80));
+
+    if (newFullScreen) {
+      wasMaximizedBeforeFullScreen.value = await appWindow.isMaximized();
+      await appWindow.setResizable(true);
+
+      if (wasMaximizedBeforeFullScreen.value) {
+        await appWindow.unmaximize();
+        await pauseWindowTransition();
+      }
+
+      if (!(await appWindow.isFullscreen())) {
+        await appWindow.setFullscreen(true);
+      }
+    } else {
+      if (await appWindow.isFullscreen()) {
+        await appWindow.setFullscreen(false);
+        await pauseWindowTransition();
+      }
+
+      await appWindow.setResizable(true);
+
+      if (wasMaximizedBeforeFullScreen.value) {
+        await appWindow.maximize();
+      }
+
+      wasMaximizedBeforeFullScreen.value = false;
+    }
   } else if (isMac) {
       if (newFullScreen !== await appWindow.isFullscreen()) {
         await appWindow.setFullscreen(newFullScreen);
     }
   }
 }); 
+
+watch(() => isSyncViewport.value, (isSync) => {
+  if (!isCompareModeSession.value) return;
+  if (!config.imageViewer) {
+    (config as any).imageViewer = { isSyncViewport: false, isFullScreen: false };
+  }
+  config.imageViewer.isSyncViewport = isSync;
+});
 
 // watch file changed
 watch(() => fileId.value, async () => {
@@ -783,6 +955,12 @@ watch(() => rightFileId.value, async () => {
     rightFileInfo.value = null;
   }
 });
+
+for (const pane of ['bottomLeft', 'bottomRight'] as const) {
+  watch(() => extraPaneState[pane].fileId, async (newFileId) => {
+    extraPaneState[pane].fileInfo = newFileId > 0 ? await getFileInfo(newFileId) : null;
+  });
+}
 
 // watch file index
 watch(() => fileIndex.value, async (newIndex) => {
@@ -854,7 +1032,11 @@ watch(() => slideShowIntervalIndex.value, () => {
 });
 
 function ensureRightPaneLoaded() {
-  if (!isSplit.value) return;
+  if (splitCount.value === 1) return;
+  if (isCompareModeSession.value && compareFileCount.value < 2) {
+    clearSecondaryPanes();
+    return;
+  }
   if (rightFileIndex.value >= 0 && rightFileId.value > 0) return;
   if (fileCount.value <= 0 || fileIndex.value < 0) return;
 
@@ -862,52 +1044,92 @@ function ensureRightPaneLoaded() {
   requestFileAtIndex(nextIndex, 'right');
 }
 
-watch(() => isSplit.value, (val) => {
-  if (isCompareModeSession.value) {
-    if (!val) {
-      isSyncViewport.value = false;
-    } else {
-      ensureRightPaneLoaded();
-    }
-    return;
+function ensureFourPanesLoaded() {
+  if (splitCount.value !== 4 || fileCount.value <= 0 || fileIndex.value < 0) return;
+  ensureRightPaneLoaded();
+  for (const [pane, offset] of [['bottomLeft', 2], ['bottomRight', 3]] as const) {
+    if (isCompareModeSession.value && offset >= compareFileCount.value) continue;
+    if (extraPaneState[pane].fileIndex >= 0 && extraPaneState[pane].fileId > 0) continue;
+    requestFileAtIndex(Math.min(fileIndex.value + offset, fileCount.value - 1), pane);
   }
-  if (!config.imageViewer) {
-    (config as any).imageViewer = { isSplit: false, isSyncViewport: false, isFullScreen: false };
-  }
-  config.imageViewer.isSplit = val;
-  if (!val) {
-    isSyncViewport.value = false;
-  } else {
-    ensureRightPaneLoaded();
-  }
-});
+}
 
-watch(() => isSyncViewport.value, (val) => {
-  if (isCompareModeSession.value) return;
-  if (!config.imageViewer) {
-    (config as any).imageViewer = { isSplit: false, isSyncViewport: false, isFullScreen: false };
+function clearSecondaryPanes() {
+  rightFileId.value = 0;
+  rightFileIndex.value = -1;
+  rightFileInfo.value = null;
+  rightNextFilePath.value = '';
+  rightIsZoomFit.value = true;
+  for (const pane of ['bottomLeft', 'bottomRight'] as const) {
+    Object.assign(extraPaneState[pane], {
+      fileId: 0, fileIndex: -1, fileInfo: null, nextFilePath: '',
+      isZoomFit: true, scale: 1, displayScale: 1, minScale: 0, maxScale: 10,
+    });
   }
-  config.imageViewer.isSyncViewport = val;
+}
+
+watch(() => splitCount.value, (count) => {
+  if (count > 1) {
+    ensureRightPaneLoaded();
+    ensureFourPanesLoaded();
+  }
 });
 
 watch(() => [fileIndex.value, fileCount.value], () => {
   ensureRightPaneLoaded();
+  ensureFourPanesLoaded();
 });
 
-function requestFileAtIndex(index: number, pane: 'left' | 'right' = 'left') {
+function requestFileAtIndex(index: number, pane: Pane = 'left') {
   emit('message-from-image-viewer', { message: 'request-file-at-index', index, pane });
 }
 
-function getFileInfoByPane(pane: 'left' | 'right' = 'left') {
-  return pane === 'right' ? rightFileInfo.value : fileInfo.value;
+function getFileInfoByPane(pane: Pane = 'left') {
+  if (pane === 'right') return rightFileInfo.value;
+  if (pane === 'bottomLeft' || pane === 'bottomRight') return extraPaneState[pane].fileInfo;
+  return fileInfo.value;
 }
 
-function getFileIdByPane(pane: 'left' | 'right' = 'left') {
-  return pane === 'right' ? rightFileId.value : fileId.value;
+function getFileIdByPane(pane: Pane = 'left') {
+  if (pane === 'right') return rightFileId.value;
+  if (pane === 'bottomLeft' || pane === 'bottomRight') return extraPaneState[pane].fileId;
+  return fileId.value;
+}
+
+function getFileIndexByPane(pane: Pane = 'left') {
+  if (pane === 'right') return rightFileIndex.value;
+  if (pane === 'bottomLeft' || pane === 'bottomRight') return extraPaneState[pane].fileIndex;
+  return fileIndex.value;
+}
+
+function getNextFilePathByPane(pane: Pane = 'left') {
+  if (pane === 'right') return rightNextFilePath.value;
+  if (pane === 'bottomLeft' || pane === 'bottomRight') return extraPaneState[pane].nextFilePath;
+  return nextFilePath.value;
+}
+
+function getPaneScale(pane: Pane) {
+  if (pane === 'right') {
+    return {
+      scale: rightImageScale.value, display: rightImageDisplayScale.value,
+      min: rightImageMinScale.value, max: rightImageMaxScale.value,
+    };
+  }
+  if (pane === 'bottomLeft' || pane === 'bottomRight') {
+    const state = extraPaneState[pane];
+    return {
+      scale: state.scale, display: state.displayScale,
+      min: state.minScale, max: state.maxScale,
+    };
+  }
+  return {
+    scale: imageScale.value, display: imageDisplayScale.value,
+    min: imageMinScale.value, max: imageMaxScale.value,
+  };
 }
 
 function getActiveFilePane() {
-  return isSplit.value ? activePane.value : 'left';
+  return splitCount.value > 1 ? activePane.value : 'left';
 }
 
 function syncFileMetaToContent(targetFileId: number, changes: Record<string, any>) {
@@ -918,10 +1140,19 @@ function syncFileMetaToContent(targetFileId: number, changes: Record<string, any
   });
 }
 
-function clickPrev(pane: 'left' | 'right' = 'left') {
+function applyFileMetaToPanes(targetFileId: number, changes: Record<string, any>) {
+  for (const pane of allPanes) {
+    const target = getFileInfoByPane(pane);
+    if (targetFileId === getFileIdByPane(pane) && target) {
+      Object.assign(target, changes);
+    }
+  }
+}
+
+function clickPrev(pane: Pane = 'left') {
   setActivePane(pane);
-  const currentIndex = pane === 'right' ? rightFileIndex.value : fileIndex.value;
-  const viewerRef = pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
+  const currentIndex = getFileIndexByPane(pane);
+  const viewerRef = getViewerRef(pane);
   if (currentIndex > 0) {
     requestFileAtIndex(currentIndex - 1, pane);
   } else {
@@ -929,10 +1160,10 @@ function clickPrev(pane: 'left' | 'right' = 'left') {
   }
 }
 
-function clickNext(pane: 'left' | 'right' = 'left') {
+function clickNext(pane: Pane = 'left') {
   setActivePane(pane);
-  const currentIndex = pane === 'right' ? rightFileIndex.value : fileIndex.value;
-  const viewerRef = pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
+  const currentIndex = getFileIndexByPane(pane);
+  const viewerRef = getViewerRef(pane);
 
   // Fix loop for slideshow
   if (isSlideShow.value && currentIndex >= fileCount.value - 1) {
@@ -947,17 +1178,17 @@ function clickNext(pane: 'left' | 'right' = 'left') {
   }
 }
 
-function clickHome(pane: 'left' | 'right' = 'left') {
+function clickHome(pane: Pane = 'left') {
   setActivePane(pane);
   requestFileAtIndex(0, pane);
 }
 
-function clickEnd(pane: 'left' | 'right' = 'left') {
+function clickEnd(pane: Pane = 'left') {
   setActivePane(pane);
   requestFileAtIndex(fileCount.value - 1, pane);
 }
 
-function clickSlideShow(pane: 'left' | 'right' = 'left') {
+function clickSlideShow(pane: Pane = 'left') {
   setActivePane(pane);
   isSlideShow.value = !isSlideShow.value;
   if (isSlideShow.value) {
@@ -967,25 +1198,22 @@ function clickSlideShow(pane: 'left' | 'right' = 'left') {
   }
 }
 
-const clickZoomIn = (pane: 'left' | 'right' = 'left') => {
+const clickZoomIn = (pane: Pane = 'left') => {
   setActivePane(pane);
-  const viewerRef = pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
-  viewerRef?.zoomIn();
+  getViewerRef(pane)?.zoomIn();
 };
 
-const clickZoomOut = (pane: 'left' | 'right' = 'left') => {
+const clickZoomOut = (pane: Pane = 'left') => {
   setActivePane(pane);
-  const viewerRef = pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
-  viewerRef?.zoomOut();
+  getViewerRef(pane)?.zoomOut();
 };
 
-const clickZoomActual = (pane: 'left' | 'right' = 'left') => {
+const clickZoomActual = (pane: Pane = 'left') => {
   setActivePane(pane);
-  const viewerRef = pane === 'right' ? rightMediaViewerRef.value : mediaViewerRef.value;
-  viewerRef?.zoomActual();
+  getViewerRef(pane)?.zoomActual();
 };
 
-const toggleZoomFit = (pane: 'left' | 'right' = 'left') => {
+const toggleZoomFit = (pane: Pane = 'left') => {
   const current = getZoomFitByPane(pane);
   handleZoomFitUpdate(!current, pane);
 };
@@ -998,89 +1226,93 @@ const closeWindow = () => {
   appWindow.close();
 }
 
-const clickScale = (event: any, pane: 'left' | 'right' = 'left') => {
+const clickScale = (event: any, pane: Pane = 'left') => {
   if (pane === 'right') {
     rightImageScale.value = event.scale;
+    rightImageDisplayScale.value = event.displayScale ?? event.scale;
     rightImageMinScale.value = event.minScale;
     rightImageMaxScale.value = event.maxScale;
     return;
   }
+  if (pane === 'bottomLeft' || pane === 'bottomRight') {
+    const state = extraPaneState[pane];
+    state.scale = event.scale;
+    state.displayScale = event.displayScale ?? event.scale;
+    state.minScale = event.minScale;
+    state.maxScale = event.maxScale;
+    return;
+  }
 
   imageScale.value = event.scale;
+  imageDisplayScale.value = event.displayScale ?? event.scale;
   imageMinScale.value = event.minScale;
   imageMaxScale.value = event.maxScale;
 };
 
-const toggleSplit = () => {
-  const willEnable = !isSplit.value;
-  isSplit.value = willEnable;
-  activePane.value = 'left';
-  if (!willEnable) {
-    isSyncViewport.value = false;
-  }
-
-  if (willEnable) {
-    if (isSlideShow.value) {
-      stopSlideShow();
-    }
-    rightIsZoomFit.value = true;
-    rightImageScale.value = 1;
-    rightImageMinScale.value = 0;
-    rightImageMaxScale.value = 10;
-
-    if (fileCount.value > 0) {
-      const nextIndex = Math.min(fileIndex.value + 1, fileCount.value - 1);
-      requestFileAtIndex(nextIndex, 'right');
-    }
-  } else {
-    if (isSlideShow.value) {
-      scheduleNextSlide();
-    }
-  }
-};
-
 const toggleSyncViewport = () => {
-  if (!isSplit.value) return;
+  if (splitCount.value === 1) return;
   isSyncViewport.value = !isSyncViewport.value;
   if (isSyncViewport.value) {
     syncViewportFrom(activePane.value);
   }
 };
 
-const toggleFavorite = async (pane: 'left' | 'right' = 'left') => {
+const toggleFavorite = async (pane: Pane = 'left') => {
   const target = getFileInfoByPane(pane);
   const currentFileId = getFileIdByPane(pane);
   if (!target || currentFileId <= 0) return;
 
-  target.is_favorite = !target.is_favorite;
-  await setFileFavorite(currentFileId, target.is_favorite);
-  syncFileMetaToContent(currentFileId, { is_favorite: target.is_favorite });
+  const isFavorite = !target.is_favorite;
+  applyFileMetaToPanes(currentFileId, { is_favorite: isFavorite });
+  await setFileFavorite(currentFileId, isFavorite);
+  syncFileMetaToContent(currentFileId, { is_favorite: isFavorite });
 };
 
-const setCurrentFileRating = async (rating: number, pane: 'left' | 'right' = 'left') => {
+const setCurrentFileRating = async (rating: number, pane: Pane = 'left') => {
   const target = getFileInfoByPane(pane);
   const currentFileId = getFileIdByPane(pane);
   if (!target || currentFileId <= 0) return;
 
   const normalized = Number(target.rating || 0) === rating ? 0 : rating;
-  target.rating = normalized;
+  applyFileMetaToPanes(currentFileId, { rating: normalized });
   await setFileRating(currentFileId, normalized);
   syncFileMetaToContent(currentFileId, { rating: normalized });
 };
 
-const clickRotate = async (pane: 'left' | 'right' = 'left') => {
+const setCurrentFileCullingFlag = async (cullingFlag: number, pane: Pane = 'left') => {
   const target = getFileInfoByPane(pane);
   const currentFileId = getFileIdByPane(pane);
-  const viewerRef = getViewerRef(pane);
   if (!target || currentFileId <= 0) return;
 
-  target.rotate = (Number(target.rotate) || 0) + 90;
-  viewerRef?.rotateRight?.();
-  await setFileRotate(currentFileId, target.rotate);
-  syncFileMetaToContent(currentFileId, { rotate: target.rotate });
+  const normalized = Math.max(0, Math.min(2, cullingFlag));
+  const previous = Number(target.culling_flag ?? target.cullingFlag ?? 0);
+  applyFileMetaToPanes(currentFileId, { culling_flag: normalized });
+  const result = await setFileCullingFlag(currentFileId, normalized);
+  if (result === null) {
+    applyFileMetaToPanes(currentFileId, { culling_flag: previous });
+    return;
+  }
+  syncFileMetaToContent(currentFileId, { culling_flag: normalized });
+  void emit('culling-status-updated');
 };
 
-const clickTag = (pane: 'left' | 'right' = 'left') => {
+const clickRotate = async (pane: Pane = 'left') => {
+  const target = getFileInfoByPane(pane);
+  const currentFileId = getFileIdByPane(pane);
+  if (!target || currentFileId <= 0) return;
+
+  const rotate = (Number(target.rotate) || 0) + 90;
+  applyFileMetaToPanes(currentFileId, { rotate });
+  for (const targetPane of allPanes) {
+    if (getFileIdByPane(targetPane) === currentFileId) {
+      getViewerRef(targetPane)?.rotateRight?.();
+    }
+  }
+  await setFileRotate(currentFileId, rotate);
+  syncFileMetaToContent(currentFileId, { rotate });
+};
+
+const clickTag = (pane: Pane = 'left') => {
   const currentFileId = getFileIdByPane(pane);
   if (currentFileId <= 0) return;
 
@@ -1089,13 +1321,43 @@ const clickTag = (pane: 'left' | 'right' = 'left') => {
   showTaggingDialog.value = true;
 };
 
-const openCommentEditor = (pane: 'left' | 'right' = 'left') => {
+const openCommentEditor = (pane: Pane = 'left') => {
   const currentFileId = getFileIdByPane(pane);
   if (currentFileId <= 0) return;
 
   setActivePane(pane);
   showCommentMsgbox.value = true;
 };
+
+const clickAddToCollection = (pane: Pane = 'left') => {
+  const currentFileId = getFileIdByPane(pane);
+  if (currentFileId <= 0) return;
+  setActivePane(pane);
+  collectionFileIds.value = [currentFileId];
+  showAddToCollectionDialog.value = true;
+};
+
+function handleCollectionsAdded({ fileIds, results, failed = 0 }: { fileIds: number[]; results: any[]; failed?: number }) {
+  const addedFileIds = new Set(results.flatMap(result => result?.addedFileIds || []).map(Number));
+  if (addedFileIds.size === 0) {
+    if (failed > 0) toast.error(t('collection.add_failed_toast', { count: failed }));
+    showAddToCollectionDialog.value = false;
+    return;
+  }
+  const ids = new Set(fileIds.filter(fileId => addedFileIds.has(Number(fileId))).map(Number));
+  const updatedIds = new Set<number>();
+  for (const pane of allPanes) {
+    const currentFileId = getFileIdByPane(pane);
+    if (!ids.has(currentFileId) || updatedIds.has(currentFileId)) continue;
+    updatedIds.add(currentFileId);
+    const collectionVersion = Number(getFileInfoByPane(pane)?.collectionVersion || 0) + 1;
+    applyFileMetaToPanes(currentFileId, { has_collections: true, collectionVersion });
+    syncFileMetaToContent(currentFileId, { has_collections: true, collectionVersion });
+  }
+  void emit('collection-files-dropped', { fileIds: [...addedFileIds] });
+  if (failed > 0) toast.error(t('collection.add_failed_toast', { count: failed }));
+  showAddToCollectionDialog.value = false;
+}
 
 const onEditComment = async (newComment: any) => {
   const target = activeFileInfo.value;
@@ -1104,32 +1366,26 @@ const onEditComment = async (newComment: any) => {
 
   const result = await editFileComment(currentFileId, newComment);
   if (result) {
-    target.comments = newComment;
+    applyFileMetaToPanes(currentFileId, { comments: newComment });
     showCommentMsgbox.value = false;
     syncFileMetaToContent(currentFileId, { comments: newComment });
   }
 };
 
-async function updateFileHasTags(fileIds: number[]) {
-  if (!Array.isArray(fileIds) || fileIds.length === 0) {
+async function updateFileHasTags(fileStates: Array<{ file_id: number; has_tags: boolean }>) {
+  if (!Array.isArray(fileStates) || fileStates.length === 0) {
     showTaggingDialog.value = false;
     return;
   }
 
-  for (const taggedFileId of fileIds) {
-    if (taggedFileId === fileId.value && fileInfo.value) {
-      const tags = (await getTagsForFile(taggedFileId)) || [];
-      fileInfo.value.has_tags = tags.length > 0;
-      fileInfo.value.tags = tags;
-      syncFileMetaToContent(taggedFileId, { has_tags: fileInfo.value.has_tags, tags });
-    }
-
-    if (taggedFileId === rightFileId.value && rightFileInfo.value) {
-      const tags = (await getTagsForFile(taggedFileId)) || [];
-      rightFileInfo.value.has_tags = tags.length > 0;
-      rightFileInfo.value.tags = tags;
-      syncFileMetaToContent(taggedFileId, { has_tags: rightFileInfo.value.has_tags, tags });
-    }
+  for (const state of fileStates) {
+    const taggedFileId = Number(state.file_id);
+    if (taggedFileId <= 0) continue;
+    const hasTags = Boolean(state.has_tags);
+    const tags = hasTags ? ((await getTagsForFile(taggedFileId)) || []) : [];
+    const changes = { has_tags: hasTags, tags };
+    applyFileMetaToPanes(taggedFileId, changes);
+    syncFileMetaToContent(taggedFileId, changes);
   }
 
   showTaggingDialog.value = false;
@@ -1148,6 +1404,9 @@ const handleItemAction = async (payload: { action: string }) => {
     case 'tag':
       clickTag(pane);
       break;
+    case 'add-to-collection':
+      clickAddToCollection(pane);
+      break;
     case 'comment':
       openCommentEditor(pane);
       break;
@@ -1159,6 +1418,15 @@ const handleItemAction = async (payload: { action: string }) => {
     case 'rating-5':
       await setCurrentFileRating(Number(payload.action.split('-')[1]), pane);
       break;
+    case 'culling-pick':
+      await setCurrentFileCullingFlag(1, pane);
+      break;
+    case 'culling-reject':
+      await setCurrentFileCullingFlag(2, pane);
+      break;
+    case 'culling-unreviewed':
+      await setCurrentFileCullingFlag(0, pane);
+      break;
     case 'zoom-in':
       clickZoomIn(pane);
       break;
@@ -1167,9 +1435,6 @@ const handleItemAction = async (payload: { action: string }) => {
       break;
     case 'zoom-actual':
       clickZoomActual(pane);
-      break;
-    case 'toggle-split':
-      toggleSplit();
       break;
     case 'toggle-sync-viewport':
       toggleSyncViewport();

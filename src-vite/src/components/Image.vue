@@ -54,6 +54,7 @@
           @mouseup="handleImageMouseUp"
           @mouseleave="handleImageMouseLeave"
           @dblclick.stop="toggleZoomFit"
+          @contextmenu.prevent.stop="$emit('context-menu', $event)"
         />
       </div>
     </TransitionGroup>
@@ -143,9 +144,11 @@
     <!-- Navigator view -->
     <transition name="fade">
       <!-- nav container -->
-      <div v-if="(config.settings.navigatorViewMode === 0 && isGrabbing) || config.settings.navigatorViewMode === 1" 
+      <div v-if="showNavigator"
         class="absolute right-4 bottom-4 outline outline-gray-50 overflow-hidden shadow-lg shadow-gray-500 z-20" 
         :style="navContainerStyle"
+        @mouseenter="pauseNavigatorAutoHide"
+        @mouseleave="resetNavigatorAutoHide"
         @wheel="handleNavBoxWheel"
         @click="handleNavBoxClick"
         @dblclick.stop="toggleZoomFit"
@@ -174,6 +177,7 @@
 import { ref, shallowRef, triggerRef, watch, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
+import { SIDEBAR } from '@/common/constants';
 import {
   getAssetSrc,
   getPreviewUrl,
@@ -223,13 +227,33 @@ const props = defineProps({
     type: Number,
     default: 1,
   },
+  fileVersion: {
+    type: Number,
+    default: 0,
+  },
+  imageWidth: {
+    type: Number,
+    default: 0,
+  },
+  imageHeight: {
+    type: Number,
+    default: 0,
+  },
   thumbnailSrc: {
     type: String,
     default: '',
   },
+  showThumbnailPlaceholder: {
+    type: Boolean,
+    default: false,
+  },
+  showInlineLoading: {
+    type: Boolean,
+    default: false,
+  },
 });
 
-const emit = defineEmits(['message-from-image-viewer', 'scale', 'update:isZoomFit', 'viewport-change']);
+const emit = defineEmits(['message-from-image-viewer', 'scale', 'update:isZoomFit', 'viewport-change', 'context-menu']);
 
 const uiStore = useUIStore();
 
@@ -247,12 +271,20 @@ const position = shallowRef([{ x: 0, y: 0 }, { x: 0, y: 0 }]); // Image position
 const scale = ref([1, 1]);                  // Image scale (zoom level)
 const minScale = ref(0.1);                    // Minimum zoom level
 const maxScale = ref(10);                   // Maximum zoom level
+const getActualSizeScale = () => 1 / (window.devicePixelRatio || 1);
+const getDisplayScale = (scaleValue: number) => scaleValue * (window.devicePixelRatio || 1);
 const imageRotate = ref([0, 0]);            // Image rotation
 const imageSize = ref([{ width: 0, height: 0 }, { width: 0, height: 0 }]);       // actual image size
 const imageSizeRotated = ref([{ width: 0, height: 0 }, { width: 0, height: 0 }]); // image size after rotation
 
 const isDraggingImage = ref(false);         // Dragging state
 const isGrabbing = ref(false);              // Grabbing state
+const navigatorAutoVisible = ref(true);
+const showNavigator = computed(() =>
+  config.settings.navigatorViewMode === 1
+  || (config.settings.navigatorViewMode === 0 && isGrabbing.value && navigatorAutoVisible.value)
+);
+let navigatorAutoHideTimer: ReturnType<typeof setTimeout> | null = null;
 const noTransition = ref(false);            // Disable transition temporarily
 const lastMousePosition = ref({ x: 0, y: 0 }); // Last mouse position for drag calculations
 const mousePosition = ref({ x: 0, y: 0 });  // Current mouse position
@@ -262,7 +294,7 @@ const mouseDragNavTriggered = ref(false);
 
 const faces = ref<any[]>([]); // Store faces for the current image
 const showFaceOverlay = computed(() =>
-  config.settings.face.enabled && config.main.sidebarIndex === 5
+  config.settings.face.enabled && config.main.sidebarIndex === SIDEBAR.PERSON
 );
 
 let animationFrameId: number | null = null;
@@ -353,6 +385,7 @@ const suppressViewportEmit = ref(false);
 let warmImageTimeout: NodeJS.Timeout | null = null;
 let warmImageIdleId: number | null = null;
 const resolvedThumbnailSrc = ref('');
+const resolvedThumbnailFileId = ref(0);
 const displayThumbnailSrc = computed(() => props.thumbnailSrc || resolvedThumbnailSrc.value);
 
 function waitForNextPaint() {
@@ -363,30 +396,32 @@ function waitForNextPaint() {
 
 // inline loading for formats that require backend preview decoding
 const showInlineLoading = computed(() =>
-  shouldUseBackendPreview(props.filePath, Number(props.fileType || 0)) && !!displayThumbnailSrc.value
+  props.showInlineLoading || (shouldUseBackendPreview(props.filePath, Number(props.fileType || 0)) && !!displayThumbnailSrc.value)
 );
 
 async function getEffectiveThumbnailSrc() {
   if (props.thumbnailSrc) return props.thumbnailSrc;
   const fileId = props.fileId;
   if (!fileId) return '';
-  const thumbUrl = getThumbUrl(fileId, false, config.settings.thumbnailSize);
+  const thumbUrl = getThumbUrl(fileId, false, config.settings.thumbnailSize, props.fileVersion);
   if (!isWin) return thumbUrl;
   if (thumbUrl.startsWith('data:')) {
     resolvedThumbnailSrc.value = thumbUrl;
+    resolvedThumbnailFileId.value = fileId;
     return thumbUrl;
   }
-  if (resolvedThumbnailSrc.value) return resolvedThumbnailSrc.value;
+  if (resolvedThumbnailSrc.value && resolvedThumbnailFileId.value === fileId) return resolvedThumbnailSrc.value;
 
   const inflight = getThumbnailDataUrlInflight(fileId, config.settings.thumbnailSize);
   const dataUrl = await (inflight || setThumbnailDataUrlInflight(
     fileId,
     config.settings.thumbnailSize,
     getFileThumbById(fileId, config.settings.thumbnailSize, false)
-      .then(thumb => getThumbnailDataUrl(thumb, '', false, config.settings.thumbnailSize))
+      .then(thumb => getThumbnailDataUrl(thumb, '', false, config.settings.thumbnailSize, props.filePath, props.fileVersion))
   ));
   if (props.fileId === fileId && !props.thumbnailSrc && dataUrl) {
     resolvedThumbnailSrc.value = dataUrl;
+    resolvedThumbnailFileId.value = fileId;
   }
   return props.fileId === fileId ? dataUrl || thumbUrl : '';
 }
@@ -488,7 +523,7 @@ function loadImageResource(filePath?: string) {
     };
 
     if (shouldUseBackendPreview(filePath, Number(props.fileType || 0))) {
-      src = getPreviewUrl(props.fileId, filePath);
+      src = getPreviewUrl(props.fileId, filePath, false, props.fileVersion);
       if (!src) {
         preloadCache.delete(filePath);
         reject(new Error(`Failed to resolve RAW/TIFF preview source: ${filePath}`));
@@ -499,7 +534,7 @@ function loadImageResource(filePath?: string) {
     }
 
     try {
-      src = getAssetSrc(filePath);
+      src = getAssetSrc(filePath, props.fileVersion);
     } catch (error) {
       preloadCache.delete(filePath);
       reject(error);
@@ -604,24 +639,26 @@ function setImageSlot(
   src: string,
   naturalWidth: number,
   naturalHeight: number,
+  layoutWidth: number = naturalWidth,
+  layoutHeight: number = naturalHeight,
 ) {
   imageSrc.value[slotIndex] = src;
   imageFilePath.value[slotIndex] = filePath;
   imageRotate.value[slotIndex] = props.rotate;
   imageSize.value[slotIndex] = {
-    width: naturalWidth,
-    height: naturalHeight,
+    width: layoutWidth,
+    height: layoutHeight,
   };
 
   if (props.rotate % 180 === 90) {
     imageSizeRotated.value[slotIndex] = {
-      width: naturalHeight,
-      height: naturalWidth,
+      width: layoutHeight,
+      height: layoutWidth,
     };
   } else {
     imageSizeRotated.value[slotIndex] = {
-      width: naturalWidth,
-      height: naturalHeight,
+      width: layoutWidth,
+      height: layoutHeight,
     };
   }
 }
@@ -722,7 +759,7 @@ const navBoxStyle = computed(() => {
     width: `${boxWidth}px`,
     height: `${boxHeight}px`,
     transform: `translate(${boxX}px, ${boxY}px)`,
-    boxShadow: `0 0 0 9999px color-mix(in srgb, var(--color-base-200) 20%, transparent)`,
+    boxShadow: `0 0 0 9999px color-mix(in srgb, var(--color-base-200) 30%, transparent)`,
     touchAction: 'none',
   };
 });
@@ -980,6 +1017,9 @@ onBeforeUnmount(() => {
   if (loadingTimeout) { // Clear timeout on unmount
     clearTimeout(loadingTimeout);
   }
+  if (navigatorAutoHideTimer) {
+    clearTimeout(navigatorAutoHideTimer);
+  }
   cancelWarmImageScheduling();
 });
 
@@ -1141,11 +1181,14 @@ const updatePosition = () => {
 };
 
 // watch filePath changes
-watch(() => props.filePath, async (newFilePath) => {
+watch([() => props.filePath, () => props.fileVersion], async ([newFilePath, newFileVersion], [oldFilePath, oldFileVersion]) => {
   // Cancel previous loading
   currentLoadingId.value++;
   const loadingId = currentLoadingId.value;
   cancelWarmImageScheduling();
+  if (newFilePath && newFilePath === oldFilePath && newFileVersion !== oldFileVersion) {
+    preloadCache.delete(newFilePath);
+  }
   clearStalePreloadEntries(newFilePath || '', props.nextFilePath || '');
 
   if (loadingTimeout) {
@@ -1166,32 +1209,47 @@ watch(() => props.filePath, async (newFilePath) => {
   }, 500);
 
   const usesBackendPreview = shouldUseBackendPreview(newFilePath, Number(props.fileType || 0));
-  const effectiveThumbSrc = await getEffectiveThumbnailSrc();
-  const hasPreviewPlaceholder = usesBackendPreview && !!effectiveThumbSrc;
-
-  if (hasPreviewPlaceholder) {
-    try {
-      const placeholder = await loadPlaceholderResource(effectiveThumbSrc);
-      if (loadingId === currentLoadingId.value) {
-        const nextImageIndex = activeImage.value ^ 1;
-        setImageSlot(
-          nextImageIndex,
-          newFilePath,
-          placeholder.src,
-          placeholder.naturalWidth,
-          placeholder.naturalHeight,
-        );
-        showPlaceholderImage(nextImageIndex);
-        await nextTick();
-        await waitForNextPaint();
-      }
-    } catch {
-      // ignore placeholder failures and continue to full preview load
-    }
-  }
+  const isRawPreview = Number(props.fileType || 0) === 3;
 
   try {
-    const loaded = await loadImageResource(newFilePath);
+    const imageResultPromise = loadImageResource(newFilePath)
+      .then((loaded) => ({ kind: 'image' as const, loaded }));
+    const thumbnailResultPromise = usesBackendPreview || props.showThumbnailPlaceholder
+      ? getEffectiveThumbnailSrc()
+        .then(async (src) => {
+          if (!src) return { kind: 'thumbnail' as const, placeholder: null };
+          try {
+            return { kind: 'thumbnail' as const, placeholder: await loadPlaceholderResource(src) };
+          } catch {
+            return { kind: 'thumbnail' as const, placeholder: null };
+          }
+        })
+        .catch(() => ({ kind: 'thumbnail' as const, placeholder: null }))
+      : Promise.resolve({ kind: 'thumbnail' as const, placeholder: null });
+    const firstResult = await Promise.race([imageResultPromise, thumbnailResultPromise]);
+    let hasPreviewPlaceholder = false;
+
+    if (firstResult.kind === 'thumbnail' && firstResult.placeholder) {
+      if (loadingId !== currentLoadingId.value) return;
+      const nextImageIndex = activeImage.value ^ 1;
+      setImageSlot(
+        nextImageIndex,
+        newFilePath,
+        firstResult.placeholder.src,
+        firstResult.placeholder.naturalWidth,
+        firstResult.placeholder.naturalHeight,
+        props.imageWidth || firstResult.placeholder.naturalWidth,
+        props.imageHeight || firstResult.placeholder.naturalHeight,
+      );
+      onImageReady(nextImageIndex, true);
+      hasPreviewPlaceholder = true;
+      await nextTick();
+      await waitForNextPaint();
+    }
+
+    const loaded = firstResult.kind === 'image'
+      ? firstResult.loaded
+      : (await imageResultPromise).loaded;
     if (loadingId !== currentLoadingId.value) return;
 
     if (loadingTimeout) {
@@ -1203,25 +1261,32 @@ watch(() => props.filePath, async (newFilePath) => {
     nextTick(() => {
       isZoomFit.value = props.isZoomFit;
       const activeIndex = activeImage.value;
-      const showingPlaceholderForCurrentFile = usesBackendPreview
+      const showingPlaceholderForCurrentFile = hasPreviewPlaceholder
         && imageFilePath.value[activeIndex] === newFilePath;
 
       if (showingPlaceholderForCurrentFile) {
         noTransition.value = true;
+        // Reuse the placeholder layout so replacing source pixels does not
+        // change the displayed geometry. In particular, RAW thumbnails use
+        // the complete image dimensions, preserving their scale on replacement.
+        const placeholderLayout = { ...imageSize.value[activeIndex] };
         setImageSlot(
           activeIndex,
           newFilePath,
           loaded.src,
           loaded.naturalWidth,
           loaded.naturalHeight,
+          placeholderLayout.width,
+          placeholderLayout.height,
         );
 
-        if (containerSize.value.width > 0) {
-          if (isZoomFit.value) {
-            updateZoomFit(true);
-          } else {
-            clampPosition(true);
-          }
+        if (isRawPreview && containerSize.value.width > 0) {
+          // Keep the thumbnail's current transform. Both the thumbnail and
+          // complete RAW use the same layout dimensions, so scale and position
+          // describe the identical viewport regardless of auto-fit state.
+          clampPosition(true);
+        } else if (containerSize.value.width > 0 && isZoomFit.value) {
+          updateZoomFit(true);
         }
 
         setTimeout(() => {
@@ -1255,6 +1320,7 @@ watch(() => props.filePath, async (newFilePath) => {
 
 watch(() => props.fileId, () => {
   resolvedThumbnailSrc.value = '';
+  resolvedThumbnailFileId.value = 0;
 });
 
 // watch thumbnail source changes to update placeholder if original is still loading
@@ -1271,7 +1337,7 @@ watch(displayThumbnailSrc, async (newThumbSrc) => {
   
   // We check if it's the full original image by checking the src. 
   // For backend preview, the full image src is from getPreviewUrl.
-  const isCurrentlyShowingFullImage = imageSrc.value[activeIndex] === getPreviewUrl(props.fileId, currentFilePath);
+  const isCurrentlyShowingFullImage = imageSrc.value[activeIndex] === getPreviewUrl(props.fileId, currentFilePath, false, props.fileVersion);
   
   if (isCurrentlyShowingFullImage) return;
 
@@ -1288,6 +1354,8 @@ watch(displayThumbnailSrc, async (newThumbSrc) => {
           placeholder.src,
           placeholder.naturalWidth,
           placeholder.naturalHeight,
+          props.imageWidth || placeholder.naturalWidth,
+          props.imageHeight || placeholder.naturalHeight,
         );
         // Important: update layout after size change
         if (isZoomFit.value) {
@@ -1307,6 +1375,8 @@ watch(displayThumbnailSrc, async (newThumbSrc) => {
             placeholder.src,
             placeholder.naturalWidth,
             placeholder.naturalHeight,
+            props.imageWidth || placeholder.naturalWidth,
+            props.imageHeight || placeholder.naturalHeight,
           );
         }
       }
@@ -1382,10 +1452,43 @@ watch(() => imageRotate.value[activeImage.value], (newValue) => {
 watch(() => scale.value[activeImage.value], (newValue) => {
   emit('scale', { 
     scale: newValue, 
+    displayScale: getDisplayScale(newValue),
     minScale: minScale.value, 
     maxScale: maxScale.value 
   });
 });
+
+function resetNavigatorAutoHide() {
+  if (navigatorAutoHideTimer) {
+    clearTimeout(navigatorAutoHideTimer);
+    navigatorAutoHideTimer = null;
+  }
+  navigatorAutoVisible.value = true;
+  if (config.settings.navigatorViewMode === 0) {
+    navigatorAutoHideTimer = setTimeout(() => {
+      navigatorAutoVisible.value = false;
+      navigatorAutoHideTimer = null;
+    }, 3000);
+  }
+}
+
+function pauseNavigatorAutoHide() {
+  if (navigatorAutoHideTimer) {
+    clearTimeout(navigatorAutoHideTimer);
+    navigatorAutoHideTimer = null;
+  }
+}
+
+watch(
+  () => [
+    config.settings.navigatorViewMode,
+    scale.value[activeImage.value],
+    position.value[activeImage.value].x,
+    position.value[activeImage.value].y,
+  ],
+  resetNavigatorAutoHide,
+  { immediate: true }
+);
 
 // watch zoom fit changes
 watch(() => props.isZoomFit, (newValue) => {
@@ -1407,14 +1510,24 @@ watch(() => [containerSize.value, imageSize.value], () => {
 });
 
 // Called when the new image is fully loaded and ready to be shown
-const onImageReady = (nextIndex: number) => {
-  // Ensure loading state is cleared (double check)
-  if (loadingTimeout) {
-    clearTimeout(loadingTimeout);
-    loadingTimeout = null;
+const onImageReady = (nextIndex: number, preserveLoading: boolean = false) => {
+  // A placeholder is ready before the full image. It needs the same viewport
+  // initialization, but must not dismiss the full-image loading indicator.
+  if (!preserveLoading) {
+    if (loadingTimeout) {
+      clearTimeout(loadingTimeout);
+      loadingTimeout = null;
+    }
+    isLoading.value = false;
   }
-  isLoading.value = false;
   noTransition.value = true;
+  // A viewport belongs to the image content, not to its pixel dimensions.
+  // Capture it before switching buffers so the next image can convert the
+  // normalized viewport to its own rendered position.
+  const previousViewport = getViewportState();
+  const previousImageIndex = activeImage.value;
+  const hasPreviousImage = imageSize.value[previousImageIndex].width > 0
+    && imageSize.value[previousImageIndex].height > 0;
   // Transitioning active image
   activeImage.value = nextIndex;
 
@@ -1424,28 +1537,12 @@ const onImageReady = (nextIndex: number) => {
       const imgIndex = activeImage.value;
       const imgSize = imageSize.value[imgIndex];
       const container = containerSize.value;
-      const prevImgIndex = imgIndex ^ 1;
-      
-      // Check if we should preserve the previous position
-      // Condition: Previous image (scaled and rotated) is larger than container
-      const prevScale = scale.value[prevImgIndex];
-      const prevRotatedSize = imageSizeRotated.value[prevImgIndex];
-      
-      // We must handle the case where prevRotatedSize might be 0 if no image was loaded there, 
-      // but usually there is one if we are navigating.
-      // If it's the first image, prevScale might be default.
-      
-      const isPrevLarger = (prevRotatedSize.width * prevScale > container.width) || 
-                           (prevRotatedSize.height * prevScale > container.height);
-
-      if (isPrevLarger) {
-        // Carry over the scale and position from the previous image
-        scale.value[imgIndex] = prevScale;
-        position.value[imgIndex] = { ...position.value[prevImgIndex] };
-        
-        // Clamp to ensure the new image isn't out of bounds if it's smaller
-        triggerRef(position);
-        clampPosition(true);
+      if (hasPreviousImage) {
+        // Never carry over absolute x/y offsets: they describe the previous
+        // image's dimensions. Rebuild the position from normalized viewport
+        // coordinates so image navigation and thumbnail replacement retain
+        // the same relative point in the image.
+        applyViewportState(previousViewport, true);
       } else {
         // Original logic: reset to center or zoom to cursor
         
@@ -1461,7 +1558,7 @@ const onImageReady = (nextIndex: number) => {
         };
 
         // Now, use the logic from zoomImage to transition from the "fit" state to the 100% state.
-        const newScale = 1;
+        const newScale = getActualSizeScale();
         const imageOffsetX = ((fitScale - newScale) * ((cursorX - initialPos.x) - imgSize.width / 2)) / fitScale;
         const imageOffsetY = ((fitScale - newScale) * ((cursorY - initialPos.y) - imgSize.height / 2)) / fitScale;
         
@@ -1498,35 +1595,6 @@ const onImageReady = (nextIndex: number) => {
       }
     });
   }
-};
-
-// show placeholder image for RAW preview
-const showPlaceholderImage = (nextIndex: number) => {
-  noTransition.value = true;
-  activeImage.value = nextIndex;
-
-  if (containerSize.value.width > 0) {
-    if (isZoomFit.value) {
-      updateZoomFit(true);
-    } else {
-      clampPosition(true);
-    }
-  } else {
-    const unwatch = watch(containerSize, (newSize) => {
-      if (newSize.width > 0) {
-        if (isZoomFit.value) {
-          updateZoomFit(true);
-        } else {
-          clampPosition(true);
-        }
-        unwatch();
-      }
-    });
-  }
-
-  setTimeout(() => {
-    noTransition.value = false;
-  }, 500);
 };
 
 const rotateRight = () => {
@@ -1571,7 +1639,7 @@ const zoomReset = (force: boolean = false) => {
   updatePosition();
   const mousePos = mousePosition.value;
   const containerPosVal = containerPos.value;
-  zoomImage(mousePos.x - containerPosVal.x, mousePos.y - containerPosVal.y, 1, force);
+  zoomImage(mousePos.x - containerPosVal.x, mousePos.y - containerPosVal.y, getActualSizeScale(), force);
 };
 
 // start dragging
@@ -1874,7 +1942,7 @@ const zoomOut = () => {
 
 const zoomActual = () => {
   const container = containerSize.value;
-  zoomImage(container.width / 2, container.height / 2, 1);
+  zoomImage(container.width / 2, container.height / 2, getActualSizeScale());
 };
 
 // Zoom image at cursor position
@@ -1896,33 +1964,27 @@ function zoomImage(cursorX: number, cursorY: number, newScale: number, force: bo
 
 function getViewportState() {
   const imgIndex = activeImage.value;
-  const imgRotatedSize = imageSizeRotated.value[imgIndex];
   const imgSize = imageSize.value[imgIndex];
   const scaleVal = scale.value[imgIndex];
   const container = containerSize.value;
   const pos = position.value[imgIndex];
 
-  const scaledWidth = imgRotatedSize.width * scaleVal;
-  const scaledHeight = imgRotatedSize.height * scaleVal;
-  const paddingX = (scaledWidth - imgSize.width) / 2;
-  const paddingY = (scaledHeight - imgSize.height) / 2;
-  const maxX = container.width - scaledWidth + paddingX;
-  const maxY = container.height - scaledHeight + paddingY;
-
-  let normX = 0.5;
-  let normY = 0.5;
-
-  if (Math.floor(scaledWidth) > container.width && paddingX !== maxX) {
-    normX = (pos.x - maxX) / (paddingX - maxX);
-  }
-  if (Math.floor(scaledHeight) > container.height && paddingY !== maxY) {
-    normY = (pos.y - maxY) / (paddingY - maxY);
-  }
+  // Store the image-content point under the viewport center, not the rendered
+  // x/y offset. That makes the viewport independent from source dimensions.
+  const dx = container.width / 2 - (pos.x + imgSize.width / 2);
+  const dy = container.height / 2 - (pos.y + imgSize.height / 2);
+  const angle = imageRotate.value[imgIndex] * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const contentX = imgSize.width / 2 + (dx * cos + dy * sin) / scaleVal;
+  const contentY = imgSize.height / 2 + (-dx * sin + dy * cos) / scaleVal;
 
   return {
     scale: scaleVal,
-    normX: Math.min(Math.max(normX, 0), 1),
-    normY: Math.min(Math.max(normY, 0), 1),
+    normX: Math.min(Math.max(contentX / imgSize.width, 0), 1),
+    normY: Math.min(Math.max(contentY / imgSize.height, 0), 1),
+    sourceWidth: imgSize.width,
+    sourceHeight: imgSize.height,
   };
 }
 
@@ -1930,34 +1992,24 @@ function applyViewportState(viewport: { scale?: number; normX?: number; normY?: 
   if (!viewport || typeof viewport.scale !== 'number') return;
 
   const imgIndex = activeImage.value;
-  const imgRotatedSize = imageSizeRotated.value[imgIndex];
   const imgSize = imageSize.value[imgIndex];
   const container = containerSize.value;
   const safeScale = Math.min(Math.max(viewport.scale, minScale.value), maxScale.value);
 
   scale.value[imgIndex] = safeScale;
 
-  const scaledWidth = imgRotatedSize.width * safeScale;
-  const scaledHeight = imgRotatedSize.height * safeScale;
-  const paddingX = (scaledWidth - imgSize.width) / 2;
-  const paddingY = (scaledHeight - imgSize.height) / 2;
-  const maxX = container.width - scaledWidth + paddingX;
-  const maxY = container.height - scaledHeight + paddingY;
-
   const normX = Math.min(Math.max(viewport.normX ?? 0.5, 0), 1);
   const normY = Math.min(Math.max(viewport.normY ?? 0.5, 0), 1);
+  const localX = (normX - 0.5) * imgSize.width * safeScale;
+  const localY = (normY - 0.5) * imgSize.height * safeScale;
+  const angle = imageRotate.value[imgIndex] * Math.PI / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const rotatedX = localX * cos - localY * sin;
+  const rotatedY = localX * sin + localY * cos;
 
-  if (Math.floor(scaledWidth) > container.width && paddingX !== maxX) {
-    position.value[imgIndex].x = maxX + normX * (paddingX - maxX);
-  } else {
-    position.value[imgIndex].x = (container.width - imgSize.width) / 2;
-  }
-
-  if (Math.floor(scaledHeight) > container.height && paddingY !== maxY) {
-    position.value[imgIndex].y = maxY + normY * (paddingY - maxY);
-  } else {
-    position.value[imgIndex].y = (container.height - imgSize.height) / 2;
-  }
+  position.value[imgIndex].x = container.width / 2 - imgSize.width / 2 - rotatedX;
+  position.value[imgIndex].y = container.height / 2 - imgSize.height / 2 - rotatedY;
 
   if (silent) {
     // Sync path: disable transition for this frame to avoid trailing.
@@ -2106,4 +2158,5 @@ defineExpose({
   opacity: 0;
   filter: brightness(0.72);
 }
+
 </style>

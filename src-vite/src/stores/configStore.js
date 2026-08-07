@@ -2,14 +2,15 @@
  * Config Store - Global application configuration
  */
 import { defineStore } from 'pinia';
+import { SIDEBAR } from '@/common/constants';
 
 export const useConfigStore = defineStore('configStore', {
   state: () => ({
     main: {
-      sidebarIndex: 0,            // toolbar index
+      sidebarIndex: SIDEBAR.ALBUM, // toolbar index
       maxLibraryCount: 20,        // max library count
+      maxCollectionCount: 100,    // max collection count
       selectionChunkSize: 200,    // virtual list fetch chunk size
-      selectionMaxFiles: 400,     // max files selected/processed in one action
     },
 
     content: {
@@ -21,32 +22,47 @@ export const useConfigStore = defineStore('configStore', {
       width: 320,                 // left pane width
     },
 
+    collectionTray: {
+      expanded: false,            // show collection tray in left pane
+      height: 220,                // expanded tray height (px)
+    },
+
     rightPanel: {
       show: false,                // show right panel
       width: 360,                 // panel width in px
       mode: 'info',               // right panel mode ('info' | 'dedup')
     },
 
+    dedup: {
+      activeTab: 'duplicates',   // active dedup tab ('duplicates' | 'similar')
+      duplicateSetsHeight: 50,   // duplicate sets section height as a percentage
+    },
+
     infoPanel: {
       showPreview: true,         // show preview thumbnail
+      previewMode: 'thumbnail',  // preview section mode ('thumbnail' | 'histogram')
       previewScale: 1,           // preview thumbnail scale (1, 0.5, 0.25)
+      histogramChannels: 15,     // histogram channel mask (L=1, R=2, G=4, B=8; 0=none, 15=all)
       showBasicInfo: true,       // show basic info
       showMetadata: true,        // show metadata
       showMap: true,             // show map
-      showHistogram: true,       // show image histogram
       mapTheme: 0,               // 0: standard, 2: satellite
     },
 
     search: {
-      searchType: 0,           // 0: ai search, 1: similar image, 2: filename search
-      maxSearchHistory: 20,    // max search history
+      maxSearchHistory: 20,     // max search history
       fileType: 0,              // filter file type bitmask (0: all, 1: image, 2: video, 4: raw)
       sortType: 0,              // sort type (default to time)
       sortOrder: 0,             // sort order(0: ascending, 1: descending)
+      groupBy: 0,               // result grouping: 0=none, 1=folder, 2=day, 3=month, 4=rating, 5=location, 6=camera, 7=lens, 8=year, 9=file type, 10=culling
     },
 
     calendar: {
       isMonthly: true,    // display monthly or daily calendar
+    },
+
+    camera: {
+      isCamera: true,    // show cameras or lens
     },
 
     mediaViewer: {
@@ -76,7 +92,6 @@ export const useConfigStore = defineStore('configStore', {
     },
 
     imageViewer: {
-      isSplit: false,           // split view
       isSyncViewport: false,    // sync viewport
       isFullScreen: false,      // native fullscreen in image viewer window
     },
@@ -84,7 +99,7 @@ export const useConfigStore = defineStore('configStore', {
     libraryChangedVersion: 0,
 
     settings: {
-      tabIndex: 0,               // settings tab index (0: general, 1: view, 2: library, 3: image search, 4: about)
+      tabIndex: 0,               // settings tab index (0: general, 1: library, 2: browse, 3: viewer, 4: search, 5: shortcuts, 6: advanced, 7: about)
 
       // general settings
       language: 'en',             // default language
@@ -92,27 +107,28 @@ export const useConfigStore = defineStore('configStore', {
       lightTheme: 0,              // light theme color index
       darkTheme: 0,               // dark theme color index
       scale: 1,                   // root font-size scale
-      showButtonText: true,       // show button text
       showToolTip: true,          // show button tooltip
       showStatusBar: true,        // show status bar
+      autoCheckUpdates: true,      // automatically check for updates
       debugMode: false,           // debug mode
 
       // navigation settings
       folderSort: 0,              // folder_sort_options: 0=name asc, 1=name desc, 2=date asc(oldest first), 3=date desc(newest first)
-      calendarSort: 0,            // calendar_sort_options: 0=oldest first, 1=newest first
+      calendarSort: 0,            // 0=taken asc, 1=taken desc, 2=created asc, 3=created desc, 4=modified asc, 5=modified desc
       categorySort: 0,            // category_sort_options: 0=name asc, 1=name desc, 2=count asc, 3=count desc
+      showSubfolderFiles: false,  // show subfolder files (in album folder view)
+      groupRawJpegPairs: false,   // group matching RAW and JPEG/HEIC files
       
-
       // grid view settings
       thumbnailSize: 512,         // thumbnail image size (small: 128, medium: 256, large: 512, extra large: 1024)
       grid: {
         size: 160,               // grid size, range 120-360
-        style: 0,                // 0: card view, 1: tile view, 2: justified view
+        style: 0,                // 0: card view, 1: tile view, 2: justified view, 3: masonry view
         showFilmStrip: false,    // show filmstrip view
         scaling: 1,              // 0: Fit Entire Image, 1: Crop to Fill, 2: Stretch to Fill
         labelPrimary: 1,         // card view: primary label (1: Name)
         labelSecondary: 3,       // card view: secondary label (3: Dimension)
-        justifyMode: 0,          // justified view mode: 0: equal height, 1: equal width (masonry)
+        thumbnailBadge: 0,       // thumbnail badge (0: empty, 1: file format, 2: ISO, 3: shutter, 4: aperture, 5: focal length, 6: exposure)
         previewPosition: 0,      // filmstrip view: preview position (0: top, 1: bottom, 2: left, 3: right)
       },
       
@@ -120,9 +136,11 @@ export const useConfigStore = defineStore('configStore', {
       mouseWheelMode: 1,         // 0: previous/next, 1: zoom in/out (default)
       slideShowInterval: 1,      // slide show interval in seconds [1, 3, 5, 10, 30, 60]
       slideShowTransition: 0,    // 0: Slide, 1: Fade, 2: None
-      navigatorViewMode: 0,      // 0: Auto, 1: Always hide, 2: Always show
+      navigatorViewMode: 0,      // 0: Auto, 1: Always show, 2: Always hide
       navigatorViewSize: 240,    // navigator view size (160, 240, 320, 400)
+      viewBackground: 0,         // 0: default, 1: black, 2: dark gray, 3: medium gray, 4: light gray, 5: white
       autoPlayVideo: true,       // auto play video
+      loopVideo: false,          // loop video (only effective when autoPlayVideo is off)
       // showComment: false,        // show comment
       externalImageAppPath: '',    // external image app path
       externalImageAppName: '',    // external image app display name
@@ -131,6 +149,7 @@ export const useConfigStore = defineStore('configStore', {
 
       // image search settings
       imageSearch: {
+        model: 0,                  // 0: default English-only model, 1: multilingual model
         thresholdIndex: 3,         // image search threshold index (default is Low)
         limit: 1000,               // image search limit
       },
@@ -183,14 +202,14 @@ export const useConfigStore = defineStore('configStore', {
     setLanguage(language) {
       this.settings.language = language;
     },
-    setShowButtonText(showButtonText) {
-      this.settings.showButtonText = showButtonText;
-    },
     setShowToolTip(showToolTip) {
       this.settings.showToolTip = showToolTip;
     },
     setShowStatusBar(showStatusBar) {
       this.settings.showStatusBar = showStatusBar;
+    },
+    setAutoCheckUpdates(autoCheckUpdates) {
+      this.settings.autoCheckUpdates = autoCheckUpdates;
     },
     setDebugMode(debugMode) {
       this.settings.debugMode = debugMode;
@@ -206,6 +225,9 @@ export const useConfigStore = defineStore('configStore', {
     },
     setCategorySort(categorySort) {
       this.settings.categorySort = categorySort;
+    },
+    setShowSubfolderFiles(showSubfolderFiles) {
+      this.settings.showSubfolderFiles = showSubfolderFiles;
     },
 
     // video settings
@@ -232,8 +254,8 @@ export const useConfigStore = defineStore('configStore', {
     setGridLabelSecondary(gridLabelSecondary) {
       this.settings.grid.labelSecondary = gridLabelSecondary;
     },
-    setJustifyMode(justifyMode) {
-      this.settings.grid.justifyMode = justifyMode;
+    setGridThumbnailBadge(thumbnailBadge) {
+      this.settings.grid.thumbnailBadge = thumbnailBadge;
     },
     setShowFilmStrip(showFilmStrip) {
       this.settings.grid.showFilmStrip = showFilmStrip;
@@ -260,6 +282,12 @@ export const useConfigStore = defineStore('configStore', {
     },
     setNavigatorViewSize(navigatorViewSize) {
       this.settings.navigatorViewSize = navigatorViewSize;
+    },
+    setViewBackground(viewBackground) {
+      this.settings.viewBackground = viewBackground;
+    },
+    cycleViewBackground() {
+      this.settings.viewBackground = (Number(this.settings.viewBackground || 0) + 1) % 6;
     },
     // setShowComment(showComment) {
     //   this.settings.showComment = showComment;

@@ -2,9 +2,9 @@
   <div class="flex flex-col items-start justify-start gap-4 h-full text-base-content/70 cursor-default">
 
     <!-- logo -->
-    <div class="px-4 flex w-full flex-row items-center justify-start gap-4">
+    <div class="px-2 flex w-full flex-row items-center justify-start gap-4">
       <div class="shrink-0">
-        <img src="@/assets/images/logo.png" class="w-24 h-24 mx-auto rounded-box drop-shadow-lg" />
+        <img :src="iconLogo" class="w-20 h-20 select-none [-webkit-app-region:no-drag]" draggable="false" />
       </div>
       <div class="flex flex-col text-left">
         <h3 class="text-xl">{{ packageInfo.name }}</h3>
@@ -20,7 +20,7 @@
             {{ $t('settings.about.package.version') }}
           </div>
           <div class="flex items-center gap-2">
-            <span>{{ packageInfo.version }}</span>
+            <span>{{ displayVersion }}</span>
             <button
               class="badge badge-sm border-0 px-2 py-2 font-medium transition-colors hover:text-primary"
               :class="isUpdateActionEnabled ? 'badge-primary cursor-pointer' : 'badge-neutral/60 cursor-pointer'"
@@ -98,17 +98,24 @@ import { useI18n } from 'vue-i18n';
 import { getPackageInfo, getBuildTime } from '@/common/api';
 import { useAppUpdater } from '@/common/updater';
 import { IconGithub, IconLink, IconLock, IconFocus } from '@/common/icons';
+import iconLogo from '@/assets/images/icon.png';
 
 const packageInfo = ref<any>({
   name: '',
   description: '',
   version: '',
+  commit_hash: '',
   license: '',
   authors: [],
   homepage: '',
   repository: ''
 });
 const buildTime = ref('');
+const displayVersion = computed(() => {
+  const version = packageInfo.value.version || '';
+  const commitHash = packageInfo.value.commit_hash || packageInfo.value.commitHash || '';
+  return commitHash ? `${version} (${commitHash})` : version;
+});
 const privacyUrl = computed(() => {
   const repo = packageInfo.value.repository || '';
   if (!repo) return 'https://github.com/julyx10/lap/blob/main/PRIVACY.md';

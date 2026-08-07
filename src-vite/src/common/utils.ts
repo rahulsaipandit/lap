@@ -188,19 +188,69 @@ export function formatFileSize(bytes: number): string {
 }
 
 /// format dimension text (width x height - pixel count)
-export function formatDimensionText(width: number, height: number): string {
-  if (width > 0 && height > 0) {
-    const pixel = width * height;
-    if (pixel > 1_000_000) {
-      return `${width} x ${height} (${(pixel / 1_000_000).toFixed(1)} MP)`;
-    } else if (pixel > 1_000) {
-      return `${width} x ${height} (${(pixel / 1_000).toFixed(1)} KP)`;
-    } else {
-      return `${width} x ${height} (${pixel} P)`;
-    }
+export function formatDimensionText(
+  width: number,
+  height: number,
+  showRatio: boolean = false
+): string {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '';
+
+  const pixel = width * height;
+  let pixelText: string;
+  if (pixel >= 1_000_000) {
+    pixelText = `(${(pixel / 1_000_000).toFixed(1)} MP)`;
   } else {
-    return '';
+    pixelText = `(${pixel.toLocaleString()} px)`;
   }
+
+  const ratioText = showRatio ? formatAspectRatio(width, height) : null;
+  const ratioStr = ratioText ? ` · ${ratioText}` : '';
+
+  return `${width} × ${height}${ratioStr} ${pixelText}`;
+}
+
+// ---- internal helpers ----
+
+const COMMON_RATIOS: { w: number; h: number; label: string }[] = [
+  { w: 1,  h: 1,  label: '1:1'   },
+  { w: 2,  h: 1,  label: '2:1'   },
+  { w: 1,  h: 2,  label: '1:2'   },
+  { w: 4,  h: 3,  label: '4:3'   },
+  { w: 3,  h: 4,  label: '3:4'   },
+  { w: 3,  h: 2,  label: '3:2'   },
+  { w: 2,  h: 3,  label: '2:3'   },
+  { w: 16, h: 9,  label: '16:9'  },
+  { w: 9,  h: 16, label: '9:16'  },
+  { w: 16, h: 10, label: '16:10' },
+  { w: 10, h: 16, label: '10:16' },
+  { w: 5,  h: 4,  label: '5:4'   },
+];
+
+const FLOAT_EPSILON = 0.001;
+const MAX_SIMPLIFIED_DENOMINATOR = 20;
+
+function gcd(a: number, b: number): number {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 1;
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+function formatAspectRatio(width: number, height: number): string | null {
+  const actualRatio = width / height;
+
+  for (const { w, h, label } of COMMON_RATIOS) {
+    if (Math.abs(actualRatio - w / h) < FLOAT_EPSILON) {
+      return label;
+    }
+  }
+
+  const divisor = gcd(width, height);
+  const sw = width / divisor;
+  const sh = height / divisor;
+  if (sw <= MAX_SIMPLIFIED_DENOMINATOR && sh <= MAX_SIMPLIFIED_DENOMINATOR) {
+    return `${sw}:${sh}`;
+  }
+
+  return `${actualRatio.toFixed(2)}:1`;
 }
 
 /// format duration to string
@@ -230,14 +280,25 @@ export function formatCameraInfo(make: string, model: string): string {
   return `${make} ${model}`;
 }
 
+/// Format EXIF numeric values for display without reducing the precision stored in the database.
+export function formatCaptureSettingValue(value: string | null | undefined): string {
+  if (!value) return '';
+
+  return String(value).replace(/-?\d+(?:\.\d+)?/g, (numberText) => {
+    const number = Number(numberText);
+    if (!Number.isFinite(number)) return numberText;
+    return Number(number.toFixed(2)).toString();
+  });
+}
+
 /// format capture settings to string
 export function formatCaptureSettings(focal_length: string, exposure_time: string, f_number: string, iso_speed: string, exposure_bias: string): string {
   let result = '';
-  result += focal_length ? `${focal_length}` : '';
-  result += exposure_time ? `, ${exposure_time}` : '';
-  result += f_number ? `, ${f_number}` : '';
-  result += iso_speed ? `, ISO ${iso_speed}` : '';
-  result += exposure_bias ? `, ${exposure_bias}` : '';
+  result += focal_length ? formatCaptureSettingValue(focal_length) : '';
+  result += exposure_time ? `, ${formatCaptureSettingValue(exposure_time)}` : '';
+  result += f_number ? `, ${formatCaptureSettingValue(f_number)}` : '';
+  result += iso_speed ? `, ISO ${formatCaptureSettingValue(iso_speed)}` : '';
+  result += exposure_bias ? `, ${formatCaptureSettingValue(exposure_bias)}` : '';
 
   // remove the first ',' if it exists
   if (result[0] === ',' && result.length > 1) {
@@ -428,7 +489,8 @@ export function setThumbnailDataUrlInflight(
 export function getThumbUrl(
   fileId: number | null | undefined,
   bustCache = false,
-  thumbnailSize = 0
+  thumbnailSize = 0,
+  fileVersion = 0,
 ): string {
   if (!fileId || fileId <= 0) return '';
   if (isWin && !bustCache) {
@@ -437,31 +499,33 @@ export function getThumbUrl(
   }
   const scheme = isWin ? 'http://thumb.localhost' : 'thumb://localhost';
   const base = `${scheme}/${_thumbLibraryId}/${fileId}`;
-  return bustCache ? `${base}?t=${Date.now()}` : base;
+  const params = new URLSearchParams();
+  if (fileVersion > 0) params.set('v', String(fileVersion));
+  if (bustCache) params.set('t', String(Date.now()));
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
 }
 
 export function getPreviewUrl(
   fileId: number | null | undefined,
   filePath?: string | null,
   bustCache = false,
+  fileVersion = 0,
 ): string {
   if (!fileId || fileId <= 0) return '';
   const scheme = isWin ? 'http://preview.localhost' : 'preview://localhost';
   const base = `${scheme}/${_thumbLibraryId}/${fileId}`;
 
-  if (bustCache) {
-    return `${base}?t=${Date.now()}`;
-  }
-
+  const params = new URLSearchParams();
+  if (fileVersion > 0) params.set('v', String(fileVersion));
   if (filePath) {
     const uiStore = useUIStore();
-    const version = uiStore.getFileVersion(filePath);
-    if (version > 0) {
-      return `${base}?v=${version}`;
-    }
+    const localVersion = uiStore.getFileVersion(filePath);
+    if (localVersion > 0) params.set('u', String(localVersion));
   }
-
-  return base;
+  if (bustCache) params.set('t', String(Date.now()));
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
 }
 
 export function shouldUseBackendPreview(filePath = '', fileType = 0): boolean {
@@ -472,7 +536,11 @@ export function shouldUseBackendPreview(filePath = '', fileType = 0): boolean {
   if (isLinux && extension === 'avif') {
     return true;
   }
-  return ['tif', 'tiff', 'jxl', 'heic', 'heif', 'hif'].includes(extension);
+  return [
+    'tif', 'tiff', 'jxl', 'heic', 'heif', 'hif',
+    'exr', 'hdr', 'rgbe', 'psd', 'jp2', 'j2k', 'j2c', 'jpc', 'jpf', 'jpx',
+    'dpx', 'dds', 'tga', 'qoi', 'fits', 'fit', 'fts'
+  ].includes(extension);
 }
 
 export function getThumbnailDataUrl(
@@ -480,24 +548,26 @@ export function getThumbnailDataUrl(
   placeholder = '',
   bustCache = false,
   thumbnailSize = 0,
-  filePath?: string | null
+  filePath?: string | null,
+  fileVersion = 0,
 ): string {
   if (!thumb || thumb.file_id == null || thumb.file_id <= 0) {
     return placeholder;
   }
   if (thumb.error_code === 2) {
-    if (filePath) return getAssetSrc(filePath);
-    return getThumbUrl(thumb.file_id, bustCache, thumbnailSize) || placeholder;
+    if (filePath) return getAssetSrc(filePath, fileVersion);
+    return getThumbUrl(thumb.file_id, bustCache, thumbnailSize, fileVersion) || placeholder;
   }
   if (thumb.error_code !== 0) {
     return placeholder;
   }
   if (thumb.thumb_data_base64) {
-    const dataUrl = `data:image/jpeg;base64,${thumb.thumb_data_base64}`;
+    const mimeType = thumb.thumb_data_base64.startsWith('iVBORw0KGgo') ? 'image/png' : 'image/jpeg';
+    const dataUrl = `data:${mimeType};base64,${thumb.thumb_data_base64}`;
     setCachedThumbnailDataUrl(thumb.file_id, dataUrl, thumbnailSize);
     return dataUrl;
   }
-  return getThumbUrl(thumb.file_id, bustCache, thumbnailSize) || placeholder;
+  return getThumbUrl(thumb.file_id, bustCache, thumbnailSize, fileVersion) || placeholder;
 }
 
 export function getRelativePath(path: string, basePath: string): string {
@@ -561,8 +631,9 @@ export const isValidFileName = (name: string) => {
 };
 
 // Function to select a folder
-export async function openFolderDialog() {
+export async function openFolderDialog(title?: string) {
   const selected = await openDialog({
+    title: title || 'Select a folder',
     directory: true,  // Enables folder selection
     multiple: false,  // Allows selecting only one folder
   });
@@ -585,9 +656,9 @@ export function localeComp(lang: string, str1: string, str2: string) {
 
   const locale = localeMap[lang as keyof typeof localeMap] || 'en-US';
   if (locale === 'en-US') {
-    return str1.localeCompare(str2);
+    return str1.localeCompare(str2, undefined, { numeric: true });
   } else {
-    return str1.localeCompare(str2, locale);
+    return str1.localeCompare(str2, locale, { numeric: true });
   }
 };
 
@@ -600,14 +671,18 @@ export function scrollToFolder(folderId: number) {
 }
 
 // get image file asset source url with version number
-export function getAssetSrc(filePath: string): string {
+export function getAssetSrc(filePath: string, fileVersion = 0): string {
   if (!filePath) {
     return '';
   }
   const uiStore = useUIStore();
-  const version = uiStore.getFileVersion(filePath);
+  const localVersion = uiStore.getFileVersion(filePath);
   const assetUrl = convertFileSrc(filePath);
-  return version > 0 ? `${assetUrl}?v=${version}` : assetUrl;
+  const params = new URLSearchParams();
+  if (fileVersion > 0) params.set('v', String(fileVersion));
+  if (localVersion > 0) params.set('u', String(localVersion));
+  const query = params.toString();
+  return query ? `${assetUrl}?${query}` : assetUrl;
 }
 
 // get country name from country code

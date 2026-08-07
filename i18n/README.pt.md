@@ -1,16 +1,15 @@
 <div align="center">
-  <img src="../../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
+  <img src="../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - Gerenciador de fotos privadas locais</h1>
   <h3>Gerenciador de fotos de desktop de código aberto para macOS, Windows e Linux.</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
     <a href="https://github.com/julyx10/lap/stargazers"><img src="https://img.shields.io/github/stars/julyx10/lap" alt="GitHub stars"></a>
-    <a href="https://github.com/julyx10/lap/blob/main/LICENSE"><img src="https://img.shields.io/github/license/julyx10/lap" alt="GitHub license"></a>
   </p>
 </div>
 
-[English](../README.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | Português | [Русский](README.ru.md)
+[English](../README.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | Português | [Русский](README.ru.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
 
 Lap é um gerenciador de fotos de código aberto e local-first, projetado para navegar em álbuns de família, encontrar fotos antigas rapidamente e gerenciar grandes bibliotecas de mídia pessoal offline.
 É uma alternativa focada na privacidade aos serviços de fotos na nuvem: sem upload forçado, busca por IA local, fluxo de trabalho centrado em pastas e gratuito para usar.
@@ -23,71 +22,144 @@ Lap é um gerenciador de fotos de código aberto e local-first, projetado para n
 
 Abra a [página de lançamentos recentes](https://github.com/julyx10/lap/releases/latest) e baixe o arquivo que corresponde ao seu sistema:
 
-| Plataforma | Pacote | Status |
+| Plataforma | Pacote | Nota |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon)** | `aarch64.dmg` | Notarizado pela Apple |
-| **macOS (Intel)** | `x64.dmg` | Notarizado pela Apple |
-| **Windows 10/11 (x64)** | `_x64_en-US.msi` | Atualmente sem assinatura (um aviso do SmartScreen pode aparecer) |
-| **Windows 10/11 (ARM64)** | `_arm64_en-US.msi` | Atualmente sem assinatura (um aviso do SmartScreen pode aparecer) |
-| **Ubuntu/Debian (amd64)** | `_amd64.deb` | Para melhor suporte a reprodução de vídeo, veja a nota sobre Linux abaixo. |
+| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Notarizado pela Apple |
+| **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Não assinado — se o SmartScreen bloquear o download, clique em **Manter mesmo assim** |
+| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Para distribuições baseadas em Debian (Ubuntu, Debian, Linux Mint, etc.) |
 
-### Notas sobre reprodução de vídeo no Linux
-
-No Ubuntu/Debian/Linux Mint, instale estes pacotes para melhor suporte à reprodução de vídeo:
+### macOS com Homebrew
 
 ```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+brew tap julyx10/lap
+brew install --cask lap
 ```
 
 ## Capturas de tela
 
 <p align="center">
-  <img src="../../docs/public/screenshots/lap-home-0.1.10_1.png" alt="Captura de tela do gerenciador de biblioteca de fotos local Lap" width="900">
+  <img src="../docs/public/screenshots/Lap_0.3.0_main_1.png" alt="Captura de tela do gerenciador de biblioteca de fotos local Lap" width="900">
 </p>
-
-<p align="center">
-  <img src="../../docs/public/screenshots/lap-home-0.1.10_2.png" alt="Captura de tela da busca de fotos por IA local do Lap" width="900">
-</p>
-
-> As imagens de exemplo nas capturas de tela vêm do [Wikimedia Commons](https://commons.wikimedia.org/).
 
 ## Por que Lap
 
-- **Sem necessidade de nuvem**: mantenha sua biblioteca em seu próprio disco em vez de enviá-la para um serviço hospedado.
-- **Privado por padrão**: o processamento ocorre localmente, portanto, suas fotos permanecem sob seu controle.
-- **Gratuito para usar**: sem planos de assinatura ou taxas recorrentes.
-- **Pastas primeiro**: trabalhe diretamente com suas pastas existentes, sem etapa de importação necessária.
-- **Alto desempenho para grandes bibliotecas**: otimizado para navegação e organização fluidas de grandes coleções de mídia (mais de 100 mil arquivos por biblioteca).
+- **Local-first por design**: suas fotos ficam no seu próprio disco, sem conta na nuvem ou upload obrigatório.
+- **Sem aprisionamento de biblioteca**: trabalhe diretamente com suas pastas existentes em vez de importar tudo para um banco de dados fechado.
+- **Ferramentas privadas de IA**: busca, similaridade, tags inteligentes e recursos de rostos rodam localmente na sua máquina.
+- **Feito para grandes coleções**: otimizado para navegar e organizar bibliotecas com mais de 100 mil arquivos.
+- **Código aberto e gratuito**: sem assinatura, sem ecossistema obrigatório e com código que você pode inspecionar.
 
 ## Recursos
 
-- **Navegar e filtrar** por data, local, câmera, lente, tags, favoritos, classificações e rostos (BETA).
-- **Gerenciar várias bibliotecas** e alternar entre elas rapidamente.
-- **Encontrar duplicados** e mover cópias indesejadas para a lixeira em lote.
-- **Editar no local** com cortar, girar, inverter, redimensionar e ajustes básicos.
-- **Manter pastas sincronizadas** com operações sensíveis ao sistema de arquivos e suporte a atualização.
-- **Usar ferramentas de busca local** como busca por texto/imagem, busca por imagens semelhantes, agrupamento de rostos e tags inteligentes.
-- **Abrir formatos de imagem modernos** incluindo WebP, HEIC/HEIF/HIF, AVIF e JXL (JPEG XL).
-- **Visualizar fotos RAW** com decodificação integrada para mais de 20 formatos RAW de câmeras (CR2, NEF, ARW, DNG, etc.).
-- **Ampla compatibilidade de vídeo**: suporte para MP4, MOV, AVI, MKV e mais de 20 outros formatos com otimização multiplataforma.
+- **Navegação flexível na biblioteca** com filtros por linha do tempo, pasta, local, câmera, lente, tag, favorito, classificação, assunto e rosto.
+- **Álbuns inteligentes** salvam visualizações baseadas em regras com agrupamento, ordenação e ordem personalizados.
+- **Bandeja de coleções** mantém coleções pontuais de arquivos sem movê-los de suas pastas originais.
+- **Busca local com IA** para comandos de texto, similaridade visual, assuntos, agrupamento de rostos e busca multilíngue opcional em mais de 50 idiomas.
+- **Live Photos da Apple** reconhece pares HEIC/MOV, reproduz no visualizador e mantém arquivos auxiliares MOV e AAE juntos ao renomear, mover, copiar e excluir.
+- **Pares RAW + JPEG/HEIC** agrupam opcionalmente um arquivo RAW e seu arquivo JPEG ou HEIC correspondente com o mesmo nome na mesma pasta como um único item. Os originais permanecem arquivos separados; as operações de renomear, mover, copiar, colar e excluir tratam os dois juntos.
+- **Fluxo de trabalho baseado em pastas** com várias bibliotecas, importação por arrastar e soltar, importação por copiar e colar, sincronização do sistema de arquivos e operações seguras de mover/copiar/excluir.
+- **Ferramentas de revisão e comparação**, incluindo um visualizador de comparação de imagens em quatro painéis.
+- **Ferramentas de limpeza** para encontrar duplicados e mover arquivos indesejados para a lixeira em lote.
+- **Edição integrada** para cortar, girar, inverter, redimensionar e aplicar ajustes básicos de imagem.
+- **Amplo suporte a formatos** para mais de 60 formatos de foto, RAW e vídeo.
 
-## Recursos planejados
+## Metadados, coleções e movimentação de arquivos
 
-- **Suporte para Live Photos e Motion Photos** para flujos de trabalho mistos de foto/vídeo.
-- **Expandir o suporte a metadados** para fluxos de trabalho EXIF, XMP e IPTC.
+O Lap é centrado em pastas, mas nem todas as informações exibidas nele estão incorporadas ao arquivo original. Essa distinção é importante se você também gerencia as mesmas pastas no Finder, Explorer ou em outro aplicativo de fotos.
+
+### O que permanece com o arquivo
+
+- Suas fotos e vídeos originais permanecem sempre como arquivos comuns em suas pastas existentes.
+- Metadados já incorporados a um arquivo, como data de captura EXIF, câmera, lente, GPS e orientação, são lidos desse arquivo quando o Lap o indexa.
+- Salvar uma edição de imagem integrada grava a imagem resultante no destino escolhido. Isso é diferente da orientação de exibição, que é armazenada apenas pelo Lap.
+- Quando você renomeia, move, copia ou exclui arquivos **no Lap**, ele atualiza simultaneamente seu catálogo local. Ele também mantém juntos os recursos agrupados compatíveis, como componentes de Apple Live Photo, arquivos auxiliares AAE e pares RAW + JPEG/HEIC ativados.
+
+### O que o Lap armazena localmente
+
+As informações a seguir são dados de biblioteca do Lap. Elas são armazenadas no banco de dados local ou na configuração da biblioteca do Lap, e não são gravadas em EXIF, IPTC ou arquivos auxiliares XMP:
+
+- Coleções e seus membros
+- Tags
+- Comentários
+- Favoritos, classificações e estados de revisão (incluindo Picks e Rejects)
+- A orientação de exibição do Lap e outros estados exclusivos da biblioteca
+- Álbuns inteligentes e suas regras, agrupamento, ordenação e ordem
+- Dados de pesquisa por IA, dados faciais, miniaturas e outros dados de índice ou cache
+
+Esses dados não acompanham o arquivo quando ele é copiado, exportado ou movido para fora do Lap, nem ficam automaticamente disponíveis para outros aplicativos.
+
+### Trabalhar com arquivos fora do Lap
+
+O Lap pode reexaminar pastas e detectar muitas alterações no sistema de arquivos. No entanto, quando arquivos são renomeados, movidos, substituídos ou copiados fora do Lap, ele não pode garantir que associações locais — especialmente a participação em coleções e outros dados exclusivos da biblioteca — acompanharão o arquivo.
+
+Se seu fluxo de trabalho depende de coleções, tags, comentários, favoritos, classificações, estados de revisão ou orientação do Lap, use o Lap para mover e renomear arquivos sempre que possível. Se você trabalha muito fora do Lap, considere esses recursos como organização local do Lap e mantenha um backup do banco de dados e da configuração do Lap junto com suas fotos. Você pode ver ou alterar o local do banco de dados, e criar um backup dele, em **Configurações → Armazenamento**.
+
+Excluir o banco de dados ou a configuração do Lap remove essa organização local e os dados de índice, mas não exclui seus arquivos de mídia originais.
+
+## Desinstalar Lap
+
+O Lap trabalha diretamente com suas pastas de fotos existentes. Desinstalar o Lap ou excluir seus arquivos de banco de dados e cache **não** exclui suas fotos originais.
+
+A desinstalação padrão remove o aplicativo. Para remover completamente o Lap, feche o Lap primeiro, desinstale o aplicativo e depois exclua o banco de dados local, o cache de miniaturas e os arquivos de configuração usando os comandos da sua plataforma.
+
+### macOS
+
+Se você instalou o Lap com o Homebrew:
+
+```bash
+brew uninstall --cask lap
+```
+
+Para uma instalação manual, feche o Lap e mova `Lap.app` da pasta `Applications` para a Lixeira.
+
+Para remover todos os arquivos de banco de dados, cache e configuração do Lap:
+
+```bash
+rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
+       "$HOME/Library/Caches/com.julyx10.lap" \
+       "$HOME/Library/WebKit/com.julyx10.lap"
+rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
+```
+
+### Windows
+
+Abra **Configurações > Aplicativos > Aplicativos instalados**, encontre **Lap** e selecione **Desinstalar**.
+
+Depois abra o PowerShell e remova todos os arquivos de banco de dados, cache e configuração do Lap:
+
+```powershell
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com.julyx10.lap"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
+```
+
+### Linux
+
+Em distribuições baseadas em Debian, desinstale o pacote:
+
+```bash
+sudo apt remove lap
+```
+
+Depois remova todos os arquivos de banco de dados, cache e configuração do Lap:
+
+```bash
+rm -rf "$HOME/.local/share/com.julyx10.lap" \
+       "$HOME/.cache/com.julyx10.lap" \
+       "$HOME/.config/com.julyx10.lap"
+```
+
+Se você selecionou um diretório personalizado para o banco de dados nas configurações do Lap, exclua esse diretório separadamente após confirmar que ele contém apenas arquivos de banco de dados do Lap.
 
 ## Compilar a partir do código fonte
 
 Requisitos: Node.js 20+, pnpm, Rust estável.
-
-Para reprodução de vídeo no Linux, veja a nota sobre pacotes na seção de download acima.
 
 ```bash
 # Dependências do sistema macOS
 xcode-select --install
 brew install nasm pkg-config autoconf automake libtool cmake
 
-# Dependências do sistema Linux (Ubuntu/Debian)
+# Dependências do sistema Linux
 # sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
 #   patchelf nasm clang pkg-config autoconf automake libtool cmake
 
@@ -104,11 +176,21 @@ cargo tauri dev
 
 ## Formatos Suportados
 
+O Lap suporta mais de 60 formatos de foto, RAW e vídeo.
+
 | Tipo | Formatos |
 | :--- | :--- |
-| Imagens | JPG/JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL |
+| Imagens | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | Fotos RAW | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
 | Vídeos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX e mais. A reprodução H.264 é suportada em todas as plataformas, com processamento de compatibilidade automático quando a reprodução nativa não estiver disponível. HEVC/H.265 e VP9 são suportados nativamente no macOS. |
+
+### Notas sobre reprodução de vídeo no Linux
+
+No Linux Mint/Ubuntu/Debian, instale estes pacotes para melhor suporte à reprodução de vídeo:
+
+```bash
+sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+```
 
 ## Arquitetura
 
@@ -122,7 +204,9 @@ cargo tauri dev
 | :-- | :-- |
 | [LibRaw](https://github.com/LibRaw/LibRaw) | Decodificação de imagem RAW e extração de miniaturas |
 | [libheif](https://github.com/strukturag/libheif) | Decodificação de imagem HEIC/HEIF/HIF e geração de pré-visualização |
+| [libjpeg-turbo](https://libjpeg-turbo.org/) | Decodificação rápida de JPEG e geração de miniaturas |
 | [FFmpeg](https://ffmpeg.org/) | Processamento de vídeo e geração de miniaturas |
+| [Video.js](https://videojs.com/) | Interface de reprodução de vídeo multiplataforma |
 | [ONNX Runtime](https://onnxruntime.ai/) | Mecanismo de inferência de modelo de IA local |
 | [CLIP](https://github.com/openai/CLIP) | Busca de similaridade imagem-texto |
 | [InsightFace](https://github.com/deepinsight/insightface) | Detecção e reconhecimento facial |

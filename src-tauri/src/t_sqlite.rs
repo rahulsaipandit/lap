@@ -5,22 +5,29 @@
  * date:    2024-08-08
  */
 use crate::t_ai;
+use crate::t_ai_png;
 use crate::t_config;
-use crate::t_storage;
+use crate::t_common;
 use crate::t_image;
 use crate::t_lens;
+use crate::t_libraw;
+use crate::t_storage;
 use crate::t_utils;
 use crate::t_video;
 use base64::{Engine, engine::general_purpose};
+use chrono::{Datelike, TimeZone};
 use exif::{In, Tag, Value};
 use image::{GenericImageView, ImageFormat};
 use rusqlite::{Connection, OptionalExtension, Result, ToSql, params, params_from_iter};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
+use std::ops::{Deref, DerefMut};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
@@ -91,6 +98,13 @@ pub struct Album {
     pub indexed: Option<u64>,          // indexed files count
     pub total: Option<u64>,            // total files count
     pub last_scan_time: Option<i64>,   // last scan time
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumDisplayOrder {
+    pub id: i64,
+    pub display_order: i64,
 }
 
 impl Album {
@@ -200,6 +214,42 @@ impl Album {
             .execute("DELETE FROM albums WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    pub fn reorder_display_order(items: Vec<AlbumDisplayOrder>) -> Result<usize, String> {
+        let count = items.len();
+        let ids: HashSet<i64> = items.iter().map(|item| item.id).collect();
+        let orders: HashSet<i64> = items.iter().map(|item| item.display_order).collect();
+        if count == 0 || ids.len() != count || orders.len() != count || items.iter().any(|item| {
+            item.id <= 0 || item.display_order < 0 || item.display_order >= count as i64
+        }) {
+            return Err("Invalid album display order".to_string());
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let album_count: usize = tx
+            .query_row("SELECT COUNT(*) FROM albums", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if album_count != count {
+            return Err("Album list changed while reordering".to_string());
+        }
+
+        let mut update = tx
+            .prepare("UPDATE albums SET display_order_id = ?1 WHERE id = ?2")
+            .map_err(|e| e.to_string())?;
+        for item in items {
+            if update
+                .execute(params![item.display_order, item.id])
+                .map_err(|e| e.to_string())?
+                != 1
+            {
+                return Err("Album not found while reordering".to_string());
+            }
+        }
+        drop(update);
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(count)
     }
 
     /// Get all albums(album_type = 1) from the db
@@ -342,29 +392,39 @@ impl Album {
         Ok(())
     }
 
-    /// Recount files for an album from the database and update stored total.
-    /// Indexed is preserved but clamped so partially processed albums are not
-    /// incorrectly marked as fully indexed.
+    /// Recount files for an album from the database and update stored progress.
+    /// A completed album stays completed after moving, copying, or deleting
+    /// already-indexed files. Partial scan progress is preserved and clamped.
     pub fn recount_album(id: i64) -> Result<Self, String> {
         let conn = open_conn()?;
         let total: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM afiles a JOIN afolders b ON a.folder_id = b.id WHERE b.album_id = ?1",
+                &format!(
+                    "SELECT COUNT(*) FROM afiles a JOIN afolders b ON a.folder_id = b.id
+                    WHERE b.album_id = ?1 AND {} AND {}",
+                    AFile::search_exclusion_condition("b"),
+                    AFile::live_photo_companion_exclusion_condition()
+                ),
                 params![id],
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())?;
-        let indexed: i64 = conn
+        let (indexed, previous_total): (i64, i64) = conn
             .query_row(
-                "SELECT COALESCE(indexed, 0) FROM albums WHERE id = ?1",
+                "SELECT COALESCE(indexed, 0), COALESCE(total, 0)
+                 FROM albums WHERE id = ?1",
                 params![id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| e.to_string())?;
-        let clamped_indexed = indexed.min(total).max(0);
+        let next_indexed = if indexed >= previous_total {
+            total
+        } else {
+            indexed.min(total).max(0)
+        };
         conn.execute(
             "UPDATE albums SET total = ?1, indexed = ?2 WHERE id = ?3",
-            params![total, clamped_indexed, id],
+            params![total, next_indexed, id],
         )
         .map_err(|e| e.to_string())?;
         let result = Self::get_album_by_id(id)?;
@@ -385,10 +445,281 @@ pub struct AFolder {
     pub modified_at: Option<i64>, // folder modified time
 
     // extra info
-    pub is_favorite: Option<bool>, // is favorite
+    pub is_favorite: Option<bool>,             // is favorite
+    pub is_excluded_from_search: Option<bool>, // exclude folder and children from search
+    pub file_count: Option<i64>,               // file count (populated by get_favorite_folders)
+    pub has_subfolders: Option<bool>,          // cached direct-subfolder state
+}
+
+#[derive(Debug, Clone)]
+pub struct FolderSubfolderState {
+    pub path: String,
+    pub created_at: Option<i64>,
+    pub modified_at: Option<i64>,
+    pub inode: Option<i64>,
+    pub has_subfolders: bool,
+}
+
+impl FolderSubfolderState {
+    pub fn get_many(paths: &[String]) -> Result<HashMap<String, Self>, String> {
+        if paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut states = HashMap::new();
+        let conn = open_conn()?;
+
+        // Keep each query below SQLite's bound-parameter limit.
+        for path_chunk in paths.chunks(500) {
+            let placeholders = vec!["?"; path_chunk.len()].join(", ");
+            let query = format!(
+                "SELECT path, modified_at, has_subfolders
+                FROM afolders
+                WHERE path IN ({})
+                  AND has_subfolders IS NOT NULL",
+                placeholders
+            );
+            let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(path_chunk.iter()), |row| {
+                    Ok(Self {
+                        path: row.get(0)?,
+                        created_at: None,
+                        modified_at: row.get(1)?,
+                        inode: None,
+                        has_subfolders: row.get::<_, i64>(2)? != 0,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            for state in rows {
+                let state = state.map_err(|e| e.to_string())?;
+                states.insert(state.path.clone(), state);
+            }
+        }
+
+        Ok(states)
+    }
+
+    /// Persist state after the directory has been fully scanned.  Do not use
+    /// this for sidebar probes: advancing `modified_at` before file sync would
+    /// make the incremental scanner miss external file changes.
+    pub fn update_after_scan(album_id: i64, states: &[Self]) -> Result<(), String> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    "UPDATE afolders
+                    SET modified_at = ?1, has_subfolders = ?2
+                    WHERE album_id = ?3 AND path = ?4",
+                )
+                .map_err(|e| e.to_string())?;
+            for state in states {
+                stmt.execute(params![
+                    state.modified_at,
+                    i64::from(state.has_subfolders),
+                    album_id,
+                    state.path,
+                ])
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 impl AFolder {
+    /// Preserve folder metadata when an external rename or move changes a
+    /// path but leaves the directory's filesystem identity intact.
+    pub fn migrate_paths_by_inode(
+        album_id: i64,
+        states: &[FolderSubfolderState],
+    ) -> Result<(), String> {
+        let paths_by_inode = states
+            .iter()
+            .filter_map(|state| state.inode.filter(|inode| *inode != 0).map(|inode| (inode, &state.path)))
+            .collect::<HashMap<_, _>>();
+        if paths_by_inode.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = open_conn()?;
+        let known_paths = {
+            let mut stmt = conn
+                .prepare("SELECT inode, path FROM afolders WHERE album_id = ?1 AND inode IS NOT NULL")
+                .map_err(|e| e.to_string())?;
+            stmt.query_map(params![album_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|row| row.ok())
+                .collect::<Vec<_>>()
+        };
+        let mut moves = known_paths
+            .into_iter()
+            .filter_map(|(inode, old_path)| {
+                let new_path = paths_by_inode.get(&inode)?;
+                (old_path != **new_path).then(|| (old_path, (*new_path).clone()))
+            })
+            .collect::<Vec<_>>();
+        moves.sort_by_key(|(path, _)| path.len());
+        let moves = moves
+            .iter()
+            .filter(|(old_path, _)| {
+                !moves.iter().any(|(parent_path, _)| {
+                    parent_path.len() < old_path.len()
+                        && Path::new(old_path).strip_prefix(parent_path).is_ok_and(|relative| !relative.as_os_str().is_empty())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        Self::apply_path_migrations(&mut conn, album_id, moves)
+    }
+
+    pub fn migrate_path_by_inode(album_id: i64, path: &str, inode: Option<i64>) -> Result<(), String> {
+        let Some(inode) = inode.filter(|inode| *inode != 0) else {
+            return Ok(());
+        };
+        let mut conn = open_conn()?;
+        let old_path = conn
+            .query_row(
+                "SELECT path FROM afolders WHERE album_id = ?1 AND inode = ?2",
+                params![album_id, inode],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        match old_path {
+            Some(old_path) if old_path != path => {
+                Self::apply_path_migrations(&mut conn, album_id, vec![(old_path, path.to_string())])
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn apply_path_migrations(
+        conn: &mut Connection,
+        album_id: i64,
+        moves: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        if moves.is_empty() {
+            return Ok(());
+        }
+
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut temporary_moves = moves
+            .iter()
+            .enumerate()
+            .map(|(index, (old_path, new_path))| {
+                (old_path, new_path, format!("{}.__lap_move_{}_{}", old_path, album_id, index))
+            })
+            .collect::<Vec<_>>();
+        // Apply outer destination paths first so a folder moved into another
+        // concurrently moved folder is not removed as stale destination data.
+        temporary_moves.sort_by_key(|(_, new_path, _)| new_path.len());
+        for (old_path, _, temporary_path) in &temporary_moves {
+            tx.execute(
+                "UPDATE afolders
+                 SET path = CONCAT(?2, SUBSTRING(path, LENGTH(?1) + 1))
+                 WHERE album_id = ?3
+                   AND (path = ?1 OR SUBSTR(path, 1, LENGTH(?1) + 1) = ?1 || ?4)",
+                params![
+                    old_path,
+                    temporary_path,
+                    album_id,
+                    std::path::MAIN_SEPARATOR.to_string(),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        for (_, new_path, temporary_path) in &temporary_moves {
+            tx.execute(
+                "DELETE FROM afolders
+                 WHERE album_id = ?1
+                   AND (path = ?2 OR SUBSTR(path, 1, LENGTH(?2) + 1) = ?2 || ?3)",
+                params![album_id, new_path, std::path::MAIN_SEPARATOR.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE afolders
+                 SET path = CONCAT(?2, SUBSTRING(path, LENGTH(?1) + 1)),
+                     name = CASE WHEN path = ?1 THEN ?3 ELSE name END
+                 WHERE album_id = ?4
+                   AND (path = ?1 OR SUBSTR(path, 1, LENGTH(?1) + 1) = ?1 || ?5)",
+                params![
+                    temporary_path,
+                    new_path,
+                    t_utils::get_file_name(new_path),
+                    album_id,
+                    std::path::MAIN_SEPARATOR.to_string(),
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Persist every directory observed during a complete album traversal.
+    /// This makes the folder tree and mtime sync cover empty directories too,
+    /// without adding another filesystem traversal.
+    pub fn ensure_subfolder_states(
+        album_id: i64,
+        states: &[FolderSubfolderState],
+    ) -> Result<(), String> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO afolders (
+                        album_id, name, path, created_at, modified_at,
+                        is_favorite, is_excluded_from_search, has_subfolders, inode
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, ?6, ?7)",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut update = tx
+                .prepare(
+                    "UPDATE afolders
+                    SET modified_at = ?1, has_subfolders = ?2, inode = ?3
+                    WHERE album_id = ?4 AND path = ?5",
+                )
+                .map_err(|e| e.to_string())?;
+            for state in states {
+                let updated = update
+                    .execute(params![
+                        state.modified_at,
+                        i64::from(state.has_subfolders),
+                        state.inode,
+                        album_id,
+                        state.path,
+                    ])
+                    .map_err(|e| e.to_string())?;
+                if updated == 0 {
+                    insert
+                        .execute(params![
+                            album_id,
+                            t_utils::get_file_name(&state.path),
+                            state.path,
+                            state.created_at,
+                            state.modified_at,
+                            i64::from(state.has_subfolders),
+                            state.inode,
+                        ])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// create a new folder struct
     fn new(album_id: i64, folder_path: &str) -> Result<Self, String> {
         let file_info = t_utils::FileInfo::new(folder_path)?;
@@ -398,8 +729,11 @@ impl AFolder {
             name: file_info.file_name,
             path: folder_path.to_string(),
             created_at: file_info.created,
-            modified_at: file_info.modified,
+            modified_at: Some(0), // force first sync
             is_favorite: None,
+            is_excluded_from_search: Some(false),
+            file_count: None,
+            has_subfolders: None,
         })
     }
 
@@ -413,23 +747,28 @@ impl AFolder {
             created_at: row.get(4)?,
             modified_at: row.get(5)?,
             is_favorite: row.get(6)?,
+            is_excluded_from_search: row.get(7)?,
+            file_count: None,
+            has_subfolders: row.get(8)?,
         })
     }
 
     /// fetch a folder row from db (by path)
     pub fn fetch(folder_path: &str) -> Result<Option<Self>, String> {
         let conn = open_conn()?;
-        let result = conn
-            .query_row(
-                "SELECT id, album_id, name, path, created_at, modified_at, is_favorite
-                FROM afolders
-                WHERE path = ?1",
-                params![folder_path],
-                Self::from_row,
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        Ok(result)
+        Self::fetch_with_conn(&conn, folder_path)
+    }
+
+    pub fn fetch_with_conn(conn: &Connection, folder_path: &str) -> Result<Option<Self>, String> {
+        conn.query_row(
+            "SELECT id, album_id, name, path, created_at, modified_at, is_favorite, COALESCE(is_excluded_from_search, 0), has_subfolders
+            FROM afolders
+            WHERE path = ?1",
+            params![folder_path],
+            Self::from_row,
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     /// fetch a folder row from db (by id)
@@ -437,7 +776,7 @@ impl AFolder {
         let conn = open_conn()?;
         let result = conn
             .query_row(
-                "SELECT id, album_id, name, path, created_at, modified_at, is_favorite
+                "SELECT id, album_id, name, path, created_at, modified_at, is_favorite, COALESCE(is_excluded_from_search, 0), has_subfolders
                 FROM afolders
                 WHERE id = ?1",
                 params![id],
@@ -448,41 +787,135 @@ impl AFolder {
         Ok(result)
     }
 
-    /// insert a folder into db
-    fn insert(&self) -> Result<usize, String> {
+    /// fetch all folder rows in the current library database
+    pub fn get_all() -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "INSERT INTO afolders (album_id, name, path, created_at, modified_at, is_favorite) 
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    self.album_id,
-                    self.name,
-                    self.path,
-                    self.created_at,
-                    self.modified_at,
-                    self.is_favorite
-                ],
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, album_id, name, path, created_at, modified_at, is_favorite, COALESCE(is_excluded_from_search, 0), has_subfolders
+                FROM afolders",
             )
             .map_err(|e| e.to_string())?;
-        Ok(result)
+        let rows = stmt
+            .query_map(params![], Self::from_row)
+            .map_err(|e| e.to_string())?;
+
+        let mut folders = Vec::new();
+        for folder in rows {
+            folders.push(folder.map_err(|e| e.to_string())?);
+        }
+        Ok(folders)
+    }
+
+    fn insert_with_conn(&self, conn: &Connection) -> Result<usize, String> {
+        conn.execute(
+            "INSERT INTO afolders (album_id, name, path, created_at, modified_at, is_favorite, is_excluded_from_search, has_subfolders)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                self.album_id, self.name, self.path,
+                self.created_at, self.modified_at,
+                self.is_favorite, self.is_excluded_from_search, self.has_subfolders
+            ],
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// insert the folder to db if not exists
     pub fn add_to_db(album_id: i64, folder_path: &str) -> Result<Self, String> {
-        // Check if the path already exists
-        let existing_folder = Self::fetch(folder_path);
-        if let Ok(Some(folder)) = existing_folder {
+        let conn = open_conn()?;
+        Self::add_to_db_with_conn(&conn, album_id, folder_path)
+    }
+
+    pub fn add_to_db_with_conn(
+        conn: &Connection,
+        album_id: i64,
+        folder_path: &str,
+    ) -> Result<Self, String> {
+        if let Ok(Some(folder)) = Self::fetch_with_conn(conn, folder_path) {
+            Self::update_inode_with_conn(conn, album_id, folder_path)?;
             return Ok(folder);
         }
-
-        // insert the new folder into the database
-        // when insert a new folder, save album_id value
-        Self::new(album_id, folder_path)?.insert()?;
-
-        // return the newly inserted folder
-        let new_folder = Self::fetch(folder_path)?;
+        Self::new(album_id, folder_path)?.insert_with_conn(conn)?;
+        Self::update_inode_with_conn(conn, album_id, folder_path)?;
+        let new_folder = Self::fetch_with_conn(conn, folder_path)?;
         Ok(new_folder.unwrap())
+    }
+
+    fn update_inode_with_conn(
+        conn: &Connection,
+        album_id: i64,
+        folder_path: &str,
+    ) -> Result<(), String> {
+        let inode = t_utils::FileInfo::new(folder_path)
+            .ok()
+            .map(|info| info.inode as i64)
+            .filter(|inode| *inode != 0);
+        if let Some(inode) = inode {
+            conn.execute(
+                "UPDATE afolders SET inode = ?1 WHERE album_id = ?2 AND path = ?3",
+                params![inode, album_id, folder_path],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn get_paths_by_album_id(album_id: i64) -> Result<Vec<String>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM afolders WHERE album_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![album_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| row.map_err(|e| e.to_string())).collect()
+    }
+
+    /// Remove folders absent from a successful full traversal.  Delete only
+    /// missing roots; `delete_folder` removes each root's descendants too.
+    pub fn delete_unseen_in_album(
+        album_id: i64,
+        seen_folders: &[FolderSubfolderState],
+    ) -> Result<usize, String> {
+        let seen_paths = seen_folders
+            .iter()
+            .map(|folder| folder.path.as_str())
+            .collect::<HashSet<_>>();
+        let missing_paths = Self::get_paths_by_album_id(album_id)?
+            .into_iter()
+            .filter(|path| !seen_paths.contains(path.as_str()))
+            .collect::<Vec<_>>();
+        let missing_paths = missing_folder_roots(missing_paths);
+
+        let mut deleted_count = 0;
+        for path in missing_paths {
+            deleted_count += Self::delete_folder(&path)?;
+        }
+
+        Ok(deleted_count)
+    }
+
+    /// Remove known direct children of `parent_path` that were not found by a
+    /// successful directory read. Descendants are removed together with their
+    /// missing direct-child root.
+    pub fn delete_unseen_direct_children(
+        album_id: i64,
+        parent_path: &str,
+        seen_paths: &HashSet<String>,
+    ) -> Result<usize, String> {
+        let missing_children = Self::get_paths_by_album_id(album_id)?
+            .into_iter()
+            .filter(|path| {
+                Path::new(path).parent() == Some(Path::new(parent_path))
+                    && !seen_paths.contains(path)
+            })
+            .collect::<Vec<_>>();
+
+        let mut deleted_count = 0;
+        for path in missing_children {
+            deleted_count += Self::delete_folder(&path)?;
+        }
+        Ok(deleted_count)
     }
 
     /// move a folder (update path and album_id)
@@ -492,20 +925,124 @@ impl AFolder {
             .execute(
                 "UPDATE afolders
                 SET path = CONCAT(?3, SUBSTRING(path, LENGTH(?1) + 1)), album_id = ?2
-                WHERE path LIKE ?1 || '%'",
-                params![old_path, new_album_id, new_path],
+                WHERE path = ?1 OR path LIKE ?1 || ?4",
+                params![
+                    old_path,
+                    new_album_id,
+                    new_path,
+                    format!("{}%", std::path::MAIN_SEPARATOR)
+                ],
             )
             .map_err(|e| e.to_string())?;
         Ok(result)
     }
 
+    /// Replace an existing destination folder subtree and move the source
+    /// subtree in one transaction.
+    pub fn replace_moved_folder(
+        old_path: &str,
+        new_album_id: i64,
+        new_path: &str,
+    ) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let destination_pattern = format!("{}{}%", new_path, std::path::MAIN_SEPARATOR);
+
+        let destination_folder_ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM afolders WHERE path = ?1 OR path LIKE ?2")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![new_path, destination_pattern], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
+
+        for folder_id in destination_folder_ids {
+            tx.execute(
+                "DELETE FROM afiles WHERE folder_id = ?1",
+                params![folder_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "DELETE FROM afolders WHERE path = ?1 OR path LIKE ?2",
+            params![new_path, destination_pattern],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let result = tx
+            .execute(
+                "UPDATE afolders
+                SET path = CONCAT(?3, SUBSTRING(path, LENGTH(?1) + 1)), album_id = ?2
+                WHERE path = ?1 OR path LIKE ?1 || ?4",
+                params![
+                    old_path,
+                    new_album_id,
+                    new_path,
+                    format!("{}%", std::path::MAIN_SEPARATOR)
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
+    pub fn replace_copied_folder(album_id: i64, folder_path: &str) -> Result<Self, String> {
+        let folder = Self::new(album_id, folder_path)?;
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let destination_pattern = format!("{}{}%", folder_path, std::path::MAIN_SEPARATOR);
+
+        let destination_folder_ids: Vec<i64> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM afolders WHERE path = ?1 OR path LIKE ?2")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![folder_path, destination_pattern], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
+        for folder_id in destination_folder_ids {
+            tx.execute(
+                "DELETE FROM afiles WHERE folder_id = ?1",
+                params![folder_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "DELETE FROM afolders WHERE path = ?1 OR path LIKE ?2",
+            params![folder_path, destination_pattern],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO afolders
+            (album_id, name, path, created_at, modified_at, is_favorite, is_excluded_from_search)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                folder.album_id,
+                folder.name,
+                folder.path,
+                folder.created_at,
+                folder.modified_at,
+                folder.is_favorite,
+                folder.is_excluded_from_search
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Self::fetch(folder_path)?
+            .ok_or_else(|| format!("Copied folder missing from DB: {}", folder_path))
+    }
+
     /// delete a folder and all its child folders and files from db
     pub fn delete_folder(folder_path: &str) -> Result<usize, String> {
-        let conn = open_conn()?;
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
 
         // First, get all folder IDs that will be deleted (the folder itself and all children)
         let folder_ids: Vec<i64> = {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare("SELECT id FROM afolders WHERE path = ?1 OR path LIKE ?2")
                 .map_err(|e| e.to_string())?;
 
@@ -519,7 +1056,7 @@ impl AFolder {
 
         // Delete all files in those folders
         for folder_id in &folder_ids {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM afiles WHERE folder_id = ?1",
                 params![folder_id],
             )
@@ -528,13 +1065,14 @@ impl AFolder {
 
         // Delete the folders (the folder and all its children)
         let path_pattern = format!("{}{}%", folder_path, std::path::MAIN_SEPARATOR);
-        let result = conn
+        let result = tx
             .execute(
                 "DELETE FROM afolders WHERE path = ?1 OR path LIKE ?2",
                 params![folder_path, path_pattern],
             )
             .map_err(|e| e.to_string())?;
 
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
     }
 
@@ -565,21 +1103,63 @@ impl AFolder {
         Ok(result)
     }
 
+    // get a folder's is_excluded_from_search status
+    pub fn get_is_excluded_from_search(folder_path: &str) -> Result<Option<bool>, String> {
+        let conn = open_conn()?;
+        let result = conn
+            .query_row(
+                "SELECT COALESCE(is_excluded_from_search, 0) FROM afolders WHERE path = ?1",
+                params![folder_path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(result)
+    }
+
     // get all favorite folders
     pub fn get_favorite_folders() -> Result<Vec<Self>, String> {
         let conn = open_conn()?;
+        let sep = std::path::MAIN_SEPARATOR.to_string().replace('\'', "''");
 
-        let query =
-            "SELECT a.id, a.album_id, a.name, a.path, a.created_at, a.modified_at, a.is_favorite
+        let query = format!(
+            "SELECT a.id, a.album_id, a.name, a.path, a.created_at, a.modified_at, a.is_favorite,
+                EXISTS (
+                    SELECT 1 FROM afolders xf
+                    WHERE COALESCE(xf.is_excluded_from_search, 0) = 1
+                    AND xf.album_id = a.album_id
+                    AND (
+                        a.path = xf.path
+                        OR instr(a.path, xf.path || '{}') = 1
+                    )
+                ),
+                (SELECT COUNT(*) FROM afiles f
+                 WHERE f.folder_id = a.id AND f.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                 ))
             FROM afolders a
             WHERE a.is_favorite = 1
-            ORDER BY a.name"
-                .to_string();
+            ORDER BY a.name",
+            sep
+        );
 
         let mut stmt = conn.prepare(query.as_str()).map_err(|e| e.to_string())?;
 
         let rows = stmt
-            .query_map(params![], Self::from_row)
+            .query_map(params![], |row| {
+                Ok(Self {
+                    id: Some(row.get(0)?),
+                    album_id: row.get(1)?,
+                    name: row.get(2)?,
+                    path: row.get(3)?,
+                    created_at: row.get(4)?,
+                    modified_at: row.get(5)?,
+                    is_favorite: row.get(6)?,
+                    is_excluded_from_search: row.get(7)?,
+                    file_count: row.get(8)?,
+                    has_subfolders: None,
+                })
+            })
             .map_err(|e| e.to_string())?;
 
         let mut folders = Vec::new();
@@ -588,6 +1168,84 @@ impl AFolder {
         }
 
         Ok(folders)
+    }
+}
+
+fn missing_folder_roots(mut missing_paths: Vec<String>) -> Vec<String> {
+    missing_paths.sort_by_key(|path| path.len());
+    let mut roots = Vec::new();
+    for path in missing_paths {
+        if roots
+            .iter()
+            .any(|root: &String| {
+                Path::new(&path)
+                    .strip_prefix(root)
+                    .ok()
+                    .is_some_and(|relative| !relative.as_os_str().is_empty())
+            })
+        {
+            continue;
+        }
+        roots.push(path);
+    }
+    roots
+}
+
+pub struct FolderScanState;
+
+impl FolderScanState {
+    pub const LIVE_PHOTO_PAIRING: &'static str = "live_photo_pairing";
+    pub const LIVE_PHOTO_PAIRING_VERSION: i64 = 5;
+
+    pub fn folders_needing_version(scanner: &str, version: i64) -> Result<HashSet<i64>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.id
+                 FROM afolders f
+                 LEFT JOIN folder_scan_state state
+                   ON state.folder_id = f.id AND state.scanner = ?1
+                 WHERE COALESCE(state.version, 0) < ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![scanner, version], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn needs_version(folder_id: i64, scanner: &str, version: i64) -> Result<bool, String> {
+        let conn = open_conn()?;
+        let current = conn
+            .query_row(
+                "SELECT version FROM folder_scan_state WHERE folder_id = ?1 AND scanner = ?2",
+                params![folder_id, scanner],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        Ok(current < version)
+    }
+
+    pub fn mark_completed(folder_id: i64, scanner: &str, version: i64) -> Result<(), String> {
+        let conn = open_conn()?;
+        conn.execute(
+            "INSERT INTO folder_scan_state (folder_id, scanner, version, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(folder_id, scanner) DO UPDATE SET
+               version = excluded.version,
+               updated_at = excluded.updated_at",
+            params![
+                folder_id,
+                scanner,
+                version,
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -605,6 +1263,7 @@ pub struct AFile {
     pub format_label: Option<String>, // normalized file format label (from file content)
     pub created_at: Option<i64>,      // file create timestamp
     pub modified_at: Option<i64>,     // file modified timestamp
+    pub inode: Option<i64>,           // filesystem inode (for rename detection)
     pub taken_date: Option<i64>,      // taken date timestamp (e_date_time || modified_at)
 
     // image/video
@@ -615,6 +1274,7 @@ pub struct AFile {
     // extra info
     pub is_favorite: Option<bool>, // is favorite
     pub rating: Option<i32>,       // 0-5 stars
+    pub culling_flag: Option<i32>, // 0: unreviewed, 1: pick, 2: reject
     pub rotate: Option<i32>,       // rotate angle (0, 90, 180, 270)
     pub comments: Option<String>,  // comments
     pub has_tags: Option<bool>,    // has tags
@@ -650,12 +1310,371 @@ pub struct AFile {
     pub geo_cc: Option<String>,     // Country code
 
     // output only
-    pub file_path: Option<String>,   // file path (for webview)
-    pub album_id: Option<i64>,       // album id (for webview)
-    pub album_name: Option<String>,  // album name (for webview)
-    pub has_thumbnail: Option<bool>, // has thumbnail (for webview)
-    pub has_embedding: Option<bool>, // has embedding (for webview)
-    pub last_scan_time: Option<i64>, // last scan timestamp
+    pub file_path: Option<String>,          // file path (for webview)
+    pub album_id: Option<i64>,              // album id (for webview)
+    pub album_name: Option<String>,         // album name (for webview)
+    pub has_thumbnail: Option<bool>,        // has thumbnail (for webview)
+    pub has_collections: Option<bool>,      // belongs to one or more collections
+    pub has_embedding: Option<bool>,        // has embedding (for webview)
+    pub last_scan_time: Option<i64>,        // last scan timestamp
+    pub content_identifier: Option<String>, // Apple Live Photo content identifier
+    pub media_subtype: Option<String>,      // live_photo, motion_photo, raw_jpeg_pair, ...
+    pub live_photo_video_id: Option<i64>,   // paired Live Photo MOV file id
+    pub live_photo_video_path: Option<String>, // paired Live Photo MOV path
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ACollection {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ACollectionOrder {
+    pub id: i64,
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AFileCollection {
+    pub id: i64,
+    pub name: String,
+}
+
+impl ACollection {
+    fn now_ts() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    fn from_row(row: &rusqlite::Row) -> Result<Self, rusqlite::Error> {
+        Ok(Self {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            sort_order: row.get(2)?,
+            count: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
+        })
+    }
+
+    fn ensure_exists(conn: &Connection, id: i64) -> Result<(), String> {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM acollections WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        if exists.is_some() {
+            Ok(())
+        } else {
+            Err("Collection not found".to_string())
+        }
+    }
+
+    pub fn list() -> Result<Vec<Self>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.name, c.sort_order, COUNT(a.id) AS count, c.created_at, c.updated_at
+                FROM acollections c
+                LEFT JOIN acollections_files cf ON cf.collection_id = c.id
+                LEFT JOIN afiles a ON a.id = cf.file_id
+                    AND a.id NOT IN (
+                        SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                    )
+                GROUP BY c.id
+                ORDER BY c.sort_order ASC, c.id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map([], Self::from_row)
+            .map_err(|e| e.to_string())?;
+        let mut collections = Vec::new();
+        for row in rows {
+            collections.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(collections)
+    }
+
+    pub fn create(name: &str) -> Result<Self, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Collection name cannot be empty".to_string());
+        }
+
+        let conn = open_conn()?;
+        let sort_order: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM acollections",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let now = Self::now_ts();
+        conn.execute(
+            "INSERT INTO acollections (name, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![trimmed, sort_order, now, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let id = conn.last_insert_rowid();
+        Self::get(id)
+    }
+
+    pub fn get(id: i64) -> Result<Self, String> {
+        let conn = open_conn()?;
+        conn.query_row(
+            "SELECT c.id, c.name, c.sort_order, COUNT(a.id) AS count, c.created_at, c.updated_at
+            FROM acollections c
+            LEFT JOIN acollections_files cf ON cf.collection_id = c.id
+            LEFT JOIN afiles a ON a.id = cf.file_id
+                AND a.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                )
+            WHERE c.id = ?1
+            GROUP BY c.id",
+            params![id],
+            Self::from_row,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn rename(id: i64, name: &str) -> Result<usize, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Collection name cannot be empty".to_string());
+        }
+
+        let conn = open_conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE acollections SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![trimmed, Self::now_ts(), id],
+            )
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            Err("Collection not found".to_string())
+        } else {
+            Ok(changed)
+        }
+    }
+
+    pub fn delete(id: i64) -> Result<usize, String> {
+        let conn = open_conn()?;
+        let changed = conn
+            .execute("DELETE FROM acollections WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        if changed == 0 {
+            Err("Collection not found".to_string())
+        } else {
+            Ok(changed)
+        }
+    }
+
+    pub fn reorder(items: Vec<ACollectionOrder>) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = Self::now_ts();
+        let mut changed = 0;
+        for item in items {
+            changed += tx
+                .execute(
+                    "UPDATE acollections SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![item.sort_order, now, item.id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    pub fn add_files(collection_id: i64, file_ids: Vec<i64>) -> Result<(Vec<i64>, Vec<i64>), String> {
+        let unique_file_ids: Vec<i64> = file_ids
+            .into_iter()
+            .filter(|id| *id > 0)
+            .collect::<HashSet<i64>>()
+            .into_iter()
+            .collect();
+        if unique_file_ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let mut conn = open_conn()?;
+        Self::ensure_exists(&conn, collection_id)?;
+
+        // Find which file ids already exist in this collection
+        let placeholders = unique_file_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let existing_sql = format!(
+            "SELECT file_id FROM acollections_files WHERE collection_id = ?1 AND file_id IN ({})",
+            placeholders
+        );
+        let mut params_for_existing: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(collection_id)];
+        for id in &unique_file_ids {
+            params_for_existing.push(Box::new(*id));
+        }
+        let existing: HashSet<i64> = {
+            let mut stmt = conn.prepare(&existing_sql).map_err(|e| e.to_string())?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params_for_existing.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt
+                .query_map(&param_refs[..], |row| row.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?;
+            let mut set = HashSet::new();
+            for row in rows {
+                set.insert(row.map_err(|e| e.to_string())?);
+            }
+            set
+        };
+
+        let new_file_ids: Vec<i64> = unique_file_ids
+            .iter()
+            .filter(|id| !existing.contains(id))
+            .copied()
+            .collect();
+        let skipped_file_ids: Vec<i64> = unique_file_ids
+            .iter()
+            .filter(|id| existing.contains(id))
+            .copied()
+            .collect();
+
+        if new_file_ids.is_empty() {
+            return Ok((Vec::new(), skipped_file_ids));
+        }
+
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = Self::now_ts();
+        let mut added_file_ids = Vec::new();
+        for file_id in new_file_ids {
+            let added = tx
+                .execute(
+                    "INSERT OR IGNORE INTO acollections_files (collection_id, file_id, added_at)
+                    SELECT ?1, id, ?3 FROM afiles WHERE id = ?2",
+                    params![collection_id, file_id, now],
+                )
+                .map_err(|e| e.to_string())?;
+            if added > 0 {
+                added_file_ids.push(file_id);
+            }
+        }
+        tx.execute(
+            "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+            params![now, collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok((added_file_ids, skipped_file_ids))
+    }
+
+    pub fn remove_files(collection_id: i64, file_ids: Vec<i64>) -> Result<usize, String> {
+        let unique_file_ids: HashSet<i64> = file_ids.into_iter().filter(|id| *id > 0).collect();
+        if unique_file_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = open_conn()?;
+        Self::ensure_exists(&conn, collection_id)?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let now = Self::now_ts();
+        let mut changed = 0;
+        for file_id in unique_file_ids {
+            changed += tx
+                .execute(
+                    "DELETE FROM acollections_files WHERE collection_id = ?1 AND file_id = ?2",
+                    params![collection_id, file_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        tx.execute(
+            "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+            params![now, collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    pub fn clear(collection_id: i64) -> Result<usize, String> {
+        let conn = open_conn()?;
+        Self::ensure_exists(&conn, collection_id)?;
+        let changed = conn
+            .execute(
+                "DELETE FROM acollections_files WHERE collection_id = ?1",
+                params![collection_id],
+            )
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE acollections SET updated_at = ?1 WHERE id = ?2",
+            params![Self::now_ts(), collection_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    pub fn file_ids(collection_id: i64) -> Result<Vec<i64>, String> {
+        let conn = open_conn()?;
+        Self::ensure_exists(&conn, collection_id)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_id FROM acollections_files
+                WHERE collection_id = ?1
+                ORDER BY added_at DESC, file_id DESC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![collection_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    pub fn for_file(file_id: i64) -> Result<Vec<AFileCollection>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.name
+                FROM acollections_files cf
+                JOIN acollections c ON c.id = cf.collection_id
+                WHERE cf.file_id = ?1
+                ORDER BY c.sort_order ASC, c.id ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![file_id], |row| {
+                Ok(AFileCollection {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut collections = Vec::new();
+        for row in rows {
+            collections.push(row.map_err(|e| e.to_string())?);
+        }
+        Ok(collections)
+    }
 }
 
 /// Define the timeline marker struct for scrollbar markers
@@ -679,6 +1698,11 @@ pub struct QueryParams {
     pub search_folder: String,
     pub start_date: i64,
     pub end_date: i64,
+    pub calendar_sort: i64, // 0=taken asc … 5=modified desc (sort / 2 → column)
+    #[serde(default)]
+    pub folder_sort: i64, // 0=name asc, 1=name desc, 2=date asc, 3=date desc
+    #[serde(default)]
+    pub category_sort: i64, // 0=name asc, 1=name desc, 2=count asc, 3=count desc
     pub make: String,
     pub model: String,
     pub lens_make: String,
@@ -687,9 +1711,123 @@ pub struct QueryParams {
     pub location_name: String,
     pub is_favorite: bool,
     pub rating: i64,
+    #[serde(default = "default_culling_flag")]
+    pub culling_flag: i64,
     pub tag_id: i64,
     pub person_id: i64,
+    // GPS bounding box filter (e.g. for "photos in this map area")
+    #[serde(default)]
+    pub gps_min_lat: Option<f64>,
+    #[serde(default)]
+    pub gps_max_lat: Option<f64>,
+    #[serde(default)]
+    pub gps_min_lon: Option<f64>,
+    #[serde(default)]
+    pub gps_max_lon: Option<f64>,
+    #[serde(default)]
+    pub group_by: i64,
 }
+
+fn default_culling_flag() -> i64 {
+    -1
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartRule {
+    pub id: String,
+    pub field: String,
+    pub operator: String,
+    pub value: JsonValue,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartQueryParams {
+    #[serde(default = "default_smart_query_version")]
+    pub version: i32,
+    #[serde(default = "default_smart_query_match")]
+    pub r#match: String,
+    #[serde(default)]
+    pub rules: Vec<SmartRule>,
+    pub sort_type: i64,
+    pub sort_order: i64,
+    #[serde(default)]
+    pub calendar_sort: i64,
+    #[serde(default)]
+    pub folder_sort: i64,
+    #[serde(default)]
+    pub category_sort: i64,
+    #[serde(default)]
+    pub group_by: i64,
+}
+
+fn default_smart_query_version() -> i32 {
+    1
+}
+
+fn default_smart_query_match() -> String {
+    "all".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupedQueryResult {
+    pub rows: Vec<GroupedQueryRow>,
+    pub groups: Vec<GroupedQueryGroup>,
+    pub total_item_count: i64,
+    pub total_row_count: i64,
+    pub total_size: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupedQueryGroup {
+    pub group_id: String,
+    pub label: String,
+    pub count: i64,
+    pub size: i64,
+    pub row_index: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum GroupedQueryRow {
+    #[serde(rename_all = "camelCase")]
+    Group {
+        row_id: String,
+        group_id: String,
+        label: String,
+        count: i64,
+        size: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    Item {
+        row_id: String,
+        group_id: String,
+        file_index: i64,
+        file: AFile,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct QueryGroup {
+    id: String,
+    label: String,
+    count: i64,
+    size: i64,
+}
+
+const GROUP_BY_FOLDER_PATH: i64 = 1;
+const GROUP_BY_DATE_DAY: i64 = 2;
+const GROUP_BY_DATE_MONTH: i64 = 3;
+const GROUP_BY_RATING: i64 = 4;
+const GROUP_BY_LOCATION: i64 = 5;
+const GROUP_BY_CAMERA: i64 = 6;
+const GROUP_BY_LENS: i64 = 7;
+const GROUP_BY_DATE_YEAR: i64 = 8;
+const GROUP_BY_FILE_TYPE: i64 = 9;
+const GROUP_BY_CULLING: i64 = 10;
 
 /// Define the AI image search parameters struct
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -699,9 +1837,36 @@ pub struct ImageSearchParams {
     pub file_id: Option<i64>, // file id (for similar image search)
     pub threshold: f32,       // search threshold
     pub limit: i64,           // search limit
+    #[serde(default)]
+    pub file_type: i64, // file type bitmask (0=all, 1=image, 2=video, 4=raw)
 }
 
 impl AFile {
+    /// Exclude files whose folder path is the excluded folder itself or one of its children.
+    /// The caller must pass the alias for the file's joined afolders row.
+    fn search_exclusion_condition(folder_alias: &str) -> String {
+        let sep = std::path::MAIN_SEPARATOR.to_string().replace('\'', "''");
+        format!(
+            "(CASE
+                WHEN NOT EXISTS (
+                    SELECT 1 FROM afolders
+                    WHERE is_excluded_from_search = 1
+                )
+                THEN 1
+                ELSE NOT EXISTS (
+                    SELECT 1 FROM afolders xf
+                    WHERE xf.is_excluded_from_search = 1
+                    AND xf.album_id = {folder_alias}.album_id
+                    AND (
+                        {folder_alias}.path = xf.path
+                        OR instr({folder_alias}.path, xf.path || '{}') = 1
+                    )
+                )
+            END)",
+            sep
+        )
+    }
+
     fn new(folder_id: i64, file_path: &str, file_type: i64) -> Result<Self, String> {
         let file_info = t_utils::FileInfo::new(file_path)?;
 
@@ -729,6 +1894,37 @@ impl AFile {
         let mut gps_latitude: Option<f64> = None;
         let mut gps_longitude: Option<f64> = None;
         let mut gps_altitude: Option<f64> = None;
+        let mut content_identifier: Option<String> = None;
+
+        // Pre-read file header once for images (saves 3-4 redundant File::open per file).
+        let file_header: Option<Vec<u8>> = if file_type == 1 || file_type == 3 {
+            std::fs::File::open(file_path).ok().and_then(|mut f| {
+                use std::io::Read;
+                let mut buf = vec![0u8; 128 * 1024];
+                f.read(&mut buf).ok().map(|n| {
+                    buf.truncate(n);
+                    buf
+                })
+            })
+        } else {
+            None
+        };
+        let file_header_deref = file_header.as_deref();
+
+        if file_type == 1
+            && matches!(
+                Path::new(file_path)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "heic" | "heif" | "hif" | "jpg" | "jpeg"
+            )
+        {
+            content_identifier = file_header_deref
+                .and_then(crate::t_apple_sidecar::apple_content_identifier_from_bytes);
+        }
 
         match file_type {
             1 => {
@@ -748,6 +1944,7 @@ impl AFile {
                 gps_latitude = video_metadata.gps_latitude;
                 gps_longitude = video_metadata.gps_longitude;
                 gps_altitude = video_metadata.gps_altitude;
+                content_identifier = video_metadata.content_identifier;
             }
             3 => {
                 let (w, h) = t_image::get_raw_dimensions(file_path)?;
@@ -757,12 +1954,30 @@ impl AFile {
             _ => {}
         };
 
-        let format_label = t_utils::detect_file_format_label(file_path, file_type);
+        let format_label = if let Some(hdr) = file_header_deref {
+            if file_type == 3 {
+                Some("RAW".to_string())
+            } else {
+                t_utils::detect_label_from_header(hdr, file_type)
+            }
+        } else {
+            t_utils::detect_file_format_label(file_path, file_type)
+        };
 
         if file_type == 1 || file_type == 3 {
-            // Image file
-            // Read EXIF data using permissive reader
-            let exif = t_image::read_exif_permissive(file_path);
+            // Image file — reuse the pre-read header when it contains EXIF.
+            // Some older JPEGs place EXIF after large APP segments (such as an
+            // ICC profile), beyond this header buffer. Fall back to scanning
+            // the full JPEG so their capture settings are indexed as well.
+            let exif = if let Some(hdr) = file_header_deref {
+                t_image::read_exif_from_bytes_permissive(hdr).or_else(|| {
+                    (file_type == 1 && t_image::is_jpeg_path(file_path))
+                        .then(|| t_image::read_exif_permissive(file_path))
+                        .flatten()
+                })
+            } else {
+                t_image::read_exif_permissive(file_path)
+            };
 
             // Extracts EXIF orientation field.
             // 1: Horizontal (normal)
@@ -783,11 +1998,8 @@ impl AFile {
 
             // 2. Binary Scan Fallback if still None or 1
             if e_orientation.is_none() || e_orientation == Some(1) {
-                if let Ok(mut f) = std::fs::File::open(file_path) {
-                    let mut buf = vec![0u8; 128 * 1024];
-                    use std::io::Read;
-                    let n = f.read(&mut buf).unwrap_or(0);
-                    if let Some(bo) = t_image::scan_orientation_binary(&buf[..n]) {
+                if let Some(hdr) = file_header_deref {
+                    if let Some(bo) = t_image::scan_orientation_binary(hdr) {
                         e_orientation = Some(bo as u32);
                     }
                 }
@@ -836,6 +2048,25 @@ impl AFile {
             e_focal_length = Self::get_exif_field(&exif, Tag::FocalLength);
             e_iso_speed = Self::get_exif_field(&exif, Tag::PhotographicSensitivity);
 
+            // The editor uses little_exif to preserve metadata. Some legacy
+            // JPEGs are accepted by that reader but rejected by kamadak-exif,
+            // which previously made capture settings appear only after an edit
+            // was saved as a new image. Only use the same reader when
+            // kamadak-exif found none of the capture settings, so a record
+            // never combines partial values from two parsers.
+            if t_image::is_jpeg_path(file_path)
+                && e_exposure_time.is_none()
+                && e_f_number.is_none()
+                && e_focal_length.is_none()
+                && e_iso_speed.is_none()
+            {
+                let capture_settings = t_image::read_capture_settings_with_little_exif(file_path);
+                e_exposure_time = e_exposure_time.or(capture_settings.exposure_time);
+                e_f_number = e_f_number.or(capture_settings.f_number);
+                e_focal_length = e_focal_length.or(capture_settings.focal_length);
+                e_iso_speed = e_iso_speed.or(capture_settings.iso_speed);
+            }
+
             // Fallback: infer lens make from lens model prefix when LensMake is missing.
             if e_lens_make.is_none() {
                 if let Some(model) = e_lens_model.as_deref() {
@@ -843,14 +2074,65 @@ impl AFile {
                 }
             }
 
-            // Binary String Fallback if metadata is still missing (Industry standard for tough files)
-            if e_make.is_none() || e_model.is_none() || e_date_time.is_none() {
-                if let Ok(mut f) = std::fs::File::open(file_path) {
-                    let mut buf = vec![0u8; 128 * 1024];
-                    use std::io::Read;
-                    let n = f.read(&mut buf).unwrap_or(0);
-                    let data = &buf[..n];
+            // For RAW files, LibRaw is the primary metadata source.
+            // It reads the file directly and does not rely on the embedded JPEG
+            // that the permissive EXIF reader scans, so it is robust against
+            // RAW files whose EXIF data is stored outside the preview image.
+            if file_type == 3 {
+                if let Ok(meta) = t_libraw::get_raw_meta(file_path) {
+                    if e_make.is_none() {
+                        e_make = meta.make;
+                    }
+                    if e_model.is_none() {
+                        e_model = meta.model;
+                    }
+                    if e_software.is_none() {
+                        e_software = meta.software;
+                    }
+                    if e_artist.is_none() {
+                        e_artist = meta.artist;
+                    }
+                    if e_description.is_none() {
+                        e_description = meta.description;
+                    }
+                    if e_iso_speed.is_none() {
+                        e_iso_speed = meta.iso_speed;
+                    }
+                    if e_exposure_time.is_none() {
+                        e_exposure_time = meta.shutter;
+                    }
+                    if e_f_number.is_none() {
+                        e_f_number = meta.aperture;
+                    }
+                    if e_focal_length.is_none() {
+                        e_focal_length = meta.focal_len;
+                    }
+                    if e_flash.is_none() {
+                        e_flash = meta.flash_used;
+                    }
+                    if e_lens_make.is_none() {
+                        e_lens_make = meta.lens_make;
+                    }
+                    if e_lens_model.is_none() {
+                        e_lens_model = meta.lens_model;
+                    }
+                    if taken_date == file_info.modified {
+                        if let Some(ts) = meta.timestamp {
+                            taken_date = Some(ts);
+                        }
+                    }
+                }
+            }
 
+            // Binary String Fallback if metadata is still missing (Industry standard for tough files)
+            if e_make.is_none()
+                || e_model.is_none()
+                || e_date_time.is_none()
+                || e_software.is_none()
+                || e_lens_make.is_none()
+                || e_lens_model.is_none()
+            {
+                if let Some(data) = file_header_deref {
                     if e_make.is_none() {
                         e_make = Self::scrape_ascii_from_tag(data, 0x010f);
                     }
@@ -867,7 +2149,9 @@ impl AFile {
                     if e_lens_model.is_none() {
                         e_lens_model = Self::scrape_ascii_from_tag(data, 0xa434);
                     }
-
+                    if e_lens_make.is_none() {
+                        e_lens_make = Self::scrape_ascii_from_tag(data, 0xa433);
+                    }
                     // Extra Orientation fallback for Sony MakerNotes (Tag 0x2000)
                     if e_orientation.is_none() || e_orientation == Some(1) {
                         if let Some(so) = Self::scrape_u16_from_tag(data, 0x2000) {
@@ -876,6 +2160,12 @@ impl AFile {
                             }
                         }
                     }
+                }
+            }
+
+            if e_lens_make.is_none() {
+                if let Some(model) = e_lens_model.as_deref() {
+                    e_lens_make = t_lens::infer_lens_make(model).map(|s| s.to_string());
                 }
             }
 
@@ -897,42 +2187,64 @@ impl AFile {
         // Geocoding based on GPS coordinates from any source
         let (geo_name, geo_admin1, geo_admin2, geo_cc) =
             if let (Some(lat), Some(lon)) = (gps_latitude, gps_longitude) {
-                let search_result = t_utils::GEOCODER.search((lat, lon));
-                (
-                    Some(search_result.record.name.clone()),
-                    Some(search_result.record.admin1.clone()),
-                    Some(search_result.record.admin2.clone()),
-                    Some(search_result.record.cc.clone()),
-                )
+                match t_utils::GEOCODER.search((lat, lon)) {
+                    Some(result) => (
+                        Some(result.record.name.clone()),
+                        Some(result.record.admin1.clone()),
+                        Some(result.record.admin2.clone()),
+                        Some(result.record.cc.clone()),
+                    ),
+                    None => (None, None, None, None),
+                }
             } else {
                 (None, None, None, None)
             };
+
+        // RAW dimensions are already orientation-adjusted in `get_raw_dimensions`.
+        let should_swap_dimensions_for_orientation =
+            file_type != 3 && !t_image::is_heic_path(file_path);
 
         let file = Self {
             id: None,
             folder_id,
 
             name: file_info.file_name.clone(),
-            name_pinyin: Some(t_utils::convert_to_pinyin(file_info.file_name.as_str())), // convert to pinyin
+            name_pinyin: Some(t_utils::natural_sort_key(
+                &file_info.file_name.to_lowercase(),
+            )), // natural sort key (case-insensitive, pinyin + zero-padded numbers)
             size: file_info.file_size,
             file_type: Some(file_type),
             format_label,
             created_at: file_info.created,
             modified_at: file_info.modified,
+            inode: Some(file_info.inode as i64),
 
             taken_date,
             width: e_orientation
-                .map(|orientation| if orientation > 4 { height } else { width })
+                .map(|orientation| {
+                    if should_swap_dimensions_for_orientation && orientation > 4 {
+                        height
+                    } else {
+                        width
+                    }
+                })
                 .or(Some(width)),
             height: e_orientation
-                .map(|orientation| if orientation > 4 { width } else { height })
+                .map(|orientation| {
+                    if should_swap_dimensions_for_orientation && orientation > 4 {
+                        width
+                    } else {
+                        height
+                    }
+                })
                 .or(Some(height)),
             duration: Some(duration as i64),
 
             is_favorite: None,
             rating: Some(0),
+            culling_flag: Some(0),
             rotate: None,
-            comments: None,
+            comments: t_ai_png::extract_comment(file_path),
             has_tags: Some(false),
             has_faces: Some(0),
 
@@ -966,8 +2278,13 @@ impl AFile {
             album_id: None,
             album_name: None,
             has_thumbnail: None,
+            has_collections: None,
             has_embedding: None,
             last_scan_time: Some(0),
+            content_identifier,
+            media_subtype: None,
+            live_photo_video_id: None,
+            live_photo_video_path: None,
         };
 
         Ok(file)
@@ -1066,61 +2383,7 @@ impl AFile {
                 }
                 String::from_utf8_lossy(&bytes).into_owned()
             }
-            _ => {
-                let displayed_value = field.display_value().with_unit(exif.as_ref()?).to_string();
-                if displayed_value.starts_with("1/") {
-                    let parts: Vec<&str> = displayed_value.split(' ').collect();
-                    let fraction_part = &parts[0][2..];
-
-                    let new_fraction_part = if fraction_part.contains('.') {
-                        let decimal_part = fraction_part.split('.').nth(1).unwrap_or("");
-                        if decimal_part.len() > 2 {
-                            if let Ok(num) = fraction_part.parse::<f64>() {
-                                format!("{:.2}", num)
-                            } else {
-                                fraction_part.to_string()
-                            }
-                        } else {
-                            fraction_part.to_string()
-                        }
-                    } else {
-                        fraction_part.to_string()
-                    };
-
-                    let mut result = format!("1/{}", new_fraction_part);
-                    if parts.len() > 1 {
-                        result.push(' ');
-                        result.push_str(parts[1]);
-                    }
-                    result
-                } else {
-                    let parts: Vec<&str> = displayed_value.split(' ').collect();
-                    if parts.is_empty() {
-                        return None;
-                    }
-                    if let Ok(num) = parts[0].parse::<f64>() {
-                        let result = if parts[0].contains('.') {
-                            let decimal_part = parts[0].split('.').nth(1).unwrap_or("");
-                            if decimal_part.len() > 2 {
-                                format!("{:.2}", num)
-                            } else {
-                                parts[0].to_string()
-                            }
-                        } else {
-                            parts[0].to_string()
-                        };
-
-                        let mut final_result = result;
-                        if parts.len() > 1 {
-                            final_result.push(' ');
-                            final_result.push_str(parts[1]);
-                        }
-                        final_result
-                    } else {
-                        displayed_value
-                    }
-                }
-            }
+            _ => field.display_value().with_unit(exif.as_ref()?).to_string(),
         };
 
         let cleaned = raw
@@ -1224,15 +2487,16 @@ impl AFile {
         let result = conn.execute(
             "INSERT INTO afiles (
                 folder_id, 
-                name, name_pinyin, size, file_type, format_label, created_at, modified_at, 
+                name, name_pinyin, size, file_type, format_label, created_at, modified_at, inode,
                 taken_date,
                 width, height, duration,
                 is_favorite, rating, rotate, comments, has_tags,
                 e_make, e_model, e_date_time, e_software, e_artist, e_copyright, e_description, e_lens_make, e_lens_model, e_exposure_bias, e_exposure_time, e_f_number, e_focal_length, e_iso_speed, e_flash, e_orientation,
                 gps_latitude, gps_longitude, gps_altitude, geo_name, geo_admin1, geo_admin2, geo_cc,
-                last_scan_time
-            ) 
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41)",
+                last_scan_time, content_identifier
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43)
+            ON CONFLICT(folder_id, name) DO NOTHING",
             params![
                 self.folder_id,
 
@@ -1243,6 +2507,7 @@ impl AFile {
                 self.format_label,
                 self.created_at,
                 self.modified_at,
+                self.inode,
 
                 self.taken_date,
 
@@ -1281,6 +2546,7 @@ impl AFile {
                 self.geo_admin2,
                 self.geo_cc,
                 self.last_scan_time,
+                self.content_identifier,
             ]
         ).map_err(|e| e.to_string())?;
         Ok(result)
@@ -1291,14 +2557,14 @@ impl AFile {
         let conn = open_conn()?;
         let result = conn.execute(
             "UPDATE afiles SET
-                name = ?1, name_pinyin = ?2, size = ?3, file_type = ?4, format_label = ?5, created_at = ?6, modified_at = ?7,
-                taken_date = ?8,
-                width = ?9, height = ?10, duration = ?11,
-                rating = ?12,
-                e_make = ?13, e_model = ?14, e_date_time = ?15, e_software = ?16, e_artist = ?17, e_copyright = ?18, e_description = ?19, e_lens_make = ?20, e_lens_model = ?21, e_exposure_bias = ?22, e_exposure_time = ?23, e_f_number = ?24, e_focal_length = ?25, e_iso_speed = ?26, e_flash = ?27, e_orientation = ?28,
-                gps_latitude = ?29, gps_longitude = ?30, gps_altitude = ?31, geo_name = ?32, geo_admin1 = ?33, geo_admin2 = ?34, geo_cc = ?35,
-                last_scan_time = ?36
-            WHERE id = ?37",
+                name = ?1, name_pinyin = ?2, size = ?3, file_type = ?4, format_label = ?5, created_at = ?6, modified_at = ?7, inode = ?8,
+                taken_date = ?9,
+                width = ?10, height = ?11, duration = ?12,
+                rating = ?13,
+                e_make = ?14, e_model = ?15, e_date_time = ?16, e_software = ?17, e_artist = ?18, e_copyright = ?19, e_description = ?20, e_lens_make = ?21, e_lens_model = ?22, e_exposure_bias = ?23, e_exposure_time = ?24, e_f_number = ?25, e_focal_length = ?26, e_iso_speed = ?27, e_flash = ?28, e_orientation = ?29,
+                gps_latitude = ?30, gps_longitude = ?31, gps_altitude = ?32, geo_name = ?33, geo_admin1 = ?34, geo_admin2 = ?35, geo_cc = ?36,
+                last_scan_time = ?37, content_identifier = ?38
+            WHERE id = ?39",
             params![
                 file.name,
                 file.name_pinyin,
@@ -1307,6 +2573,7 @@ impl AFile {
                 file.format_label,
                 file.created_at,
                 file.modified_at,
+                file.inode,
 
                 file.taken_date,
 
@@ -1340,6 +2607,7 @@ impl AFile {
                 file.geo_admin2,
                 file.geo_cc,
                 file.last_scan_time,
+                file.content_identifier,
                 file_id,
             ]
         ).map_err(|e| e.to_string())?;
@@ -1348,12 +2616,84 @@ impl AFile {
 
     // delete a file from db
     pub fn delete(id: i64) -> Result<usize, String> {
-        let _ = AThumb::delete(id);
-        let conn = open_conn()?;
-        let result = conn
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM athumbs WHERE file_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        let result = tx
             .execute("DELETE FROM afiles WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    pub fn batch_delete(ids: &[i64]) -> Result<usize, String> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut deleted = 0;
+        {
+            let mut thumb_stmt = tx
+                .prepare_cached("DELETE FROM athumbs WHERE file_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let mut file_stmt = tx
+                .prepare_cached("DELETE FROM afiles WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            for id in ids {
+                thumb_stmt.execute(params![id]).map_err(|e| e.to_string())?;
+                deleted += file_stmt.execute(params![id]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(deleted)
+    }
+
+    pub fn update_moved_file_group(
+        file_id: i64,
+        component_file_ids: &[i64],
+        replaced_file_ids: &[i64],
+        new_folder_id: i64,
+    ) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut updated = 0usize;
+
+        {
+            let mut thumb_delete_stmt = tx
+                .prepare_cached("DELETE FROM athumbs WHERE file_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let mut file_delete_stmt = tx
+                .prepare_cached("DELETE FROM afiles WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            for replaced_file_id in replaced_file_ids {
+                thumb_delete_stmt
+                    .execute(params![replaced_file_id])
+                    .map_err(|e| e.to_string())?;
+                file_delete_stmt
+                    .execute(params![replaced_file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        {
+            let mut update_stmt = tx
+                .prepare_cached("UPDATE afiles SET folder_id = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            updated += update_stmt
+                .execute(params![new_folder_id, file_id])
+                .map_err(|e| e.to_string())?;
+            for component_file_id in component_file_ids {
+                updated += update_stmt
+                    .execute(params![new_folder_id, component_file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
     }
 
     /// get all file IDs for a specific album
@@ -1399,25 +2739,40 @@ impl AFile {
         base_query.to_string()
     }
 
+    fn live_photo_companion_exclusion_condition() -> &'static str {
+        "a.id NOT IN (SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL)"
+    }
+
     // build the base SQL query
     fn build_base_query() -> String {
         String::from(
             "SELECT a.id, a.folder_id, 
-                a.name, a.name_pinyin, a.size, a.file_type, a.format_label, a.created_at, a.modified_at, 
+                a.name, a.name_pinyin, a.size, a.file_type, a.format_label, a.created_at, a.modified_at, a.inode,
                 a.taken_date,
                 a.width, a.height, a.duration,
-                a.is_favorite, a.rating, a.rotate, a.comments, a.has_tags,
+                a.is_favorite, a.rating, a.culling_flag, a.rotate, a.comments, a.has_tags,
                 a.e_make, a.e_model, a.e_date_time, a.e_software, a.e_artist, a.e_copyright, a.e_description, a.e_lens_make, a.e_lens_model, a.e_exposure_bias, a.e_exposure_time, a.e_f_number, a.e_focal_length, a.e_iso_speed, a.e_flash, a.e_orientation,
                 a.gps_latitude, a.gps_longitude, a.gps_altitude, a.geo_name, a.geo_admin1, a.geo_admin2, a.geo_cc,
                 b.path,
                 c.id AS album_id, c.name AS album_name,
                 (SELECT 1 FROM athumbs t WHERE t.file_id = a.id LIMIT 1) AS has_thumbnail,
+                (SELECT 1 FROM acollections_files cf WHERE cf.file_id = a.id LIMIT 1) AS has_collections,
                 CASE WHEN a.embeds IS NOT NULL THEN 1 ELSE 0 END AS has_embedding,
                 a.has_faces,
-                a.last_scan_time
+                a.last_scan_time,
+                a.content_identifier,
+                a.media_subtype,
+                a.live_photo_video_id,
+                CASE
+                    WHEN lpv.id IS NOT NULL AND lpf.path IS NOT NULL
+                    THEN lpf.path || '/' || lpv.name
+                    ELSE NULL
+                END AS live_photo_video_path
             FROM afiles a 
             LEFT JOIN afolders b ON a.folder_id = b.id
-            LEFT JOIN albums c ON b.album_id = c.id"
+            LEFT JOIN albums c ON b.album_id = c.id
+            LEFT JOIN afiles lpv ON a.live_photo_video_id = lpv.id
+            LEFT JOIN afolders lpf ON lpv.folder_id = lpf.id"
         )
     }
 
@@ -1434,54 +2789,61 @@ impl AFile {
             format_label: row.get(6)?,
             created_at: row.get(7)?,
             modified_at: row.get(8)?,
+            inode: row.get(9)?,
 
-            taken_date: row.get(9)?,
+            taken_date: row.get(10)?,
 
-            width: row.get(10)?,
-            height: row.get(11)?,
-            duration: row.get(12)?,
+            width: row.get(11)?,
+            height: row.get(12)?,
+            duration: row.get(13)?,
 
-            is_favorite: row.get(13)?,
-            rating: row.get(14)?,
-            rotate: row.get(15)?,
-            comments: row.get(16)?,
-            has_tags: row.get(17)?,
+            is_favorite: row.get(14)?,
+            rating: row.get(15)?,
+            culling_flag: row.get(16)?,
+            rotate: row.get(17)?,
+            comments: row.get(18)?,
+            has_tags: row.get(19)?,
 
-            e_make: row.get(18)?,
-            e_model: row.get(19)?,
-            e_date_time: row.get(20)?,
-            e_software: row.get(21)?,
-            e_artist: row.get(22)?,
-            e_copyright: row.get(23)?,
-            e_description: row.get(24)?,
-            e_lens_make: row.get(25)?,
-            e_lens_model: row.get(26)?,
-            e_exposure_bias: row.get(27)?,
-            e_exposure_time: row.get(28)?,
-            e_f_number: row.get(29)?,
-            e_focal_length: row.get(30)?,
-            e_iso_speed: row.get(31)?,
-            e_flash: row.get(32)?,
-            e_orientation: row.get(33)?,
+            e_make: row.get(20)?,
+            e_model: row.get(21)?,
+            e_date_time: row.get(22)?,
+            e_software: row.get(23)?,
+            e_artist: row.get(24)?,
+            e_copyright: row.get(25)?,
+            e_description: row.get(26)?,
+            e_lens_make: row.get(27)?,
+            e_lens_model: row.get(28)?,
+            e_exposure_bias: row.get(29)?,
+            e_exposure_time: row.get(30)?,
+            e_f_number: row.get(31)?,
+            e_focal_length: row.get(32)?,
+            e_iso_speed: row.get(33)?,
+            e_flash: row.get(34)?,
+            e_orientation: row.get(35)?,
 
-            gps_latitude: row.get(34)?,
-            gps_longitude: row.get(35)?,
-            gps_altitude: row.get(36)?,
-            geo_name: row.get(37)?,
-            geo_admin1: row.get(38)?,
-            geo_admin2: row.get(39)?,
-            geo_cc: row.get(40)?,
+            gps_latitude: row.get(36)?,
+            gps_longitude: row.get(37)?,
+            gps_altitude: row.get(38)?,
+            geo_name: row.get(39)?,
+            geo_admin1: row.get(40)?,
+            geo_admin2: row.get(41)?,
+            geo_cc: row.get(42)?,
 
             file_path: Some(t_utils::get_file_path(
-                row.get::<_, String>(41)?.as_str(),
+                row.get::<_, String>(43)?.as_str(),
                 row.get::<_, String>(2)?.as_str(),
             )),
-            album_id: row.get(42)?,
-            album_name: row.get(43)?,
-            has_thumbnail: row.get::<_, Option<i64>>(44)?.map(|v| v == 1),
-            has_embedding: row.get::<_, Option<i64>>(45)?.map(|v| v == 1),
-            has_faces: row.get::<_, Option<i32>>(46)?,
-            last_scan_time: row.get(47)?,
+            album_id: row.get(44)?,
+            album_name: row.get(45)?,
+            has_thumbnail: row.get::<_, Option<i64>>(46)?.map(|v| v == 1),
+            has_collections: row.get::<_, Option<i64>>(47)?.map(|v| v == 1),
+            has_embedding: row.get::<_, Option<i64>>(48)?.map(|v| v == 1),
+            has_faces: row.get::<_, Option<i32>>(49)?,
+            last_scan_time: row.get(50)?,
+            content_identifier: row.get(51)?,
+            media_subtype: row.get(52)?,
+            live_photo_video_id: row.get(53)?,
+            live_photo_video_path: row.get(54)?,
         })
     }
 
@@ -1522,27 +2884,267 @@ impl AFile {
         Ok(files)
     }
 
+    fn query_file_ids(sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<Vec<i64>, String> {
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params, |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    fn append_condition(where_clause: String, condition: &str) -> String {
+        if where_clause.trim().is_empty() {
+            format!(" WHERE {}", condition)
+        } else {
+            format!("{} AND {}", where_clause, condition)
+        }
+    }
+
+    pub fn get_collection_count_and_sum(
+        collection_id: i64,
+        params: &QueryParams,
+    ) -> Result<(i64, i64), String> {
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+        let collection_join = " INNER JOIN acollections_files cf ON a.id = cf.file_id";
+
+        let sql = if params.person_id > 0 {
+            format!(
+                "SELECT COUNT(*), SUM(size) FROM (SELECT a.id, a.size FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                {}{}{} GROUP BY a.id)",
+                collection_join, joins, where_clause
+            )
+        } else {
+            format!(
+                "{}{}{}{}",
+                Self::build_count_query(),
+                collection_join,
+                joins,
+                where_clause
+            )
+        };
+
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        Self::query_count_and_sum(&sql, &final_params)
+    }
+
+    pub fn get_collection_files(
+        collection_id: i64,
+        params: &QueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+
+        let mut query = Self::build_base_query();
+        query.push_str(" INNER JOIN acollections_files cf ON a.id = cf.file_id");
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+
+        if params.person_id > 0 {
+            query.push_str(" GROUP BY a.id");
+        }
+
+        query.push_str(&format!(" ORDER BY {}", Self::build_order_clause(params)));
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+
+    fn query_collection_groups(
+        collection_id: i64,
+        params: &QueryParams,
+    ) -> Result<Vec<QueryGroup>, String> {
+        let Some((group_id_expr, sort_expr)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+        let sql = format!(
+            "SELECT group_id, group_id AS label, COUNT(*), COALESCE(SUM(size), 0)
+             FROM (
+                SELECT DISTINCT a.id, a.size, {group_id_expr} AS group_id, {sort_expr} AS group_sort
+                FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                INNER JOIN acollections_files cf ON a.id = cf.file_id
+                {joins}{where_clause}
+             )
+             GROUP BY group_id
+             ORDER BY {}",
+            Self::group_order_clause(params)
+        );
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| {
+                Ok(QueryGroup {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get(2)?,
+                    size: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut groups = Vec::new();
+        for group in rows {
+            groups.push(group.map_err(|e| e.to_string())?);
+        }
+        Ok(groups)
+    }
+
+    fn get_collection_files_in_group(
+        collection_id: i64,
+        params: &QueryParams,
+        group_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+
+        let mut query = Self::build_base_query();
+        query.push_str(" INNER JOIN acollections_files cf ON a.id = cf.file_id");
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+        query.push_str(&format!(" AND {} = ?", group_id_expr));
+        query.push_str(" GROUP BY a.id");
+        query.push_str(&format!(" ORDER BY {}", Self::build_order_clause(params)));
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let group_id = group_id.to_string();
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        final_params.push(&group_id);
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+
+    pub fn get_collection_grouped_query_rows(
+        collection_id: i64,
+        params: &QueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<GroupedQueryResult, String> {
+        let groups = Self::query_collection_groups(collection_id, params)?;
+        Self::build_grouped_query_result(
+            groups,
+            offset,
+            limit,
+            |group, group_file_offset, group_file_limit| {
+                Self::get_collection_files_in_group(
+                    collection_id,
+                    params,
+                    &group.id,
+                    group_file_offset,
+                    group_file_limit,
+                )
+            },
+        )
+    }
+
+    pub fn get_collection_group_file_ids(
+        collection_id: i64,
+        params: &QueryParams,
+        group_id: &str,
+    ) -> Result<Vec<i64>, String> {
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+        let query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             INNER JOIN acollections_files cf ON a.id = cf.file_id
+             {joins}{where_clause} AND {group_id_expr} = ?
+             GROUP BY a.id
+             ORDER BY {}",
+            Self::build_order_clause(params)
+        );
+        let group_id = group_id.to_string();
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        final_params.push(&group_id);
+        Self::query_file_ids(&query, &final_params)
+    }
+
+    pub fn get_collection_query_file_ids(
+        collection_id: i64,
+        params: &QueryParams,
+    ) -> Result<Vec<i64>, String> {
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let where_clause = Self::append_condition(where_clause, "cf.collection_id = ?");
+        let query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             INNER JOIN acollections_files cf ON a.id = cf.file_id
+             {joins}{where_clause}
+             GROUP BY a.id
+             ORDER BY {}",
+            Self::build_order_clause(params)
+        );
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&collection_id);
+        Self::query_file_ids(&query, &final_params)
+    }
+
     /// fetch a file info from db by folder_id and file name
     pub fn fetch(folder_id: i64, file_path: &str) -> Result<Option<Self>, String> {
         let conn = open_conn()?;
+        Self::fetch_with_conn(&conn, folder_id, file_path)
+    }
 
-        // Prepare the SQL query by using the base query and adding conditions
+    pub fn fetch_with_conn(
+        conn: &Connection,
+        folder_id: i64,
+        file_path: &str,
+    ) -> Result<Option<Self>, String> {
         let sql = format!(
             "{} WHERE a.folder_id = ?1 AND a.name = ?2",
             Self::build_base_query()
         );
-
-        // Execute the query with folder_id and file name as parameters
-        let result = conn
-            .query_row(
-                &sql,
-                params![folder_id, t_utils::get_file_name(file_path)],
-                Self::from_row,
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-
-        Ok(result)
+        conn.query_row(
+            &sql,
+            params![folder_id, t_utils::get_file_name(file_path)],
+            Self::from_row,
+        )
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     fn build_file_type_condition(mask: i64) -> Option<String> {
@@ -1579,7 +3181,7 @@ impl AFile {
     ) -> Result<(Self, i32), String> {
         // Check if the file exists
         let existing_file = Self::fetch(folder_id, file_path)?;
-        if let Some(file) = existing_file {
+        if let Some(mut file) = existing_file {
             // check file modified time or if thumbnail is missing
             let file_info = t_utils::FileInfo::new(file_path)?;
             let modified = file.modified_at != file_info.modified;
@@ -1616,6 +3218,16 @@ impl AFile {
                 // for the mark-and-sweep deletion logic.
                 if let Some(file_id) = file.id {
                     let _ = Self::update_column(file_id, "last_scan_time", &last_scan_time);
+                    if file
+                        .comments
+                        .as_deref()
+                        .is_none_or(|comment| comment.trim().is_empty())
+                    {
+                        if let Some(comment) = t_ai_png::extract_comment(file_path) {
+                            let _ = Self::update_column(file_id, "comments", &comment);
+                            file.comments = Some(comment);
+                        }
+                    }
                 }
             }
             return Ok((file, 0));
@@ -1624,9 +3236,16 @@ impl AFile {
         // insert the new file into the database
         let mut new_file_struct = Self::new(folder_id, file_path, file_type)?;
         new_file_struct.last_scan_time = Some(last_scan_time);
-        new_file_struct.insert()?;
+        let inserted = new_file_struct.insert()?;
 
-        // return the newly inserted file
+        // A concurrent folder sync or album scan may have inserted the same
+        // path after the SELECT above. Re-enter the existing-file path so the
+        // winning row is marked as seen by this scan and receives any required
+        // metadata or thumbnail refresh.
+        if inserted == 0 {
+            return Self::add_to_db(folder_id, file_path, file_type, last_scan_time);
+        }
+
         let new_file = Self::fetch(folder_id, file_path)?;
         new_file
             .map(|f| (f, 1))
@@ -1649,6 +3268,36 @@ impl AFile {
         Ok(result)
     }
 
+    pub fn get_files_by_ids(file_ids: &[i64]) -> Result<Vec<Self>, String> {
+        let conn = open_conn()?;
+        let valid_ids = file_ids
+            .iter()
+            .copied()
+            .filter(|id| *id > 0)
+            .collect::<Vec<_>>();
+        let mut files = Vec::with_capacity(valid_ids.len());
+
+        for ids in valid_ids.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "{} WHERE a.id IN ({})",
+                Self::build_base_query(),
+                placeholders
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), Self::from_row)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                files.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+
+        Ok(files)
+    }
+
     /// update a file info
     pub fn update_file_info(
         file_id: i64,
@@ -1669,8 +3318,16 @@ impl AFile {
         new_file_info.is_favorite = old_file_info.is_favorite;
         new_file_info.rating = old_file_info.rating;
         new_file_info.rotate = old_file_info.rotate;
-        new_file_info.comments = old_file_info.comments;
+        if old_file_info
+            .comments
+            .as_deref()
+            .is_some_and(|comment| !comment.trim().is_empty())
+        {
+            new_file_info.comments = old_file_info.comments;
+        }
         new_file_info.has_tags = old_file_info.has_tags;
+        new_file_info.has_thumbnail = old_file_info.has_thumbnail;
+        new_file_info.has_embedding = old_file_info.has_embedding;
         new_file_info.last_scan_time = Some(last_scan_time);
 
         // update the file info
@@ -1686,11 +3343,578 @@ impl AFile {
         value: &dyn rusqlite::ToSql,
     ) -> Result<usize, String> {
         let conn = open_conn()?;
+        Self::update_column_with_conn(&conn, file_id, column, value)
+    }
+
+    pub fn update_column_with_conn(
+        conn: &Connection,
+        file_id: i64,
+        column: &str,
+        value: &dyn rusqlite::ToSql,
+    ) -> Result<usize, String> {
         let query = format!("UPDATE afiles SET {} = ?1 WHERE id = ?2", column);
-        let result = conn
-            .execute(&query, params![value, file_id])
+        conn.execute(&query, params![value, file_id])
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn batch_update_names(updates: &[(i64, String, Option<String>)]) -> Result<usize, String> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed = 0usize;
+        for (file_id, name, name_pinyin) in updates {
+            changed += tx
+                .execute(
+                    "UPDATE afiles SET name = ?1, name_pinyin = ?2 WHERE id = ?3",
+                    params![name, name_pinyin, file_id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed)
+    }
+
+    pub fn batch_update_metadata(
+        file_ids: &[i64],
+        is_favorite: Option<bool>,
+        rating: Option<i32>,
+        culling_flag: Option<i32>,
+        rotate_delta: Option<i32>,
+        comment: Option<&str>,
+    ) -> Result<usize, String> {
+        if file_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut updated = 0;
+
+        if let Some(value) = is_favorite {
+            let mut stmt = tx
+                .prepare_cached("UPDATE afiles SET is_favorite = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                updated += stmt
+                    .execute(params![value, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(value) = rating {
+            let clamped = value.clamp(0, 5);
+            let mut stmt = tx
+                .prepare_cached("UPDATE afiles SET rating = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                updated += stmt
+                    .execute(params![clamped, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(value) = culling_flag {
+            let clamped = value.clamp(0, 2);
+            let mut stmt = tx
+                .prepare_cached("UPDATE afiles SET culling_flag = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                updated += stmt
+                    .execute(params![clamped, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(value) = rotate_delta {
+            let mut stmt = tx
+                .prepare_cached(
+                    "UPDATE afiles
+                     SET rotate = ((COALESCE(rotate, 0) + ?1) % 360 + 360) % 360
+                     WHERE id = ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                updated += stmt
+                    .execute(params![value, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        if let Some(value) = comment {
+            let mut stmt = tx
+                .prepare_cached("UPDATE afiles SET comments = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                updated += stmt
+                    .execute(params![value, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(updated)
+    }
+
+    pub fn pair_live_photos_in_folder(
+        folder_id: i64,
+        affected_names: &HashSet<String>,
+        refresh_missing_identifiers: bool,
+    ) -> Result<usize, String> {
+        #[derive(Clone)]
+        struct Candidate {
+            id: i64,
+            name: String,
+            file_type: i64,
+            content_identifier: Option<String>,
+            media_subtype: Option<String>,
+            live_photo_video_id: Option<i64>,
+        }
+
+        fn lower_ext(name: &str) -> String {
+            Path::new(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        }
+
+        fn lower_stem(name: &str) -> Option<String> {
+            Path::new(name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem.to_ascii_lowercase())
+        }
+
+        fn video_match_stems(name: &str) -> Vec<String> {
+            let Some(stem) = lower_stem(name) else {
+                return Vec::new();
+            };
+            let mut stems = vec![stem.clone()];
+            if let Some(stripped) = stem.strip_suffix("_hevc") {
+                if !stripped.is_empty() {
+                    stems.push(stripped.to_string());
+                }
+            }
+            stems
+        }
+
+        fn is_live_photo_image(candidate: &Candidate) -> bool {
+            if candidate.file_type != 1 {
+                return false;
+            }
+            matches!(
+                lower_ext(&candidate.name).as_str(),
+                "heic" | "heif" | "hif" | "jpg" | "jpeg"
+            )
+        }
+
+        fn is_live_photo_video(candidate: &Candidate) -> bool {
+            if candidate.file_type != 2 || lower_ext(&candidate.name) != "mov" {
+                return false;
+            }
+            has_content_identifier(candidate)
+        }
+
+        fn has_filename_video_candidate(
+            candidate: &Candidate,
+            video_stems: &HashSet<String>,
+        ) -> bool {
+            is_live_photo_image(candidate)
+                && lower_stem(&candidate.name)
+                    .map(|stem| video_stems.contains(&stem))
+                    .unwrap_or(false)
+        }
+
+        fn has_content_identifier(candidate: &Candidate) -> bool {
+            content_identifier_key(candidate).is_some()
+        }
+
+        fn content_identifier_key(candidate: &Candidate) -> Option<String> {
+            let identifier = candidate
+                .content_identifier
+                .as_ref()
+                .map(|identifier| identifier.trim())
+                .filter(|identifier| !identifier.is_empty())?;
+            Some(identifier.to_ascii_lowercase())
+        }
+
+        if affected_names.is_empty() {
+            return Ok(0);
+        }
+
+        // Restrict pairing to the filename stems touched by this sync. Include
+        // both the normal and _HEVC MOV forms for every affected stem.
+        let mut affected_stems = HashSet::new();
+        for name in affected_names {
+            let Some(stem) = lower_stem(name) else {
+                continue;
+            };
+            affected_stems.insert(stem.clone());
+            if let Some(stripped) = stem.strip_suffix("_hevc") {
+                if !stripped.is_empty() {
+                    affected_stems.insert(stripped.to_string());
+                }
+            }
+        }
+        if affected_stems.is_empty() {
+            return Ok(0);
+        }
+
+        let mut candidate_names = HashSet::new();
+        for stem in affected_stems {
+            for extension in ["heic", "heif", "hif", "jpg", "jpeg", "mov"] {
+                candidate_names.insert(format!("{}.{}", stem, extension));
+            }
+            candidate_names.insert(format!("{}_hevc.mov", stem));
+        }
+
+        let conn = open_conn()?;
+        {
+            let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+            tx.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS live_photo_candidate_names (
+                    name TEXT PRIMARY KEY
+                );
+                DELETE FROM live_photo_candidate_names;",
+            )
             .map_err(|e| e.to_string())?;
-        Ok(result)
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO live_photo_candidate_names (name) VALUES (?1)",
+                )
+                .map_err(|e| e.to_string())?;
+            for name in candidate_names {
+                stmt.execute(params![name]).map_err(|e| e.to_string())?;
+            }
+            drop(stmt);
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+
+        let folder_path: String = conn
+            .query_row(
+                "SELECT path FROM afolders WHERE id = ?1",
+                params![folder_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let candidates = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT a.id, a.name, a.file_type, a.content_identifier,
+                            a.media_subtype, a.live_photo_video_id
+                     FROM afiles a
+                     JOIN live_photo_candidate_names candidates
+                       ON a.name = candidates.name COLLATE NOCASE
+                     WHERE a.folder_id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(params![folder_id], |row| {
+                    Ok(Candidate {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        file_type: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        content_identifier: row.get(3)?,
+                        media_subtype: row.get(4)?,
+                        live_photo_video_id: row.get(5)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+
+        let mut video_stems = HashSet::<String>::new();
+        for candidate in &candidates {
+            if candidate.file_type == 2 && lower_ext(&candidate.name) == "mov" {
+                for stem in video_match_stems(&candidate.name) {
+                    video_stems.insert(stem);
+                }
+            }
+        }
+
+        let mut image_stems = HashSet::<String>::new();
+        for candidate in &candidates {
+            if is_live_photo_image(candidate) {
+                if let Some(stem) = lower_stem(&candidate.name) {
+                    image_stems.insert(stem);
+                }
+            }
+        }
+
+        let mut candidates = candidates;
+        let mut identifier_updates = Vec::<(i64, String)>::new();
+        for candidate in candidates.iter_mut().filter(|candidate| {
+            candidate.file_type == 2
+                && lower_ext(&candidate.name) == "mov"
+                && video_match_stems(&candidate.name)
+                    .iter()
+                    .any(|stem| image_stems.contains(stem))
+        }) {
+            if candidate.content_identifier.is_none()
+                || (refresh_missing_identifiers && !has_content_identifier(candidate))
+            {
+                let file_path = PathBuf::from(&folder_path).join(&candidate.name);
+                let file_path = file_path.to_string_lossy();
+                let identifier = t_video::get_video_metadata(&file_path)
+                    .ok()
+                    .and_then(|metadata| metadata.content_identifier)
+                    .unwrap_or_default();
+                identifier_updates.push((candidate.id, identifier.clone()));
+                candidate.content_identifier = Some(identifier);
+            }
+        }
+
+        let mut video_identifiers_by_stem = HashMap::<String, HashSet<String>>::new();
+        for video in &candidates {
+            if !is_live_photo_video(video) {
+                continue;
+            }
+            let Some(identifier) = content_identifier_key(video) else {
+                continue;
+            };
+            for stem in video_match_stems(&video.name) {
+                video_identifiers_by_stem
+                    .entry(stem)
+                    .or_default()
+                    .insert(identifier.clone());
+            }
+        }
+
+        for image in candidates
+            .iter_mut()
+            .filter(|candidate| has_filename_video_candidate(candidate, &video_stems))
+        {
+            let Some(stem) = lower_stem(&image.name) else {
+                continue;
+            };
+            let Some(video_identifiers) = video_identifiers_by_stem.get(&stem) else {
+                continue;
+            };
+            if content_identifier_key(image)
+                .is_some_and(|identifier| video_identifiers.contains(&identifier))
+            {
+                continue;
+            }
+
+            let file_path = PathBuf::from(&folder_path).join(&image.name);
+            let file_path = file_path.to_string_lossy();
+            let identifier = crate::t_apple_sidecar::scan_apple_content_identifiers(&file_path)
+                .into_iter()
+                .map(|identifier| identifier.to_ascii_lowercase())
+                .find(|identifier| video_identifiers.contains(identifier))
+                .unwrap_or_default();
+            if image.content_identifier.as_deref() != Some(identifier.as_str()) {
+                identifier_updates.push((image.id, identifier.clone()));
+                image.content_identifier = Some(identifier);
+            }
+        }
+
+        // Build filename candidates first. Content Identifier only confirms a
+        // candidate pair; it must never select a MOV from another filename.
+        let mut videos_by_stem = HashMap::<String, Vec<usize>>::new();
+        for (index, video) in candidates.iter().enumerate() {
+            if is_live_photo_video(video) {
+                for stem in video_match_stems(&video.name) {
+                    videos_by_stem.entry(stem).or_default().push(index);
+                }
+            }
+        }
+
+        // A copied Live Photo keeps its Content Identifier. Consume each MOV
+        // once so copied filename pairs remain independent resources.
+        let mut desired_pairs = HashMap::<i64, i64>::new();
+        let mut used_video_ids = HashSet::<i64>::new();
+        for image in candidates.iter().filter(|candidate| {
+            has_filename_video_candidate(candidate, &video_stems)
+                && has_content_identifier(candidate)
+        }) {
+            let Some(image_stem) = lower_stem(&image.name) else {
+                continue;
+            };
+            let Some(image_identifier) = content_identifier_key(image) else {
+                continue;
+            };
+            let matching_video = videos_by_stem
+                .get(&image_stem)
+                .into_iter()
+                .flatten()
+                .map(|index| &candidates[*index])
+                .filter(|video| {
+                    !used_video_ids.contains(&video.id)
+                        && content_identifier_key(video).as_deref()
+                            == Some(image_identifier.as_str())
+                })
+                .min_by_key(|video| {
+                    (
+                        lower_stem(&video.name).as_deref() != Some(image_stem.as_str()),
+                        video.id,
+                    )
+                });
+            if let Some(video) = matching_video {
+                used_video_ids.insert(video.id);
+                desired_pairs.insert(image.id, video.id);
+            }
+        }
+
+        let changed_candidates = candidates
+            .iter()
+            .filter(|candidate| is_live_photo_image(candidate))
+            .filter_map(|candidate| {
+                let desired_video_id = desired_pairs.get(&candidate.id).copied();
+                let is_current = match desired_video_id {
+                    Some(video_id) => {
+                        candidate.live_photo_video_id == Some(video_id)
+                            && candidate.media_subtype.as_deref() == Some("live_photo")
+                    }
+                    None => {
+                        candidate.live_photo_video_id.is_none()
+                            && candidate.media_subtype.as_deref() != Some("live_photo")
+                    }
+                };
+                (!is_current).then_some((candidate.id, desired_video_id))
+            })
+            .collect::<Vec<_>>();
+
+        if changed_candidates.is_empty() && identifier_updates.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        {
+            let mut update_identifier = tx
+                .prepare_cached("UPDATE afiles SET content_identifier = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for (file_id, identifier) in &identifier_updates {
+                update_identifier
+                    .execute(params![identifier, file_id])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        for (image_id, video_id) in &changed_candidates {
+            match video_id {
+                Some(video_id) => tx
+                    .execute(
+                        "UPDATE afiles
+                         SET media_subtype = 'live_photo', live_photo_video_id = ?1
+                         WHERE id = ?2",
+                        params![video_id, image_id],
+                    )
+                    .map_err(|e| e.to_string())?,
+                None => tx
+                    .execute(
+                        "UPDATE afiles
+                         SET media_subtype = NULL, live_photo_video_id = NULL
+                         WHERE id = ?1",
+                        params![image_id],
+                    )
+                    .map_err(|e| e.to_string())?,
+            };
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(changed_candidates.len())
+    }
+
+    /// Returns whether a folder has a MOV candidate and any existing Live Photo
+    /// associations. This lets a full album scan avoid loading every file in
+    /// ordinary folders solely to decide whether pairing is needed.
+    pub fn live_photo_folder_state(folder_id: i64) -> Result<(bool, bool), String> {
+        let conn = open_conn()?;
+        conn.query_row(
+            "SELECT
+                EXISTS(
+                    SELECT 1 FROM afiles
+                    WHERE folder_id = ?1
+                      AND name LIKE '%.mov' COLLATE NOCASE
+                ),
+                EXISTS(
+                    SELECT 1 FROM afiles
+                    WHERE folder_id = ?1
+                      AND media_subtype = 'live_photo'
+                )",
+            params![folder_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Removes stale image-to-video associations after a companion MOV has
+    /// disappeared from a folder.
+    pub fn clear_live_photo_pairs_in_folder(folder_id: i64) -> Result<usize, String> {
+        let conn = open_conn()?;
+        conn.execute(
+            "UPDATE afiles
+             SET media_subtype = NULL, live_photo_video_id = NULL
+             WHERE folder_id = ?1 AND media_subtype = 'live_photo'",
+            params![folder_id],
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn live_photo_component_files(file_id: i64) -> Result<Vec<Self>, String> {
+        let Some(file) = Self::get_file_info(file_id)? else {
+            return Ok(Vec::new());
+        };
+        let Some(video_id) = file.live_photo_video_id.filter(|id| *id > 0) else {
+            return Ok(Vec::new());
+        };
+        Self::get_files_by_ids(&[video_id])
+    }
+
+    pub fn pair_raw_jpeg_in_folder(folder_id: i64) -> Result<usize, String> {
+        fn stem(name: &str) -> Option<String> { Path::new(name).file_stem()?.to_str().map(|value| value.to_ascii_lowercase()) }
+        fn ext(name: &str) -> String { Path::new(name).extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase() }
+        let files = Self::get_files_by_folder_id(folder_id)?;
+        let mut companions = HashMap::<String, Vec<i64>>::new();
+        let mut raws = HashMap::<String, usize>::new();
+        for file in &files {
+            if matches!(ext(&file.name).as_str(), "jpg" | "jpeg" | "heic" | "heif" | "hif") {
+                if let (Some(id), Some(file_stem)) = (file.id, stem(&file.name)) { companions.entry(file_stem).or_default().push(id); }
+            }
+            if t_common::RAW_IMGS.iter().any(|raw| raw.eq_ignore_ascii_case(&ext(&file.name))) {
+                if let Some(file_stem) = stem(&file.name) {
+                    *raws.entry(file_stem).or_default() += 1;
+                }
+            }
+        }
+        let mut updates = Vec::new();
+        for file in &files {
+            if !t_common::RAW_IMGS.iter().any(|raw| raw.eq_ignore_ascii_case(&ext(&file.name))) { continue; }
+            let (Some(id), Some(file_stem)) = (file.id, stem(&file.name)) else { continue; };
+            let candidates = companions.get(&file_stem).cloned().unwrap_or_default();
+            let desired = (raws.get(&file_stem) == Some(&1) && candidates.len() == 1)
+                .then(|| candidates.first().copied())
+                .flatten();
+            let current = (file.media_subtype.as_deref() == Some("raw_jpeg_pair")).then_some(file.live_photo_video_id).flatten();
+            if desired != current { updates.push((id, desired)); }
+        }
+        if updates.is_empty() { return Ok(0); }
+        let mut conn = open_conn()?; let tx = conn.transaction().map_err(|error| error.to_string())?;
+        for (id, companion) in &updates {
+            if let Some(companion) = companion { tx.execute("UPDATE afiles SET media_subtype = 'raw_jpeg_pair', live_photo_video_id = ?1 WHERE id = ?2", params![companion, id]).map_err(|error| error.to_string())?; }
+            else { tx.execute("UPDATE afiles SET media_subtype = NULL, live_photo_video_id = NULL WHERE id = ?1 AND media_subtype = 'raw_jpeg_pair'", params![id]).map_err(|error| error.to_string())?; }
+        }
+        tx.commit().map_err(|error| error.to_string())?; Ok(updates.len())
+    }
+
+    pub fn clear_raw_jpeg_pairs_in_folder(folder_id: i64) -> Result<usize, String> {
+        open_conn()?.execute(
+            "UPDATE afiles
+             SET media_subtype = NULL, live_photo_video_id = NULL
+             WHERE folder_id = ?1 AND media_subtype = 'raw_jpeg_pair'",
+            params![folder_id],
+        ).map_err(|error| error.to_string())
+    }
+
+    pub fn clear_raw_jpeg_pairs_in_album(album_id: i64) -> Result<usize, String> {
+        open_conn()?.execute(
+            "UPDATE afiles
+             SET media_subtype = NULL, live_photo_video_id = NULL
+             WHERE media_subtype = 'raw_jpeg_pair'
+               AND folder_id IN (SELECT id FROM afolders WHERE album_id = ?1)",
+            params![album_id],
+        ).map_err(|error| error.to_string())
     }
 
     /// delete unseen files in an album (database only)
@@ -1724,13 +3948,34 @@ impl AFile {
     pub fn get_taken_dates(sort: i64) -> Result<Vec<(String, i64)>, String> {
         let conn = open_conn()?;
 
-        let order_clause = if sort == 0 { "ASC" } else { "DESC" };
+        // sort encodes both the date column and direction:
+        //   sort / 2  →  0=taken_date, 1=created_at, 2=modified_at
+        //   sort % 2  →  0=ASC, 1=DESC
+        let sort_type = sort / 2;
+        let order_clause = if sort % 2 == 0 { "ASC" } else { "DESC" };
+
+        let date_col = match sort_type {
+            0 => "a.taken_date",
+            1 => "a.created_at",
+            2 => "a.modified_at",
+            _ => "a.taken_date",
+        };
+
+        let date_expr = format!(
+            "strftime('%Y-%m-%d', {}, 'unixepoch', 'localtime')",
+            date_col
+        );
         let query = format!(
-            "SELECT strftime('%Y-%m-%d', a.taken_date, 'unixepoch', 'localtime') AS taken_date, COUNT(1) 
+            "SELECT {} AS group_date, COUNT(1)
             FROM afiles a
-            WHERE a.taken_date IS NOT NULL AND a.taken_date >= 86400
-            GROUP BY strftime('%Y-%m-%d', a.taken_date, 'unixepoch', 'localtime')
-            ORDER BY taken_date {}",
+            WHERE {} IS NOT NULL AND {} >= 86400 AND {}
+            GROUP BY {}
+            ORDER BY group_date {}",
+            date_expr,
+            date_col,
+            date_col,
+            Self::live_photo_companion_exclusion_condition(),
+            date_expr,
             order_clause
         );
 
@@ -1750,7 +3995,12 @@ impl AFile {
 
     // get total count and size of files
     pub fn get_total_count_and_sum() -> Result<(i64, i64), String> {
-        let sql = Self::build_count_query().to_string();
+        let sql = format!(
+            "{} WHERE {} AND {}",
+            Self::build_count_query(),
+            Self::search_exclusion_condition("b"),
+            Self::live_photo_companion_exclusion_condition()
+        );
         Self::query_count_and_sum(&sql, &[])
     }
 
@@ -1758,12 +4008,15 @@ impl AFile {
     // Returns (joins_clause, where_clause, params)
     fn build_search_query_parts(params: &QueryParams) -> (String, String, Vec<Box<dyn ToSql>>) {
         let mut joins = Vec::new();
-        let mut conditions: Vec<String> = Vec::new();
+        let mut conditions: Vec<String> =
+            vec![Self::live_photo_companion_exclusion_condition().to_string()];
         let mut sql_params: Vec<Box<dyn ToSql>> = Vec::new();
 
         if !params.search_file_name.is_empty() {
-            conditions.push("a.name LIKE ? COLLATE NOCASE".to_string());
-            sql_params.push(Box::new(format!("%{}%", params.search_file_name)));
+            conditions.push("(a.name LIKE ? COLLATE NOCASE OR a.comments LIKE ? COLLATE NOCASE)".to_string());
+            let pattern = format!("%{}%", params.search_file_name);
+            sql_params.push(Box::new(pattern.clone()));
+            sql_params.push(Box::new(pattern));
         }
 
         if let Some(condition) = Self::build_file_type_condition(params.search_file_type) {
@@ -1787,7 +4040,13 @@ impl AFile {
         }
 
         if params.start_date > 0 && params.end_date > 0 {
-            conditions.push("a.taken_date >= ? AND a.taken_date < ?".to_string());
+            let date_col = match params.calendar_sort / 2 {
+                0 => "a.taken_date",
+                1 => "a.created_at",
+                2 => "a.modified_at",
+                _ => "a.taken_date",
+            };
+            conditions.push(format!("{} >= ? AND {} < ?", date_col, date_col));
             sql_params.push(Box::new(params.start_date));
             sql_params.push(Box::new(params.end_date));
         } else if params.start_date == -1 && params.end_date == -1 {
@@ -1826,15 +4085,44 @@ impl AFile {
             }
         }
 
+        if let (Some(min_lat), Some(max_lat), Some(min_lon), Some(max_lon)) = (
+            params.gps_min_lat,
+            params.gps_max_lat,
+            params.gps_min_lon,
+            params.gps_max_lon,
+        ) {
+            conditions.push("a.gps_latitude BETWEEN ? AND ?".to_string());
+            sql_params.push(Box::new(min_lat));
+            sql_params.push(Box::new(max_lat));
+
+            if min_lon <= max_lon {
+                conditions.push("a.gps_longitude BETWEEN ? AND ?".to_string());
+                sql_params.push(Box::new(min_lon));
+                sql_params.push(Box::new(max_lon));
+            } else {
+                // map view crosses the antimeridian (e.g. min=170, max=-170)
+                conditions.push("(a.gps_longitude >= ? OR a.gps_longitude <= ?)".to_string());
+                sql_params.push(Box::new(min_lon));
+                sql_params.push(Box::new(max_lon));
+            }
+        }
+
         if params.is_favorite {
             conditions.push("a.is_favorite = 1".to_string());
         }
 
-        if params.rating == 0 {
+        if params.rating == -2 {
+            conditions.push("a.rating > 0".to_string());
+        } else if params.rating == 0 {
             conditions.push("(a.rating = 0 OR a.rating IS NULL)".to_string());
         } else if params.rating > 0 {
             conditions.push("a.rating = ?".to_string());
             sql_params.push(Box::new(params.rating));
+        }
+
+        if (0..=2).contains(&params.culling_flag) {
+            conditions.push("COALESCE(a.culling_flag, 0) = ?".to_string());
+            sql_params.push(Box::new(params.culling_flag));
         }
 
         if params.tag_id > 0 {
@@ -1848,6 +4136,8 @@ impl AFile {
             conditions.push("f.person_id = ?".to_string());
             sql_params.push(Box::new(params.person_id));
         }
+
+        conditions.push(Self::search_exclusion_condition("b"));
 
         let joins_clause = if !joins.is_empty() {
             format!(" {}", joins.join(" "))
@@ -1871,9 +4161,9 @@ impl AFile {
         let sql = if params.person_id > 0 {
             // Use subquery with GROUP BY to handle potential duplicate rows when joining faces
             format!(
-                "SELECT COUNT(*), SUM(size) FROM (SELECT a.id, a.size FROM afiles a 
-                LEFT JOIN afolders b ON a.folder_id = b.id 
-                LEFT JOIN albums c ON b.album_id = c.id 
+                "SELECT COUNT(*), SUM(size) FROM (SELECT a.id, a.size FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
                 {}{} GROUP BY a.id)",
                 joins, where_clause
             )
@@ -1914,24 +4204,1296 @@ impl AFile {
         Self::query_files(&query, &final_params)
     }
 
-    fn build_order_clause(params: &QueryParams) -> String {
-        let dir = if params.sort_order == 1 {
-            "DESC"
-        } else {
-            "ASC"
+    fn group_key_and_sort_expr(group_by: i64, calendar_sort: i64) -> Option<(String, String)> {
+        let date_col = match calendar_sort / 2 {
+            1 => "a.created_at",
+            2 => "a.modified_at",
+            _ => "a.taken_date",
         };
-        match params.sort_type {
+        match group_by {
+            GROUP_BY_FOLDER_PATH => {
+                Some((
+                    "COALESCE(b.path, 'unknown-folder')".to_string(),
+                    "COALESCE(b.modified_at, b.created_at, 0)".to_string(),
+                ))
+            }
+            GROUP_BY_DATE_DAY => {
+                let day_bucket = format!("strftime('%s', date({date_col}, 'unixepoch', 'localtime'), 'utc')");
+                Some((
+                    format!("CASE WHEN {date_col} IS NULL THEN 'unknown-date' ELSE CAST({day_bucket} AS TEXT) END"),
+                    "0".to_string(),
+                ))
+            }
+            GROUP_BY_DATE_MONTH => {
+                let month_bucket = format!("strftime('%s', date({date_col}, 'unixepoch', 'localtime', 'start of month'), 'utc')");
+                Some((
+                    format!("CASE WHEN {date_col} IS NULL THEN 'unknown-month' ELSE CAST({month_bucket} AS TEXT) END"),
+                    "0".to_string(),
+                ))
+            }
+            GROUP_BY_DATE_YEAR => {
+                let year_bucket = format!("strftime('%s', date({date_col}, 'unixepoch', 'localtime', 'start of year'), 'utc')");
+                Some((
+                    format!("CASE WHEN {date_col} IS NULL THEN 'unknown-year' ELSE CAST({year_bucket} AS TEXT) END"),
+                    "0".to_string(),
+                ))
+            }
+            GROUP_BY_RATING => Some((
+                "CAST(COALESCE(a.rating, 0) AS TEXT)".to_string(),
+                "0".to_string(),
+            )),
+            GROUP_BY_LOCATION => Some((
+                "CASE WHEN COALESCE(a.geo_name, a.geo_admin1, a.geo_cc, '') = '' THEN 'unknown-location' ELSE COALESCE(a.geo_name, a.geo_admin1, a.geo_cc) END".to_string(),
+                "COALESCE(a.geo_cc, '')".to_string(),
+            )),
+            GROUP_BY_CAMERA => Some((
+                "CASE WHEN TRIM(COALESCE(a.e_make, '') || ' ' || COALESCE(a.e_model, '')) = '' THEN 'unknown-camera' ELSE TRIM(COALESCE(a.e_make, '') || ' ' || COALESCE(a.e_model, '')) END".to_string(),
+                "COALESCE(a.e_model, '')".to_string(),
+            )),
+            GROUP_BY_LENS => Some((
+                "CASE WHEN COALESCE(a.e_lens_model, '') = '' THEN 'unknown-lens' ELSE a.e_lens_model END".to_string(),
+                "COALESCE(a.e_lens_model, '')".to_string(),
+            )),
+            GROUP_BY_FILE_TYPE => Some((
+                "CASE a.file_type WHEN 1 THEN 'image' WHEN 3 THEN 'raw' WHEN 2 THEN 'video' ELSE 'other' END".to_string(),
+                "0".to_string(),
+            )),
+            GROUP_BY_CULLING => Some((
+                "CAST(COALESCE(a.culling_flag, 0) AS TEXT)".to_string(),
+                "0".to_string(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn group_order_clause_values(
+        group_by: i64,
+        folder_sort: i64,
+        calendar_sort: i64,
+        category_sort: i64,
+    ) -> String {
+        match group_by {
+            GROUP_BY_DATE_DAY | GROUP_BY_DATE_MONTH | GROUP_BY_DATE_YEAR => {
+                let dir = if calendar_sort % 2 == 1 {
+                    "DESC"
+                } else {
+                    "ASC"
+                };
+                format!(
+                    "CAST(group_id AS INTEGER) {}, label COLLATE NOCASE ASC",
+                    dir
+                )
+            }
+            GROUP_BY_FOLDER_PATH => match folder_sort {
+                1 => "label COLLATE NOCASE DESC".to_string(),
+                2 => "MAX(group_sort) ASC, label COLLATE NOCASE ASC".to_string(),
+                3 => "MAX(group_sort) DESC, label COLLATE NOCASE ASC".to_string(),
+                _ => "label COLLATE NOCASE ASC".to_string(),
+            },
+            GROUP_BY_RATING => "CAST(group_id AS INTEGER) DESC".to_string(),
+            GROUP_BY_FILE_TYPE => "CASE group_id WHEN 'image' THEN 0 WHEN 'raw' THEN 1 WHEN 'video' THEN 2 ELSE 3 END".to_string(),
+            GROUP_BY_CULLING => "CASE group_id WHEN '1' THEN 0 WHEN '2' THEN 1 ELSE 2 END".to_string(),
+            GROUP_BY_LOCATION | GROUP_BY_CAMERA | GROUP_BY_LENS => match category_sort {
+                1 => "CASE WHEN group_id LIKE 'unknown-%' THEN 1 ELSE 0 END, MAX(group_sort) COLLATE NOCASE DESC, label COLLATE NOCASE DESC".to_string(),
+                2 => "CASE WHEN group_id LIKE 'unknown-%' THEN 1 ELSE 0 END, COUNT(*) ASC, label COLLATE NOCASE ASC".to_string(),
+                3 => "CASE WHEN group_id LIKE 'unknown-%' THEN 1 ELSE 0 END, COUNT(*) DESC, label COLLATE NOCASE ASC".to_string(),
+                _ => "CASE WHEN group_id LIKE 'unknown-%' THEN 1 ELSE 0 END, MAX(group_sort) COLLATE NOCASE ASC, label COLLATE NOCASE ASC".to_string(),
+            },
+            _ => "group_id ASC, label COLLATE NOCASE ASC".to_string(),
+        }
+    }
+
+    fn group_order_clause(params: &QueryParams) -> String {
+        Self::group_order_clause_values(
+            params.group_by,
+            params.folder_sort,
+            params.calendar_sort,
+            params.category_sort,
+        )
+    }
+
+    fn smart_group_order_clause(params: &SmartQueryParams) -> String {
+        Self::group_order_clause_values(
+            params.group_by,
+            params.folder_sort,
+            params.calendar_sort,
+            params.category_sort,
+        )
+    }
+
+    fn query_groups(params: &QueryParams) -> Result<Vec<QueryGroup>, String> {
+        let Some((group_id_expr, sort_expr)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let sql = format!(
+            "SELECT group_id, group_id AS label, COUNT(*), COALESCE(SUM(size), 0)
+             FROM (
+                SELECT DISTINCT a.id, a.size, {group_id_expr} AS group_id, {sort_expr} AS group_sort
+                FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                {joins}{where_clause}
+             )
+             GROUP BY group_id
+             ORDER BY {}",
+            Self::group_order_clause(params)
+        );
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| {
+                Ok(QueryGroup {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get(2)?,
+                    size: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut groups = Vec::new();
+        for group in rows {
+            groups.push(group.map_err(|e| e.to_string())?);
+        }
+        Ok(groups)
+    }
+
+    fn get_query_files_in_group(
+        params: &QueryParams,
+        group_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, mut sql_params) = Self::build_search_query_parts(params);
+
+        let mut query = Self::build_base_query();
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+        if where_clause.is_empty() {
+            query.push_str(&format!(" WHERE {} = ?", group_id_expr));
+        } else {
+            query.push_str(&format!(" AND {} = ?", group_id_expr));
+        }
+        sql_params.push(Box::new(group_id.to_string()));
+
+        query.push_str(" GROUP BY a.id");
+        query.push_str(&format!(" ORDER BY {}", Self::build_order_clause(params)));
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+
+    fn build_grouped_query_result<F>(
+        groups: Vec<QueryGroup>,
+        offset: i64,
+        limit: i64,
+        mut get_files_in_group: F,
+    ) -> Result<GroupedQueryResult, String>
+    where
+        F: FnMut(&QueryGroup, i64, i64) -> Result<Vec<Self>, String>,
+    {
+        let total_item_count = groups.iter().map(|group| group.count).sum::<i64>();
+        let total_size = groups.iter().map(|group| group.size).sum::<i64>();
+        let total_row_count = total_item_count + groups.len() as i64;
+        let mut grouped_query_groups = Vec::with_capacity(groups.len());
+        let mut group_row_cursor = 0_i64;
+        for group in &groups {
+            grouped_query_groups.push(GroupedQueryGroup {
+                group_id: group.id.clone(),
+                label: group.label.clone(),
+                count: group.count,
+                size: group.size,
+                row_index: group_row_cursor,
+            });
+            group_row_cursor += group.count + 1;
+        }
+
+        let start = offset.max(0);
+        let end = if limit <= 0 {
+            start
+        } else {
+            (start + limit).min(total_row_count)
+        };
+        let mut rows = Vec::new();
+        let mut row_cursor = 0_i64;
+        let mut file_index_cursor = 0_i64;
+
+        for group in groups {
+            let header_row = row_cursor;
+            let file_rows_start = header_row + 1;
+            let file_rows_end = file_rows_start + group.count;
+
+            if header_row >= start && header_row < end {
+                rows.push(GroupedQueryRow::Group {
+                    row_id: format!("group-row-{}", group.id),
+                    group_id: group.id.clone(),
+                    label: group.label.clone(),
+                    count: group.count,
+                    size: group.size,
+                });
+            }
+
+            let file_overlap_start = start.max(file_rows_start);
+            let file_overlap_end = end.min(file_rows_end);
+            if file_overlap_start < file_overlap_end {
+                let group_file_offset = file_overlap_start - file_rows_start;
+                let group_file_limit = file_overlap_end - file_overlap_start;
+                let files = get_files_in_group(&group, group_file_offset, group_file_limit)?;
+                for (index, file) in files.into_iter().enumerate() {
+                    let file_index = file_index_cursor + group_file_offset + index as i64;
+                    let file_id = file.id.unwrap_or(file_index);
+                    rows.push(GroupedQueryRow::Item {
+                        row_id: format!("item-row-{}", file_id),
+                        group_id: group.id.clone(),
+                        file_index,
+                        file,
+                    });
+                }
+            }
+
+            row_cursor = file_rows_end;
+            file_index_cursor += group.count;
+            if row_cursor >= end {
+                break;
+            }
+        }
+
+        Ok(GroupedQueryResult {
+            rows,
+            groups: grouped_query_groups,
+            total_item_count,
+            total_row_count,
+            total_size,
+        })
+    }
+
+    pub fn get_grouped_query_rows(
+        params: &QueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<GroupedQueryResult, String> {
+        let groups = Self::query_groups(params)?;
+        Self::build_grouped_query_result(
+            groups,
+            offset,
+            limit,
+            |group, group_file_offset, group_file_limit| {
+                Self::get_query_files_in_group(
+                    params,
+                    &group.id,
+                    group_file_offset,
+                    group_file_limit,
+                )
+            },
+        )
+    }
+
+    pub fn get_group_file_ids(params: &QueryParams, group_id: &str) -> Result<Vec<i64>, String> {
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, mut sql_params) = Self::build_search_query_parts(params);
+        let mut query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             {joins}{where_clause}"
+        );
+        if where_clause.is_empty() {
+            query.push_str(&format!(" WHERE {} = ?", group_id_expr));
+        } else {
+            query.push_str(&format!(" AND {} = ?", group_id_expr));
+        }
+        sql_params.push(Box::new(group_id.to_string()));
+        query.push_str(" GROUP BY a.id");
+        query.push_str(&format!(" ORDER BY {}", Self::build_order_clause(params)));
+
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    pub fn get_query_file_ids(params: &QueryParams) -> Result<Vec<i64>, String> {
+        let (joins, where_clause, sql_params) = Self::build_search_query_parts(params);
+        let mut query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             {joins}{where_clause}"
+        );
+        if params.person_id > 0 {
+            query.push_str(" GROUP BY a.id");
+        }
+        query.push_str(&format!(" ORDER BY {}", Self::build_order_clause(params)));
+
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    fn build_order_clause_values(sort_type: i64, sort_order: i64) -> String {
+        let dir = if sort_order == 1 { "DESC" } else { "ASC" };
+        match sort_type {
             0 => format!("a.taken_date {}, a.id {}", dir, dir),
             1 => format!("a.created_at {}, a.id {}", dir, dir),
             2 => format!("a.modified_at {}, a.id {}", dir, dir),
             3 => format!("a.name_pinyin {}, a.id {}", dir, dir),
             4 => format!("a.size {}, a.id {}", dir, dir),
             5 => format!("a.width {}, a.height {}, a.id {}", dir, dir, dir),
-            6 => format!("a.rating {}, a.id {}", dir, dir),
-            7 => "RANDOM()".to_string(),
-            8 => "a.id ASC".to_string(), // internal: stable append order during scanning
+            6 => format!("a.duration {}, a.id {}", dir, dir),
+            9 => "a.id ASC".to_string(), // internal: stable append order during scanning
             _ => format!("a.taken_date {}, a.id {}", dir, dir),
         }
+    }
+
+    fn build_order_clause(params: &QueryParams) -> String {
+        Self::build_order_clause_values(params.sort_type, params.sort_order)
+    }
+
+    fn smart_rule_string(value: &JsonValue) -> Option<String> {
+        value
+            .as_str()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    fn smart_rule_i64(value: &JsonValue) -> Option<i64> {
+        if let Some(value) = value.as_i64() {
+            return Some(value);
+        }
+        value.as_str().and_then(|v| v.trim().parse::<i64>().ok())
+    }
+
+    fn smart_rule_bool(value: &JsonValue) -> Option<bool> {
+        if let Some(value) = value.as_bool() {
+            return Some(value);
+        }
+        match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn smart_rule_array(value: &JsonValue) -> Vec<JsonValue> {
+        value
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![value.clone()])
+    }
+
+    fn smart_rule_string_array(value: &JsonValue) -> Vec<String> {
+        Self::smart_rule_array(value)
+            .iter()
+            .filter_map(Self::smart_rule_string)
+            .collect()
+    }
+
+    fn build_smart_extension_condition(
+        value: &JsonValue,
+        sql_params: &mut Vec<Box<dyn ToSql>>,
+    ) -> Result<String, String> {
+        let values = Self::smart_rule_string_array(value);
+        if values.is_empty() {
+            return Err("Extension value required".to_string());
+        }
+        let mut parts = Vec::new();
+        for ext in values {
+            let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+            if ext.is_empty() {
+                continue;
+            }
+            parts.push("LOWER(a.name) LIKE ?".to_string());
+            sql_params.push(Box::new(format!("%.{}", ext)));
+        }
+        if parts.is_empty() {
+            return Err("Extension value required".to_string());
+        }
+        Ok(format!("({})", parts.join(" OR ")))
+    }
+
+    fn build_smart_name_condition(
+        operator: &str,
+        value: &JsonValue,
+        sql_params: &mut Vec<Box<dyn ToSql>>,
+    ) -> Result<String, String> {
+        let name =
+            Self::smart_rule_string(value).ok_or_else(|| "Name value required".to_string())?;
+        match operator {
+            "contains" | "has" => {
+                sql_params.push(Box::new(format!("%{}%", name)));
+                Ok("a.name LIKE ? COLLATE NOCASE".to_string())
+            }
+            "not_contains" | "not_has" => {
+                sql_params.push(Box::new(format!("%{}%", name)));
+                Ok("a.name NOT LIKE ? COLLATE NOCASE".to_string())
+            }
+            _ => Err(format!("Unsupported name operator: {}", operator)),
+        }
+    }
+
+    fn smart_rule_date_column(field: &str) -> Result<&'static str, String> {
+        match field {
+            "date_taken" => Ok("a.taken_date"),
+            "date_created" => Ok("a.created_at"),
+            "date_modified" => Ok("a.modified_at"),
+            _ => Err(format!("Unsupported date field: {}", field)),
+        }
+    }
+
+    fn smart_rule_date_value(value: &JsonValue, key: &str) -> Option<i64> {
+        value.get(key).and_then(Self::smart_rule_i64)
+    }
+
+    fn smart_rule_relative_date_cutoff(value: &JsonValue) -> Result<i64, String> {
+        let amount = value
+            .get("amount")
+            .and_then(Self::smart_rule_i64)
+            .filter(|v| *v > 0)
+            .ok_or_else(|| "Relative date amount required".to_string())?;
+        let unit = value
+            .get("unit")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("day");
+        let days = match unit {
+            "day" | "days" => amount,
+            "month" | "months" => amount * 30,
+            "year" | "years" => amount * 365,
+            _ => return Err(format!("Unsupported relative date unit: {}", unit)),
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs() as i64;
+        Ok(now - days * 86_400)
+    }
+
+    fn smart_rule_date_period_range(value: &JsonValue) -> Result<(i64, i64), String> {
+        let period = value
+            .as_str()
+            .ok_or_else(|| "Date period value required".to_string())?;
+        let today = chrono::Local::now().date_naive();
+        let start_date = match period {
+            "this_week" => {
+                today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64)
+            }
+            "this_month" => chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
+                .ok_or_else(|| "Invalid month date".to_string())?,
+            "this_year" => chrono::NaiveDate::from_ymd_opt(today.year(), 1, 1)
+                .ok_or_else(|| "Invalid year date".to_string())?,
+            _ => return Err(format!("Unsupported date period: {}", period)),
+        };
+        let end_date = today + chrono::Duration::days(1);
+        let start = chrono::Local
+            .from_local_datetime(
+                &start_date
+                    .and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| "Invalid date period start".to_string())?,
+            )
+            .earliest()
+            .ok_or_else(|| "Invalid local date period start".to_string())?
+            .timestamp();
+        let end = chrono::Local
+            .from_local_datetime(
+                &end_date
+                    .and_hms_opt(0, 0, 0)
+                    .ok_or_else(|| "Invalid date period end".to_string())?,
+            )
+            .earliest()
+            .ok_or_else(|| "Invalid local date period end".to_string())?
+            .timestamp();
+        Ok((start, end))
+    }
+
+    fn build_smart_orientation_condition(value: &JsonValue) -> Result<String, String> {
+        let orientation = Self::smart_rule_string(value)
+            .ok_or_else(|| "Orientation value required".to_string())?;
+        match orientation.as_str() {
+            "landscape" => Ok("(a.width > a.height)".to_string()),
+            "portrait" => Ok("(a.height > a.width)".to_string()),
+            "square" => Ok("(a.width = a.height)".to_string()),
+            _ => Err(format!("Unsupported orientation value: {}", orientation)),
+        }
+    }
+
+    fn push_numeric_rule(
+        conditions: &mut Vec<String>,
+        sql_params: &mut Vec<Box<dyn ToSql>>,
+        column: &str,
+        operator: &str,
+        value: &JsonValue,
+    ) -> Result<(), String> {
+        match operator {
+            "eq" | "is" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} = ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "neq" | "is_not" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} != ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "gt" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} > ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "gte" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} >= ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "lt" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} < ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "lte" => {
+                let Some(v) = Self::smart_rule_i64(value) else {
+                    return Err("Numeric value required".to_string());
+                };
+                conditions.push(format!("{} <= ?", column));
+                sql_params.push(Box::new(v));
+            }
+            "between" => {
+                let start = value
+                    .get("min")
+                    .or_else(|| value.get("start"))
+                    .and_then(Self::smart_rule_i64)
+                    .ok_or_else(|| "Range start value required".to_string())?;
+                let end = value
+                    .get("max")
+                    .or_else(|| value.get("end"))
+                    .and_then(Self::smart_rule_i64)
+                    .ok_or_else(|| "Range end value required".to_string())?;
+                conditions.push(format!("{} BETWEEN ? AND ?", column));
+                sql_params.push(Box::new(start));
+                sql_params.push(Box::new(end));
+            }
+            "empty" => conditions.push(format!("({} IS NULL OR {} = 0)", column, column)),
+            "not_empty" => conditions.push(format!("({} IS NOT NULL AND {} > 0)", column, column)),
+            _ => return Err(format!("Unsupported numeric operator: {}", operator)),
+        }
+        Ok(())
+    }
+
+    fn build_smart_rule_condition(
+        rule: &SmartRule,
+        _joins: &mut Vec<String>,
+        _needs_group: &mut bool,
+        sql_params: &mut Vec<Box<dyn ToSql>>,
+    ) -> Result<String, String> {
+        let field = rule.field.as_str();
+        let operator = rule.operator.as_str();
+        let value = &rule.value;
+
+        match field {
+            "name" => Self::build_smart_name_condition(operator, value, sql_params),
+            "file_type" => {
+                let mask = Self::smart_rule_i64(value)
+                    .ok_or_else(|| "File type value required".to_string())?;
+                let condition =
+                    Self::build_file_type_condition(mask).unwrap_or_else(|| "1 = 1".to_string());
+                Ok(if matches!(operator, "is_not" | "neq" | "not_in") {
+                    format!("NOT {}", condition)
+                } else {
+                    condition
+                })
+            }
+            "media_subtype" => {
+                let subtype = Self::smart_rule_string(value)
+                    .ok_or_else(|| "Media subtype value required".to_string())?;
+                if !matches!(subtype.as_str(), "live_photo" | "raw_jpeg_pair") {
+                    return Err(format!("Unsupported media subtype: {}", subtype));
+                }
+                if matches!(operator, "is_not" | "neq" | "not_in") {
+                    Ok(format!(
+                        "(a.media_subtype IS NULL OR a.media_subtype != '{}' OR a.live_photo_video_id IS NULL)",
+                        subtype
+                    ))
+                } else if matches!(operator, "is" | "eq" | "in") {
+                    Ok(format!(
+                        "(a.media_subtype = '{}' AND a.live_photo_video_id IS NOT NULL)",
+                        subtype
+                    ))
+                } else {
+                    Err(format!("Unsupported media subtype operator: {}", operator))
+                }
+            }
+            "extension" => {
+                let condition = Self::build_smart_extension_condition(value, sql_params)?;
+                Ok(if matches!(operator, "is_not" | "not_in" | "neq") {
+                    format!("NOT {}", condition)
+                } else {
+                    condition
+                })
+            }
+            "favorite" => {
+                let desired = Self::smart_rule_bool(value).unwrap_or(true);
+                let is_positive = matches!(operator, "is" | "eq");
+                let value = if is_positive { desired } else { !desired };
+                Ok(if value {
+                    "a.is_favorite = 1".to_string()
+                } else {
+                    "(a.is_favorite = 0 OR a.is_favorite IS NULL)".to_string()
+                })
+            }
+            "rating" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(&mut conditions, sql_params, "a.rating", operator, value)?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "culling" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(
+                    &mut conditions,
+                    sql_params,
+                    "COALESCE(a.culling_flag, 0)",
+                    operator,
+                    value,
+                )?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "date_taken" | "date_created" | "date_modified" => {
+                let date_col = Self::smart_rule_date_column(field)?;
+                match operator {
+                    "is" | "eq" => {
+                        let (start, end) = Self::smart_rule_date_period_range(value)?;
+                        sql_params.push(Box::new(start));
+                        sql_params.push(Box::new(end));
+                        Ok(format!("{} >= ? AND {} < ?", date_col, date_col))
+                    }
+                    "before" | "lt" => {
+                        let v = Self::smart_rule_date_value(value, "value")
+                            .ok_or_else(|| "Date value required".to_string())?;
+                        sql_params.push(Box::new(v));
+                        Ok(format!("{} < ?", date_col))
+                    }
+                    "after" | "gt" => {
+                        let v = Self::smart_rule_date_value(value, "value")
+                            .ok_or_else(|| "Date value required".to_string())?;
+                        sql_params.push(Box::new(v));
+                        Ok(format!("{} > ?", date_col))
+                    }
+                    "between" => {
+                        let start = Self::smart_rule_date_value(value, "start")
+                            .ok_or_else(|| "Date start value required".to_string())?;
+                        let end = Self::smart_rule_date_value(value, "end")
+                            .ok_or_else(|| "Date end value required".to_string())?;
+                        sql_params.push(Box::new(start));
+                        sql_params.push(Box::new(end));
+                        Ok(format!("{} >= ? AND {} < ?", date_col, date_col))
+                    }
+                    "in_last" => {
+                        let cutoff = Self::smart_rule_relative_date_cutoff(value)?;
+                        sql_params.push(Box::new(cutoff));
+                        Ok(format!("{} >= ?", date_col))
+                    }
+                    "older_than" => {
+                        let cutoff = Self::smart_rule_relative_date_cutoff(value)?;
+                        sql_params.push(Box::new(cutoff));
+                        Ok(format!("{} < ?", date_col))
+                    }
+                    _ => Err(format!("Unsupported date operator: {}", operator)),
+                }
+            }
+            "size" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(&mut conditions, sql_params, "a.size", operator, value)?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "width" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(&mut conditions, sql_params, "a.width", operator, value)?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "height" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(&mut conditions, sql_params, "a.height", operator, value)?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "duration" => {
+                let mut conditions = Vec::new();
+                Self::push_numeric_rule(
+                    &mut conditions,
+                    sql_params,
+                    "a.duration",
+                    operator,
+                    value,
+                )?;
+                Ok(conditions.pop().unwrap_or_else(|| "1 = 1".to_string()))
+            }
+            "has_gps" => {
+                let desired = Self::smart_rule_bool(value).unwrap_or(true);
+                let is_positive = matches!(operator, "is" | "eq");
+                let value = if is_positive { desired } else { !desired };
+                Ok(if value {
+                    "(a.gps_latitude IS NOT NULL AND a.gps_longitude IS NOT NULL)".to_string()
+                } else {
+                    "(a.gps_latitude IS NULL OR a.gps_longitude IS NULL)".to_string()
+                })
+            }
+            "orientation" => {
+                if operator != "is" && operator != "eq" {
+                    return Err(format!("Unsupported orientation operator: {}", operator));
+                }
+                Self::build_smart_orientation_condition(value)
+            }
+            "tag" => {
+                if operator == "empty" {
+                    return Ok(
+                        "NOT EXISTS (SELECT 1 FROM afile_tags at2 WHERE at2.file_id = a.id)"
+                            .to_string(),
+                    );
+                }
+                if operator == "not_empty" {
+                    return Ok(
+                        "EXISTS (SELECT 1 FROM afile_tags at2 WHERE at2.file_id = a.id)"
+                            .to_string(),
+                    );
+                }
+                let id =
+                    Self::smart_rule_i64(value).ok_or_else(|| "Tag id required".to_string())?;
+                if matches!(operator, "has" | "is" | "eq") {
+                    sql_params.push(Box::new(id));
+                    Ok("EXISTS (SELECT 1 FROM afile_tags at2 WHERE at2.file_id = a.id AND at2.tag_id = ?)".to_string())
+                } else if matches!(operator, "not_has" | "is_not" | "neq") {
+                    sql_params.push(Box::new(id));
+                    Ok("NOT EXISTS (SELECT 1 FROM afile_tags at2 WHERE at2.file_id = a.id AND at2.tag_id = ?)".to_string())
+                } else {
+                    Err(format!("Unsupported tag operator: {}", operator))
+                }
+            }
+            "person" => {
+                if operator == "empty" {
+                    return Ok("NOT EXISTS (SELECT 1 FROM faces f2 WHERE f2.file_id = a.id AND f2.person_id IS NOT NULL)".to_string());
+                }
+                if operator == "not_empty" {
+                    return Ok("EXISTS (SELECT 1 FROM faces f2 WHERE f2.file_id = a.id AND f2.person_id IS NOT NULL)".to_string());
+                }
+                let id =
+                    Self::smart_rule_i64(value).ok_or_else(|| "Person id required".to_string())?;
+                if matches!(operator, "has" | "is" | "eq") {
+                    sql_params.push(Box::new(id));
+                    Ok("EXISTS (SELECT 1 FROM faces f2 WHERE f2.file_id = a.id AND f2.person_id = ?)".to_string())
+                } else if matches!(operator, "not_has" | "is_not" | "neq") {
+                    sql_params.push(Box::new(id));
+                    Ok("NOT EXISTS (SELECT 1 FROM faces f2 WHERE f2.file_id = a.id AND f2.person_id = ?)".to_string())
+                } else {
+                    Err(format!("Unsupported person operator: {}", operator))
+                }
+            }
+            "album" => {
+                let id = Self::smart_rule_i64(value)
+                    .ok_or_else(|| "Album id required".to_string())?;
+                sql_params.push(Box::new(id));
+                if matches!(operator, "is" | "eq") {
+                    Ok("b.album_id = ?".to_string())
+                } else if matches!(operator, "is_not" | "neq") {
+                    Ok("b.album_id != ?".to_string())
+                } else {
+                    Err(format!("Unsupported album operator: {}", operator))
+                }
+            }
+            "collection" => {
+                let id = Self::smart_rule_i64(value)
+                    .ok_or_else(|| "Collection id required".to_string())?;
+                sql_params.push(Box::new(id));
+                let condition = "EXISTS (SELECT 1 FROM acollections_files cf WHERE cf.file_id = a.id AND cf.collection_id = ?)";
+                if matches!(operator, "is" | "eq") {
+                    Ok(condition.to_string())
+                } else if matches!(operator, "is_not" | "neq") {
+                    Ok(format!("NOT ({})", condition))
+                } else {
+                    Err(format!("Unsupported collection operator: {}", operator))
+                }
+            }
+            "camera" | "lens" | "location" => {
+                let id = Self::smart_rule_string(value)
+                    .ok_or_else(|| format!("{} id required", field))?;
+                let parts: Vec<&str> = id.split("||").collect();
+                let mut conditions = Vec::new();
+                match field {
+                    "camera" => {
+                        if let Some(make) = parts.get(0).filter(|v| !v.is_empty()) {
+                            conditions.push("UPPER(a.e_make) = UPPER(?)".to_string());
+                            sql_params.push(Box::new((*make).to_string()));
+                        }
+                        if let Some(model) = parts.get(1).filter(|v| !v.is_empty()) {
+                            conditions.push("a.e_model = ?".to_string());
+                            sql_params.push(Box::new((*model).to_string()));
+                        }
+                    }
+                    "lens" => {
+                        if let Some(make) = parts.get(0).filter(|v| !v.is_empty()) {
+                            conditions.push("UPPER(a.e_lens_make) = UPPER(?)".to_string());
+                            sql_params.push(Box::new((*make).to_string()));
+                        }
+                        if let Some(model) = parts.get(1).filter(|v| !v.is_empty()) {
+                            conditions.push("a.e_lens_model = ?".to_string());
+                            sql_params.push(Box::new((*model).to_string()));
+                        }
+                    }
+                    "location" => {
+                        if let Some(cc) = parts.get(0).filter(|v| !v.is_empty()) {
+                            conditions.push("a.geo_cc = ?".to_string());
+                            sql_params.push(Box::new((*cc).to_string()));
+                        }
+                        if let Some(admin1) = parts.get(1).filter(|v| !v.is_empty()) {
+                            conditions.push("a.geo_admin1 = ?".to_string());
+                            sql_params.push(Box::new((*admin1).to_string()));
+                        }
+                        if let Some(name) = parts.get(2).filter(|v| !v.is_empty()) {
+                            conditions.push("a.geo_name = ?".to_string());
+                            sql_params.push(Box::new((*name).to_string()));
+                        }
+                    }
+                    _ => {}
+                }
+                if conditions.is_empty() {
+                    return Err(format!("{} id required", field));
+                }
+                let condition = format!("({})", conditions.join(" AND "));
+                Ok(if matches!(operator, "not_has" | "is_not" | "neq") {
+                    format!("NOT {}", condition)
+                } else {
+                    condition
+                })
+            }
+            _ => Err(format!("Unsupported smart rule field: {}", field)),
+        }
+    }
+
+    fn build_smart_query_parts(
+        params: &SmartQueryParams,
+    ) -> Result<(String, String, Vec<Box<dyn ToSql>>, bool), String> {
+        if params.rules.is_empty() {
+            return Err("Smart query requires at least one rule".to_string());
+        }
+
+        let mut joins = Vec::new();
+        let mut conditions = Vec::new();
+        let mut sql_params: Vec<Box<dyn ToSql>> = Vec::new();
+        let mut needs_group = false;
+
+        for rule in &params.rules {
+            conditions.push(Self::build_smart_rule_condition(
+                rule,
+                &mut joins,
+                &mut needs_group,
+                &mut sql_params,
+            )?);
+        }
+
+        conditions.push(Self::search_exclusion_condition("b"));
+        conditions.push(Self::live_photo_companion_exclusion_condition().to_string());
+
+        let joiner = if params.r#match == "any" {
+            " OR "
+        } else {
+            " AND "
+        };
+        let rule_count = params.rules.len();
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else if rule_count > 0 {
+            let (rule_conditions, trailing_conditions) = conditions.split_at(rule_count);
+            let mut grouped = vec![format!("({})", rule_conditions.join(joiner))];
+            grouped.extend(trailing_conditions.iter().cloned());
+            format!(" WHERE {}", grouped.join(" AND "))
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let joins_clause = if joins.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", joins.join(" "))
+        };
+
+        Ok((joins_clause, where_clause, sql_params, needs_group))
+    }
+
+    pub fn get_smart_query_count_and_sum(params: &SmartQueryParams) -> Result<(i64, i64), String> {
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let sql = if needs_group {
+            format!(
+                "SELECT COUNT(*), SUM(size) FROM (SELECT a.id, a.size FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                {}{} GROUP BY a.id)",
+                joins, where_clause
+            )
+        } else {
+            format!("{}{}{}", Self::build_count_query(), joins, where_clause)
+        };
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        Self::query_count_and_sum(&sql, &final_params)
+    }
+
+    pub fn get_smart_query_files(
+        params: &SmartQueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let mut query = Self::build_base_query();
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+        if needs_group {
+            query.push_str(" GROUP BY a.id");
+        }
+        query.push_str(&format!(
+            " ORDER BY {}",
+            Self::build_order_clause_values(params.sort_type, params.sort_order)
+        ));
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+
+    fn query_smart_groups(params: &SmartQueryParams) -> Result<Vec<QueryGroup>, String> {
+        let Some((group_id_expr, sort_expr)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, sql_params, _needs_group) =
+            Self::build_smart_query_parts(params)?;
+        let sql = format!(
+            "SELECT group_id, group_id AS label, COUNT(*), COALESCE(SUM(size), 0)
+             FROM (
+                SELECT DISTINCT a.id, a.size, {group_id_expr} AS group_id, {sort_expr} AS group_sort
+                FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                {joins}{where_clause}
+             )
+             GROUP BY group_id
+             ORDER BY {}",
+            Self::smart_group_order_clause(params)
+        );
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| {
+                Ok(QueryGroup {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get(2)?,
+                    size: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut groups = Vec::new();
+        for group in rows {
+            groups.push(group.map_err(|e| e.to_string())?);
+        }
+        Ok(groups)
+    }
+
+    fn get_smart_query_files_in_group(
+        params: &SmartQueryParams,
+        group_id: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<Self>, String> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, mut sql_params, _needs_group) =
+            Self::build_smart_query_parts(params)?;
+
+        let mut query = Self::build_base_query();
+        query.push_str(&joins);
+        query.push_str(&where_clause);
+        if where_clause.is_empty() {
+            query.push_str(&format!(" WHERE {} = ?", group_id_expr));
+        } else {
+            query.push_str(&format!(" AND {} = ?", group_id_expr));
+        }
+        sql_params.push(Box::new(group_id.to_string()));
+
+        query.push_str(" GROUP BY a.id");
+        query.push_str(&format!(
+            " ORDER BY {}",
+            Self::build_order_clause_values(params.sort_type, params.sort_order)
+        ));
+        query.push_str(" LIMIT ? OFFSET ?");
+
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&limit);
+        final_params.push(&offset);
+        Self::query_files(&query, &final_params)
+    }
+
+    pub fn get_smart_grouped_query_rows(
+        params: &SmartQueryParams,
+        offset: i64,
+        limit: i64,
+    ) -> Result<GroupedQueryResult, String> {
+        let groups = Self::query_smart_groups(params)?;
+        Self::build_grouped_query_result(
+            groups,
+            offset,
+            limit,
+            |group, group_file_offset, group_file_limit| {
+                Self::get_smart_query_files_in_group(
+                    params,
+                    &group.id,
+                    group_file_offset,
+                    group_file_limit,
+                )
+            },
+        )
+    }
+
+    pub fn get_smart_group_file_ids(
+        params: &SmartQueryParams,
+        group_id: &str,
+    ) -> Result<Vec<i64>, String> {
+        let Some((group_id_expr, _)) =
+            Self::group_key_and_sort_expr(params.group_by, params.calendar_sort)
+        else {
+            return Ok(Vec::new());
+        };
+        let (joins, where_clause, mut sql_params, _needs_group) =
+            Self::build_smart_query_parts(params)?;
+        let mut query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             {joins}{where_clause}"
+        );
+        if where_clause.is_empty() {
+            query.push_str(&format!(" WHERE {} = ?", group_id_expr));
+        } else {
+            query.push_str(&format!(" AND {} = ?", group_id_expr));
+        }
+        sql_params.push(Box::new(group_id.to_string()));
+        query.push_str(" GROUP BY a.id");
+        query.push_str(&format!(
+            " ORDER BY {}",
+            Self::build_order_clause_values(params.sort_type, params.sort_order)
+        ));
+
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    pub fn get_smart_query_file_ids(params: &SmartQueryParams) -> Result<Vec<i64>, String> {
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let mut query = format!(
+            "SELECT a.id
+             FROM afiles a
+             LEFT JOIN afolders b ON a.folder_id = b.id
+             LEFT JOIN albums c ON b.album_id = c.id
+             {joins}{where_clause}"
+        );
+        if needs_group {
+            query.push_str(" GROUP BY a.id");
+        }
+        query.push_str(&format!(
+            " ORDER BY {}",
+            Self::build_order_clause_values(params.sort_type, params.sort_order)
+        ));
+
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(&final_params[..], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+
+        let mut ids = Vec::new();
+        for id in rows {
+            ids.push(id.map_err(|e| e.to_string())?);
+        }
+        Ok(ids)
+    }
+
+    pub fn get_smart_query_file_position(
+        params: &SmartQueryParams,
+        file_id: i64,
+    ) -> Result<Option<i64>, String> {
+        if file_id <= 0 {
+            return Ok(None);
+        }
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let query = format!(
+            "WITH ranked_files AS (
+                SELECT
+                    a.id,
+                    ROW_NUMBER() OVER (ORDER BY {}) - 1 AS position
+                FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                LEFT JOIN albums c ON b.album_id = c.id
+                {}
+                {}
+                {}
+            )
+            SELECT position FROM ranked_files WHERE id = ?",
+            Self::build_order_clause_values(params.sort_type, params.sort_order),
+            joins,
+            where_clause,
+            if needs_group { " GROUP BY a.id" } else { "" }
+        );
+
+        let conn = open_conn()?;
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let mut final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        final_params.push(&file_id);
+
+        stmt.query_row(final_params.as_slice(), |row| row.get(0))
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn get_smart_query_time_line(params: &SmartQueryParams) -> Result<Vec<ATimeLine>, String> {
+        if params.sort_type > 2 {
+            return Ok(Vec::new());
+        }
+
+        let (joins, where_clause, sql_params, needs_group) = Self::build_smart_query_parts(params)?;
+        let (date_field, year_extract, month_extract, date_extract) = match params.sort_type {
+            0 => (
+                "a.taken_date",
+                "CAST(strftime('%Y', a.taken_date, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%m', a.taken_date, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%d', a.taken_date, 'unixepoch', 'localtime') AS INTEGER)",
+            ),
+            1 => (
+                "a.created_at",
+                "CAST(strftime('%Y', a.created_at, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%m', a.created_at, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%d', a.created_at, 'unixepoch', 'localtime') AS INTEGER)",
+            ),
+            2 => (
+                "a.modified_at",
+                "CAST(strftime('%Y', a.modified_at, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%m', a.modified_at, 'unixepoch', 'localtime') AS INTEGER)",
+                "CAST(strftime('%d', a.modified_at, 'unixepoch', 'localtime') AS INTEGER)",
+            ),
+            _ => unreachable!(),
+        };
+        let order_clause = if params.sort_order == 0 {
+            "ASC"
+        } else {
+            "DESC"
+        };
+        let query = format!(
+            "WITH ranked_files AS (
+                SELECT
+                    ROW_NUMBER() OVER (ORDER BY {} {}) - 1 AS position,
+                    {} AS year,
+                    {} AS month,
+                    {} AS date
+                FROM afiles a
+                LEFT JOIN afolders b ON a.folder_id = b.id
+                {}
+                {}
+                {}
+            )
+            SELECT year, month, date, MIN(position) as position
+            FROM ranked_files
+            WHERE year IS NOT NULL
+            GROUP BY year, month, date
+            ORDER BY position ASC",
+            date_field,
+            order_clause,
+            year_extract,
+            month_extract,
+            date_extract,
+            joins,
+            where_clause,
+            if needs_group { " GROUP BY a.id" } else { "" }
+        );
+
+        let conn = open_conn()?;
+        let final_params: Vec<&dyn ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let timelines = stmt
+            .query_map(final_params.as_slice(), |row| {
+                Ok(ATimeLine {
+                    year: row.get(0)?,
+                    month: row.get(1)?,
+                    date: row.get(2)?,
+                    position: row.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(timelines)
     }
 
     pub fn get_query_file_position(
@@ -2232,10 +5794,19 @@ impl AFile {
         // 2. Perform Vector Search
         let conn = open_conn()?;
 
-        let query = "SELECT a.id, a.embeds 
+        let mut query = "SELECT a.id, a.embeds
             FROM afiles a
+            LEFT JOIN afolders b ON a.folder_id = b.id
             WHERE a.embeds IS NOT NULL"
             .to_string();
+
+        query.push_str(" AND ");
+        query.push_str(&Self::search_exclusion_condition("b"));
+
+        if let Some(ft_condition) = Self::build_file_type_condition(params.file_type) {
+            query.push_str(" AND ");
+            query.push_str(&ft_condition);
+        }
 
         let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
 
@@ -2255,18 +5826,16 @@ impl AFile {
         } else {
             params.threshold
         };
+        let query_norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
 
         // Calculate similarity
         for row in rows {
             let (id, embeds_blob) = row.map_err(|e| e.to_string())?;
-
-            // Convert blob back to Vec<f32>
-            let file_embedding: Vec<f32> = embeds_blob
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-
-            let score = Self::cosine_similarity(&embedding, &file_embedding);
+            let score = Self::cosine_similarity_blob(&embedding, query_norm, &embeds_blob);
 
             if score > threshold {
                 scores.push((id, score));
@@ -2289,28 +5858,43 @@ impl AFile {
             &scores[..]
         };
 
-        // Fetch full file info
-        let mut results = Vec::new();
-        for (id, _) in final_scores {
-            if let Ok(Some(file)) = Self::get_file_info(*id) {
-                results.push(file);
-            }
-        }
+        // Fetch full file info in batches, then restore similarity order.
+        let result_ids = final_scores.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        let files = Self::get_files_by_ids(&result_ids)?;
+        let mut files_by_id = files
+            .into_iter()
+            .filter_map(|file| file.id.map(|id| (id, file)))
+            .collect::<HashMap<_, _>>();
+        let results = result_ids
+            .into_iter()
+            .filter_map(|id| files_by_id.remove(&id))
+            .collect::<Vec<_>>();
 
         println!("Returning {} files", results.len());
 
         Ok(results)
     }
 
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        let dot_product: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    fn cosine_similarity_blob(query: &[f32], query_norm: f32, blob: &[u8]) -> f32 {
+        if query_norm == 0.0 {
+            return 0.0;
+        }
 
-        if norm_a == 0.0 || norm_b == 0.0 {
+        let mut dot_product = 0.0_f32;
+        let mut file_norm_squared = 0.0_f32;
+        for (index, chunk) in blob.chunks_exact(4).enumerate() {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            if let Some(query_value) = query.get(index) {
+                dot_product += query_value * value;
+            }
+            file_norm_squared += value * value;
+        }
+
+        let file_norm = file_norm_squared.sqrt();
+        if file_norm == 0.0 {
             0.0
         } else {
-            dot_product / (norm_a * norm_b)
+            dot_product / (query_norm * file_norm)
         }
     }
 }
@@ -2357,6 +5941,14 @@ impl AThumb {
                     return false;
                 }
 
+                if file
+                    .file_path
+                    .as_deref()
+                    .is_some_and(t_image::is_ffmpeg_backed_image_path)
+                {
+                    return false;
+                }
+
                 let width = file.width.unwrap_or(0).max(0) as u32;
                 let height = file.height.unwrap_or(0).max(0) as u32;
                 width > 0 && height > 0 && width <= thumbnail_size && height <= thumbnail_size
@@ -2366,6 +5958,10 @@ impl AThumb {
 
     fn is_png_bytes(data: &[u8]) -> bool {
         data.starts_with(&[0x89, 0x50, 0x4E, 0x47])
+    }
+
+    fn is_complete_jpeg(data: &[u8]) -> bool {
+        data.starts_with(&[0xFF, 0xD8, 0xFF]) && data.ends_with(&[0xFF, 0xD9])
     }
 
     fn generation_lock_key(file_id: i64, thumbnail_size: u32) -> String {
@@ -2454,6 +6050,7 @@ impl AThumb {
         library_id: &str,
         album_id: i64,
         thumb_key: &str,
+        extension: &str,
     ) -> Result<PathBuf, String> {
         if thumb_key.len() < 2 {
             return Err("Invalid thumbnail cache key".to_string());
@@ -2464,19 +6061,34 @@ impl AThumb {
             .join(album_id.to_string());
         Ok(cache_root
             .join(&thumb_key[0..2])
-            .join(format!("{}.jpg", thumb_key)))
+            .join(format!("{}.{}", thumb_key, extension)))
+    }
+
+    fn thumbnail_extension(file_path: &str) -> &'static str {
+        if t_image::should_use_png_thumbnail(file_path) {
+            "png"
+        } else {
+            "jpg"
+        }
     }
 
     fn read_thumb_cache_bytes(
         library_id: &str,
         album_id: i64,
         thumb_key: &str,
+        extension: &str,
     ) -> Result<Option<Vec<u8>>, String> {
-        let path = Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key)?;
+        let path = Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key, extension)?;
         if !path.exists() {
             return Ok(None);
         }
-        fs::read(path).map(Some).map_err(|e| e.to_string())
+        let data = fs::read(path).map_err(|e| e.to_string())?;
+        let is_valid = match extension {
+            "png" => Self::is_png_bytes(&data),
+            "jpg" => Self::is_complete_jpeg(&data),
+            _ => false,
+        };
+        Ok(is_valid.then_some(data))
     }
 
     fn write_thumb_cache_bytes(
@@ -2485,16 +6097,48 @@ impl AThumb {
         thumb_key: &str,
         data: &[u8],
     ) -> Result<PathBuf, String> {
-        let path = Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key)?;
+        let extension = if Self::is_png_bytes(data) {
+            "png"
+        } else if Self::is_complete_jpeg(data) {
+            "jpg"
+        } else {
+            return Err("Invalid thumbnail data".to_string());
+        };
+        let path = Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key, extension)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        fs::write(&path, data).map_err(|e| e.to_string())?;
+        let temp_path = path.with_extension(format!(
+            "{}.{}.tmp",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::write(&temp_path, data).map_err(|e| e.to_string())?;
+        if let Err(first_error) = fs::rename(&temp_path, &path) {
+            // Windows does not replace an existing destination with rename.
+            if !path.exists()
+                || fs::remove_file(&path).is_err()
+                || fs::rename(&temp_path, &path).is_err()
+            {
+                let _ = fs::remove_file(&temp_path);
+                return Err(first_error.to_string());
+            }
+        }
         Ok(path)
     }
 
-    fn delete_thumb_cache_for_key(library_id: &str, album_id: i64, thumb_key: &str) {
-        if let Ok(path) = Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key) {
+    fn delete_thumb_cache_for_key(
+        library_id: &str,
+        album_id: i64,
+        thumb_key: &str,
+        extension: &str,
+    ) {
+        if let Ok(path) =
+            Self::get_thumb_cache_path_for_key(library_id, album_id, thumb_key, extension)
+        {
             let _ = fs::remove_file(path);
         }
     }
@@ -2511,26 +6155,29 @@ impl AThumb {
         let Some(thumb_key) = Self::fetch_thumb_key(file_id)? else {
             return Ok(());
         };
+        let extension = AFile::get_file_info(file_id)?
+            .and_then(|file| file.file_path)
+            .map(|file_path| Self::thumbnail_extension(&file_path))
+            .unwrap_or("jpg");
 
         let library_id = Self::get_current_library_id();
-        let old_path = Self::get_thumb_cache_path_for_key(&library_id, old_album_id, &thumb_key)?;
+        let old_path =
+            Self::get_thumb_cache_path_for_key(&library_id, old_album_id, &thumb_key, extension)?;
         if !old_path.exists() {
             return Ok(());
         }
 
-        let new_path = Self::get_thumb_cache_path_for_key(&library_id, new_album_id, &thumb_key)?;
+        let new_path =
+            Self::get_thumb_cache_path_for_key(&library_id, new_album_id, &thumb_key, extension)?;
         if let Some(parent) = new_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
-        match fs::rename(&old_path, &new_path) {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                fs::copy(&old_path, &new_path).map_err(|e| e.to_string())?;
-                let _ = fs::remove_file(old_path);
-                Ok(())
-            }
+        if fs::rename(&old_path, &new_path).is_err() {
+            fs::copy(&old_path, &new_path).map_err(|e| e.to_string())?;
+            let _ = fs::remove_file(old_path);
         }
+        Ok(())
     }
 
     /// Create a new thumbnail struct
@@ -2542,6 +6189,7 @@ impl AThumb {
         thumbnail_size: u32,
         library_id: &str,
         known_duration: Option<u64>,
+        seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
         let (thumb_data, error_code) = match file_type {
             1 => {
@@ -2551,27 +6199,36 @@ impl AThumb {
                         "heic" | "heif" | "hif" => {
                             // heic/heif/hif
                             #[cfg(target_os = "macos")]
-                            match t_image::get_heic_thumbnail_with_sips(file_path, thumbnail_size) {
-                                Ok(Some(data)) => (Some(data), 0),
-                                Ok(None) => (None, 1), // empty thumb
-                                Err(_) => (None, 1),   // error
-                            }
-                            #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
-                            match crate::t_heif::get_heif_thumbnail(file_path, orientation, thumbnail_size) {
-                                Ok(Some(data)) => (Some(data), 0),
-                                Ok(None) => (None, 1), // empty thumb
-                                Err(_) => (None, 1),   // error
-                            }
-                            #[cfg(all(not(target_os = "macos"), not(lap_has_libheif)))]
-                            match t_video::get_video_thumbnail_sync(
+                            let res = match t_image::get_heic_thumbnail_with_sips(
                                 file_path,
                                 thumbnail_size,
-                                known_duration,
                             ) {
                                 Ok(Some(data)) => (Some(data), 0),
                                 Ok(None) => (None, 1), // empty thumb
                                 Err(_) => (None, 1),   // error
-                            }
+                            };
+                            #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
+                            let res = match crate::t_heif::get_heif_thumbnail(
+                                file_path,
+                                orientation,
+                                thumbnail_size,
+                            ) {
+                                Ok(Some(data)) => (Some(data), 0),
+                                Ok(None) => (None, 1), // empty thumb
+                                Err(_) => (None, 1),   // error
+                            };
+                            #[cfg(all(not(target_os = "macos"), not(lap_has_libheif)))]
+                            let res = match t_video::get_video_thumbnail_sync(
+                                file_path,
+                                thumbnail_size,
+                                known_duration,
+                                None,
+                            ) {
+                                Ok(Some(data)) => (Some(data), 0),
+                                Ok(None) => (None, 1), // empty thumb
+                                Err(_) => (None, 1),   // error
+                            };
+                            res
                         }
                         _ => {
                             // other images
@@ -2592,7 +6249,12 @@ impl AThumb {
             }
             2 => {
                 // video
-                match t_video::get_video_thumbnail_sync(file_path, thumbnail_size, known_duration) {
+                match t_video::get_video_thumbnail_sync(
+                    file_path,
+                    thumbnail_size,
+                    known_duration,
+                    seek_percent,
+                ) {
                     Ok(Some(data)) => (Some(data), 0),
                     Ok(None) => (None, 1),
                     Err(_) => (None, 1),
@@ -2675,8 +6337,17 @@ impl AThumb {
     fn hydrate_output_bytes_for_library(mut thumb: Self, library_id: &str) -> Result<Self, String> {
         if thumb.thumb_data.is_none() {
             if let Some(key) = thumb.thumb_key.as_ref() {
-                if let Some(album_id) = Self::get_file_album_id(thumb.file_id)? {
-                    thumb.thumb_data = Self::read_thumb_cache_bytes(library_id, album_id, key)?;
+                if let Some(file) = AFile::get_file_info(thumb.file_id)? {
+                    if let Some(album_id) = file.album_id {
+                        let extension = file
+                            .file_path
+                            .as_deref()
+                            .is_some_and(t_image::should_use_png_thumbnail)
+                            .then_some("png")
+                            .unwrap_or("jpg");
+                        thumb.thumb_data =
+                            Self::read_thumb_cache_bytes(library_id, album_id, key, extension)?;
+                    }
                 }
             }
         }
@@ -2763,15 +6434,28 @@ impl AThumb {
 
         let mut thumbs = HashMap::with_capacity(file_ids.len());
         for row in rows {
-            let thumb = Self::hydrate_output_bytes_for_library(row.map_err(|e| e.to_string())?, library_id)?;
+            let thumb = Self::hydrate_output_bytes_for_library(
+                row.map_err(|e| e.to_string())?,
+                library_id,
+            )?;
             thumbs.insert(thumb.file_id, thumb);
         }
         Ok(thumbs)
     }
 
     fn is_stale(&self, file_path: &str, thumbnail_size: u32) -> bool {
+        if self.thumb_size != Some(thumbnail_size as i64) {
+            return true;
+        }
+
         let current_mtime = Self::get_source_mtime(file_path);
-        self.thumb_size != Some(thumbnail_size as i64) || self.thumb_mtime != current_mtime
+        match (self.thumb_mtime, current_mtime) {
+            (Some(cached_mtime), Some(source_mtime)) => cached_mtime != source_mtime,
+            (None, Some(_)) => true,
+            // The album root may have been temporarily renamed outside Lap.
+            // Keep existing thumbnails so they work again when the path returns.
+            (_, None) => false,
+        }
     }
 
     fn fetch_thumb_key(file_id: i64) -> Result<Option<String>, String> {
@@ -2797,15 +6481,6 @@ impl AThumb {
                 &Self::get_current_library_id(),
             );
         };
-
-        if Self::is_png_bytes(data) {
-            return Ok(Self {
-                thumb_data: None,
-                thumb_key: None,
-                thumb_data_base64: None,
-                ..thumbnail
-            });
-        }
 
         let library_id = Self::get_current_library_id();
         let thumb_mtime = Self::get_source_mtime(file_path);
@@ -2883,6 +6558,7 @@ impl AThumb {
         thumbnail_size: u32,
         library_id: &str,
         known_duration: Option<u64>,
+        seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
         if Self::should_use_original_image(file_id, file_type, thumbnail_size) {
             let athumb = Self {
@@ -2908,6 +6584,7 @@ impl AThumb {
             thumbnail_size,
             library_id,
             known_duration,
+            seek_percent,
         ) {
             Ok(Some(athumb)) => athumb,
             _ => Self {
@@ -2916,7 +6593,7 @@ impl AThumb {
                 error_code: 1,
                 thumb_data: None,
                 thumb_key: None,
-                thumb_mtime: None,
+                thumb_mtime: Self::get_source_mtime(file_path),
                 thumb_size: Some(thumbnail_size as i64),
                 updated_at: Some(Self::now_ts()),
                 thumb_data_base64: None,
@@ -2944,6 +6621,7 @@ impl AThumb {
         orientation: i32,
         thumbnail_size: u32,
         known_duration: Option<u64>,
+        seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
         let library_id = Self::get_current_library_id();
         Self::create_cache_backed_thumb_for_library(
@@ -2954,6 +6632,7 @@ impl AThumb {
             thumbnail_size,
             &library_id,
             known_duration,
+            seek_percent,
         )
     }
 
@@ -2970,7 +6649,15 @@ impl AThumb {
         }
 
         if let Ok(Some(thumbnail)) = Self::fetch(file_id) {
-            if thumbnail.error_code == 1 || thumbnail.error_code == 2 {
+            if thumbnail.error_code == 1 {
+                if thumbnail.is_stale(file_path, thumbnail_size) {
+                    let _ = Self::delete(file_id);
+                    return Ok(None);
+                }
+                return Ok(Some(thumbnail));
+            }
+
+            if thumbnail.error_code == 2 {
                 return Ok(Some(thumbnail));
             }
 
@@ -2980,7 +6667,7 @@ impl AThumb {
             }
 
             let hydrated = Self::ensure_cached(thumbnail, file_path, thumbnail_size, orientation)?;
-            if hydrated.thumb_data.is_some() || hydrated.thumb_key.is_some() {
+            if hydrated.thumb_data.is_some() {
                 return Ok(Some(hydrated));
             }
 
@@ -3002,7 +6689,15 @@ impl AThumb {
             return Ok(None);
         }
 
-        if thumbnail.error_code == 1 || thumbnail.error_code == 2 {
+        if thumbnail.error_code == 1 {
+            if thumbnail.is_stale(file_path, thumbnail_size) {
+                let _ = Self::delete(thumbnail.file_id);
+                return Ok(None);
+            }
+            return Ok(Some(thumbnail));
+        }
+
+        if thumbnail.error_code == 2 {
             return Ok(Some(thumbnail));
         }
 
@@ -3012,7 +6707,7 @@ impl AThumb {
         }
 
         let hydrated = Self::ensure_cached(thumbnail, file_path, thumbnail_size, orientation)?;
-        if hydrated.thumb_data.is_some() || hydrated.thumb_key.is_some() {
+        if hydrated.thumb_data.is_some() {
             return Ok(Some(hydrated));
         }
 
@@ -3029,6 +6724,7 @@ impl AThumb {
         thumbnail_size: u32,
         album_id: i64,
         force_regenerate: bool,
+        seek_percent: Option<u8>,
     ) {
         if !Self::try_begin_background_task(file_id, thumbnail_size) {
             return;
@@ -3053,6 +6749,7 @@ impl AThumb {
                     thumbnail_size,
                     force_regenerate,
                     duration,
+                    seek_percent,
                 )
             })
             .await;
@@ -3080,6 +6777,7 @@ impl AThumb {
         thumbnail_size: u32,
         force_regenerate: bool,
         known_duration: Option<u64>,
+        seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
         if force_regenerate {
             let _ = Self::delete(file_id);
@@ -3114,6 +6812,7 @@ impl AThumb {
             orientation,
             thumbnail_size,
             known_duration,
+            seek_percent,
         )
     }
 
@@ -3160,6 +6859,7 @@ impl AThumb {
                 thumbnail_size,
                 library_id,
                 file.duration.map(|d| d as u64),
+                None,
             )?
             .and_then(|thumb| thumb.thumb_data));
         }
@@ -3171,8 +6871,15 @@ impl AThumb {
     pub fn delete(file_id: i64) -> Result<usize, String> {
         if let Ok(Some(key)) = Self::fetch_thumb_key(file_id) {
             let library_id = Self::get_current_library_id();
-            if let Ok(Some(album_id)) = Self::get_file_album_id(file_id) {
-                Self::delete_thumb_cache_for_key(&library_id, album_id, &key);
+            if let Ok(Some(file)) = AFile::get_file_info(file_id) {
+                if let (Some(album_id), Some(file_path)) = (file.album_id, file.file_path) {
+                    Self::delete_thumb_cache_for_key(
+                        &library_id,
+                        album_id,
+                        &key,
+                        Self::thumbnail_extension(&file_path),
+                    );
+                }
             }
         }
         let conn = open_conn()?;
@@ -3217,6 +6924,18 @@ pub struct ATag {
     pub id: i64,
     pub name: String,
     pub count: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ATagSelectionCount {
+    pub tag_id: i64,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ATagFileState {
+    pub file_id: i64,
+    pub has_tags: bool,
 }
 
 impl ATag {
@@ -3270,6 +6989,9 @@ impl ATag {
             FROM atags 
             LEFT JOIN afile_tags ON atags.id = afile_tags.tag_id
             LEFT JOIN afiles ON afile_tags.file_id = afiles.id
+                AND afiles.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                )
             GROUP BY atags.id
             ORDER BY "
             .to_string()
@@ -3372,6 +7094,122 @@ impl ATag {
         Ok(result)
     }
 
+    pub fn get_selection_counts(file_ids: &[i64]) -> Result<Vec<ATagSelectionCount>, String> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS selected_file_ids (id INTEGER PRIMARY KEY)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM selected_file_ids", [])
+            .map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare_cached("INSERT OR IGNORE INTO selected_file_ids (id) VALUES (?1)")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                stmt.execute(params![file_id]).map_err(|e| e.to_string())?;
+            }
+        }
+
+        let counts = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT ft.tag_id, COUNT(*)
+                     FROM afile_tags ft
+                     INNER JOIN selected_file_ids selected ON selected.id = ft.file_id
+                     GROUP BY ft.tag_id",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ATagSelectionCount {
+                        tag_id: row.get(0)?,
+                        count: row.get(1)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+
+        tx.execute("DELETE FROM selected_file_ids", [])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(counts)
+    }
+
+    pub fn apply_to_files(
+        file_ids: &[i64],
+        add_tag_ids: &[i64],
+        remove_tag_ids: &[i64],
+    ) -> Result<Vec<ATagFileState>, String> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut add_stmt = tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO afile_tags (file_id, tag_id) VALUES (?1, ?2)",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut remove_stmt = tx
+                .prepare_cached("DELETE FROM afile_tags WHERE file_id = ?1 AND tag_id = ?2")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                for tag_id in add_tag_ids {
+                    add_stmt
+                        .execute(params![file_id, tag_id])
+                        .map_err(|e| e.to_string())?;
+                }
+                for tag_id in remove_tag_ids {
+                    remove_stmt
+                        .execute(params![file_id, tag_id])
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        let mut states = Vec::with_capacity(file_ids.len());
+        {
+            let mut update_stmt = tx
+                .prepare_cached(
+                    "UPDATE afiles
+                    SET has_tags = EXISTS (
+                        SELECT 1 FROM afile_tags WHERE afile_tags.file_id = afiles.id
+                    )
+                    WHERE id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut state_stmt = tx
+                .prepare_cached("SELECT COALESCE(has_tags, 0) FROM afiles WHERE id = ?1")
+                .map_err(|e| e.to_string())?;
+            for file_id in file_ids {
+                update_stmt
+                    .execute(params![file_id])
+                    .map_err(|e| e.to_string())?;
+                let has_tags = state_stmt
+                    .query_row(params![file_id], |row| row.get(0))
+                    .map_err(|e| e.to_string())?;
+                states.push(ATagFileState {
+                    file_id: *file_id,
+                    has_tags,
+                });
+            }
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(states)
+    }
+
     /// Delete a tag from the database. This will also remove all its associations with files.
     pub fn delete(tag_id: i64) -> Result<usize, String> {
         let conn = open_conn()?;
@@ -3401,6 +7239,13 @@ pub struct Person {
     pub name: Option<String>,
     pub count: Option<i64>,
     pub thumbnail: Option<String>, // Base64 encoded face thumbnail
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PersonPage {
+    pub persons: Vec<Person>,
+    pub has_more: bool,
+    pub total: usize,
 }
 
 impl Person {
@@ -3447,6 +7292,58 @@ impl Person {
         }
 
         Ok(persons)
+    }
+
+    pub fn get_page(sort: i64, offset: usize, limit: usize) -> Result<PersonPage, String> {
+        let conn = open_conn()?;
+        let limit = limit.clamp(1, 100);
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let name_asc = "rtrim(COALESCE(p.name, ''), '0123456789') COLLATE NOCASE ASC, CAST(substr(COALESCE(p.name, ''), length(rtrim(COALESCE(p.name, ''), '0123456789')) + 1) AS INTEGER) ASC, p.name ASC, p.id ASC";
+        let name_desc = "rtrim(COALESCE(p.name, ''), '0123456789') COLLATE NOCASE DESC, CAST(substr(COALESCE(p.name, ''), length(rtrim(COALESCE(p.name, ''), '0123456789')) + 1) AS INTEGER) DESC, p.name DESC, p.id ASC";
+        let order_clause = match sort {
+            1 => name_desc,
+            2 => "count ASC, p.name ASC, p.id ASC",
+            3 => "count DESC, p.name ASC, p.id ASC",
+            _ => name_asc,
+        };
+        let query = format!(
+            "SELECT p.id, p.name, COUNT(f.id) as count, p.thumbnail
+             FROM persons p
+             LEFT JOIN faces f ON f.person_id = p.id
+             GROUP BY p.id
+             ORDER BY {order_clause}
+             LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+        let persons_iter = stmt
+            .query_map(params![(limit + 1) as i64, offset as i64], |row| {
+                let thumb_data: Option<Vec<u8>> = row.get(3)?;
+                Ok(Self {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    count: row.get(2)?,
+                    thumbnail: thumb_data
+                        .as_ref()
+                        .map(|data| general_purpose::STANDARD.encode(data)),
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut persons = persons_iter
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let has_more = persons.len() > limit;
+        if has_more {
+            persons.pop();
+        }
+
+        Ok(PersonPage {
+            persons,
+            has_more,
+            total: total as usize,
+        })
     }
 
     /// Generate thumbnail for a person from their cover face or best quality face
@@ -3767,9 +7664,13 @@ pub struct Face {
 }
 
 impl Face {
-    /// Add a new face to the database
-    pub fn add(file_id: i64, bbox: &str, embedding: &[f32]) -> Result<i64, String> {
-        let conn = open_conn()?;
+    /// Add a new face using an existing connection (avoids repeated open_conn during batch indexing)
+    pub fn add_with_conn(
+        conn: &Connection,
+        file_id: i64,
+        bbox: &str,
+        embedding: &[f32],
+    ) -> Result<i64, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -3867,24 +7768,20 @@ impl Face {
         Ok(faces)
     }
 
-    /// Get ALL faces (for re-clustering)
-    pub fn get_all() -> Result<Vec<Self>, String> {
+    /// Get slim face data for clustering: (face_id, file_id, embedding_bytes)
+    /// Avoids loading full Face structs (bbox JSON, person_id, created_at) to reduce memory
+    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<Vec<u8>>)>, String> {
         let conn = open_conn()?;
         let mut stmt = conn
-            .prepare("SELECT id, file_id, bbox, embedding, person_id, created_at FROM faces")
+            .prepare("SELECT id, file_id, embedding FROM faces")
             .map_err(|e| e.to_string())?;
 
         let faces = stmt
             .query_map([], |row| {
-                Ok(Self {
-                    id: row.get(0)?,
-                    file_id: row.get(1)?,
-                    bbox: row.get(2)?,
-                    embedding: row.get(3)?,
-                    person_id: row.get(4)?,
-                    created_at: row.get(5)?,
-                    person_name: None,
-                })
+                let id: i64 = row.get(0)?;
+                let file_id: i64 = row.get(1)?;
+                let embedding: Option<Vec<u8>> = row.get(2)?;
+                Ok((id, file_id, embedding))
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
@@ -3947,10 +7844,12 @@ impl Face {
         Ok(files)
     }
 
-    /// Mark a file as scanned for faces
-    /// status: 1 = has faces, 2 = no faces found
-    pub fn mark_scanned(file_id: i64, status: i32) -> Result<(), String> {
-        let conn = open_conn()?;
+    /// Mark a file as scanned using an existing connection
+    pub fn mark_scanned_with_conn(
+        conn: &Connection,
+        file_id: i64,
+        status: i32,
+    ) -> Result<(), String> {
         conn.execute(
             "UPDATE afiles SET has_faces = ?1 WHERE id = ?2",
             params![status, file_id],
@@ -4047,6 +7946,9 @@ impl ACamera {
         let query = "SELECT UPPER(a.e_make), a.e_model, count(a.id) as count
             FROM afiles a
             WHERE a.e_make IS NOT NULL AND a.e_model IS NOT NULL
+                AND a.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                )
             GROUP BY UPPER(a.e_make), a.e_model
             ORDER BY UPPER(a.e_make), a.e_model"
             .to_string();
@@ -4122,6 +8024,9 @@ impl ALens {
         let query = "SELECT UPPER(a.e_lens_make), a.e_lens_model, count(a.id) as count
             FROM afiles a
             WHERE a.e_lens_make IS NOT NULL AND a.e_lens_model IS NOT NULL
+                AND a.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                )
             GROUP BY UPPER(a.e_lens_make), a.e_lens_model
             ORDER BY UPPER(a.e_lens_make), a.e_lens_model"
             .to_string();
@@ -4199,6 +8104,9 @@ impl ALocation {
         let query = "SELECT COALESCE(a.geo_cc, ''), a.geo_admin1, a.geo_name, count(a.id) as count
             FROM afiles a
             WHERE COALESCE(a.geo_admin1, '') <> '' AND COALESCE(a.geo_name, '') <> ''
+                AND a.id NOT IN (
+                    SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                )
             GROUP BY a.geo_cc, a.geo_admin1, a.geo_name
             ORDER BY a.geo_cc, a.geo_admin1, a.geo_name"
             .to_string();
@@ -4263,30 +8171,122 @@ impl ALocation {
     }
 }
 
+/// A grid cell of aggregated GPS density, used for heatmap rendering.
+/// `lat`/`lon` are the average coordinates of the photos within that
+/// cell (cells are ~1.1km, grouped by rounded coordinates), `count` is
+/// the number of photos within that cell.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AGpsHeatPoint {
+    pub lat: f64,
+    pub lon: f64,
+    pub count: i64,
+}
+
+impl AGpsHeatPoint {
+    /// Aggregate all GPS coordinates into grid cells on the backend, so the
+    /// frontend never has to handle one row per photo (important for large libraries).
+    pub fn get_heatmap_from_db() -> Result<Vec<Self>, String> {
+        let conn = open_conn()?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT AVG(gps_latitude) AS lat, AVG(gps_longitude) AS lon, COUNT(*) AS cnt
+                 FROM afiles a
+                 WHERE gps_latitude IS NOT NULL AND gps_longitude IS NOT NULL
+                    AND a.id NOT IN (
+                        SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+                    )
+                 GROUP BY ROUND(gps_latitude, 2), ROUND(gps_longitude, 2)",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let points = stmt
+            .query_map(params![], |row| {
+                Ok(Self {
+                    lat: row.get(0)?,
+                    lon: row.get(1)?,
+                    count: row.get(2)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(points)
+    }
+}
+
 /// get connection to the db
-fn open_conn() -> Result<Connection, String> {
-    let path = t_storage::get_current_db_path()
-        .map_err(|e| format!("Failed to get the database file path: {}", e))?;
+static CONN_POOL: Mutex<Vec<(String, Connection)>> = Mutex::new(Vec::new());
 
-    let conn = Connection::open(&path)
-        .map_err(|e| format!("Failed to open database connection: {}", e))?;
+/// A pooled connection that returns to the global pool on Drop.
+pub(crate) struct PooledConn(Option<(String, Connection)>);
 
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(entry) = self.0.take() {
+            if let Ok(mut pool) = CONN_POOL.lock() {
+                pool.push(entry);
+            }
+        }
+    }
+}
+
+impl Deref for PooledConn {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.0.as_ref().unwrap().1
+    }
+}
+
+impl DerefMut for PooledConn {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.0.as_mut().unwrap().1
+    }
+}
+
+fn setup_conn(conn: &Connection) -> Result<(), String> {
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| format!("Failed to set SQLite busy timeout: {}", e))?;
-
     conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
         row.get::<_, String>(0)
     })
     .map_err(|e| format!("Failed to enable WAL mode: {}", e))?;
-
     conn.execute("PRAGMA synchronous = NORMAL", [])
         .map_err(|e| format!("Failed to set SQLite synchronous mode: {}", e))?;
-
-    // Enable foreign key constraints
     conn.execute("PRAGMA foreign_keys = ON", [])
         .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
+    Ok(())
+}
 
-    Ok(conn)
+fn create_conn() -> Result<(String, Connection), String> {
+    let path = t_storage::get_current_db_path()
+        .map_err(|e| format!("Failed to get the database file path: {}", e))?;
+    let conn = Connection::open(&path)
+        .map_err(|e| format!("Failed to open database connection: {}", e))?;
+    setup_conn(&conn)?;
+    Ok((path, conn))
+}
+
+pub(crate) fn clear_conn_pool() {
+    if let Ok(mut pool) = CONN_POOL.lock() {
+        pool.clear();
+    }
+}
+
+pub(crate) fn open_conn() -> Result<PooledConn, String> {
+    let current_path = t_storage::get_current_db_path()
+        .map_err(|e| format!("Failed to get the database file path: {}", e))?;
+    if let Ok(mut pool) = CONN_POOL.lock() {
+        // Only reuse connections pointing to the same DB file
+        while let Some((path, conn)) = pool.pop() {
+            if path == current_path {
+                return Ok(PooledConn(Some((path, conn))));
+            }
+            // Stale connection for a different library — drop it
+        }
+    }
+    Ok(PooledConn(Some(create_conn()?)))
 }
 
 /// create all tables if not exists
@@ -4294,6 +8294,10 @@ pub fn create_db() -> Result<(), String> {
     match create_db_internal() {
         Ok(_) => Ok(()),
         Err(err) => {
+            if !should_recover_db(&err) {
+                return Err(err);
+            }
+
             eprintln!("create_db failed: {}. Trying recovery...", err);
             recover_current_db_file()?;
             create_db_internal().map_err(|e| format!("Database recovery retry failed: {}", e))
@@ -4343,6 +8347,9 @@ fn create_db_internal() -> Result<(), String> {
             created_at INTEGER,
             modified_at INTEGER,
             is_favorite INTEGER,
+            is_excluded_from_search INTEGER DEFAULT 0,
+            has_subfolders INTEGER,
+            inode INTEGER,
             FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
         )",
         [],
@@ -4381,12 +8388,14 @@ fn create_db_internal() -> Result<(), String> {
             format_label TEXT,
             created_at INTEGER,
             modified_at INTEGER,
+            inode INTEGER,
             taken_date INTEGER,
             width INTEGER,
             height INTEGER,
             duration INTEGER,
             is_favorite INTEGER,
             rating INTEGER NOT NULL DEFAULT 0,
+            culling_flag INTEGER NOT NULL DEFAULT 0,
             rotate INTEGER,
             comments TEXT,
             has_tags INTEGER,
@@ -4416,13 +8425,11 @@ fn create_db_internal() -> Result<(), String> {
             geo_cc TEXT,
             embeds BLOB,
             last_scan_time INTEGER DEFAULT 0,
+            content_identifier TEXT,
+            media_subtype TEXT,
+            live_photo_video_id INTEGER,
             FOREIGN KEY (folder_id) REFERENCES afolders(id) ON DELETE CASCADE
         )",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_afiles_folder_id_name ON afiles(folder_id, name)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -4446,6 +8453,7 @@ fn create_db_internal() -> Result<(), String> {
         [],
     )
     .map_err(|e| e.to_string())?;
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_afiles_taken_date ON afiles(taken_date)",
         [],
@@ -4473,9 +8481,18 @@ fn create_db_internal() -> Result<(), String> {
         "ALTER TABLE afiles ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE afiles ADD COLUMN culling_flag INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_afiles_rating ON afiles(rating)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_culling_flag ON afiles(culling_flag)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -4583,6 +8600,48 @@ fn create_db_internal() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_afile_tags_tag_id ON afile_tags(tag_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // collections table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS acollections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acollections_sort ON acollections(sort_order, id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // collection files table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS acollections_files (
+            collection_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (collection_id, file_id),
+            FOREIGN KEY (collection_id) REFERENCES acollections(id) ON DELETE CASCADE,
+            FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acollections_files_file ON acollections_files(file_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_acollections_files_collection_added ON acollections_files(collection_id, added_at DESC, file_id)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -4706,6 +8765,16 @@ fn create_db_internal() -> Result<(), String> {
 
     // Run schema migrations after base tables are ensured.
     crate::t_migration::check_and_migrate(&conn)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_content_identifier ON afiles(content_identifier)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_live_photo_video_id ON afiles(live_photo_video_id)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -4753,6 +8822,11 @@ fn recover_current_db_file() -> Result<(), String> {
     );
 
     Ok(())
+}
+
+fn should_recover_db(err: &str) -> bool {
+    let err = err.to_lowercase();
+    err.contains("database disk image is malformed") || err.contains("file is not a database")
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {

@@ -1,16 +1,15 @@
 <div align="center">
-  <img src="../../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
+  <img src="../docs/public/icon.png" alt="Lap Logo" width="120" style="border-radius: 20px">
   <h1>Lap - プライベート・ローカルフォトマネージャー</h1>
   <h3>macOS、Windows、Linux向けのオープンソース・デスクトップ写真管理ツール。</h3>
   <p>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
     <a href="https://github.com/julyx10/lap/stargazers"><img src="https://img.shields.io/github/stars/julyx10/lap" alt="GitHub stars"></a>
-    <a href="https://github.com/julyx10/lap/blob/main/LICENSE"><img src="https://img.shields.io/github/license/julyx10/lap" alt="GitHub license"></a>
   </p>
 </div>
 
-[English](../README.md) | [简体中文](README.zh-CN.md) | 日本語 | [한국어](README.ko.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | [Português](README.pt.md) | [Русский](README.ru.md)
+[English](../README.md) | [Deutsch](README.de.md) | [Français](README.fr.md) | [Español](README.es.md) | [Português](README.pt.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md) | 日本語 | [한국어](README.ko.md)
 
 Lapは、オープンソースでローカルファーストな写真管理ツールです。家族のアルバムを閲覧したり、古い写真を素早く見つけたり、膨大な個人メディアライブラリをオフラインで管理したりするために設計されています。
 クラウド写真サービスのプライバシーに配慮した代替案として、強制アップロードなし、ローカルAI検索、フォルダーベースのワークフローを提供し、完全に無料で使用できます。
@@ -23,71 +22,144 @@ Lapは、オープンソースでローカルファーストな写真管理ツ�
 
 [最新のリリースページ](https://github.com/julyx10/lap/releases/latest)を開き、お使いのシステムに合ったファイルをダウンロードしてください：
 
-| プラットフォーム | パッケージ | 状態 |
+| プラットフォーム | パッケージ | 備考 |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon)** | `aarch64.dmg` | Appleによる公証済み |
-| **macOS (Intel)** | `x64.dmg` | Appleによる公証済み |
-| **Windows 10/11 (x64)** | `_x64_en-US.msi` | 現在未署名（SmartScreenの警告が表示される場合があります） |
-| **Windows 10/11 (ARM64)** | `_arm64_en-US.msi` | 現在未署名（SmartScreenの警告が表示される場合があります） |
-| **Ubuntu/Debian (amd64)** | `_amd64.deb` | 動画再生の利用に関する注意点は以下のLinuxの備考をご覧ください。 |
+| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Appleによる公証済み |
+| **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | 未署名 — SmartScreenがダウンロードをブロックした場合は、**維持する**をクリックしてください |
+| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | Debian系ディストリビューション向け（Ubuntu、Debian、Linux Mintなど） |
 
-### Linuxでの動画再生に関する備考
-
-Ubuntu/Debian/Linux Mintでは、動画再生のサポートを向上させるために以下のパッケージをインストールしてください：
+### macOS with Homebrew
 
 ```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+brew tap julyx10/lap
+brew install --cask lap
 ```
 
 ## スクリーンショット
 
 <p align="center">
-  <img src="../../docs/public/screenshots/lap-home-0.1.10_1.png" alt="Lap ローカルフォトライブラリ管理 スクリーンショット" width="900">
+  <img src="../docs/public/screenshots/Lap_0.3.0_main_1.png" alt="Lap ローカルフォトライブラリ管理 スクリーンショット" width="900">
 </p>
-
-<p align="center">
-  <img src="../../docs/public/screenshots/lap-home-0.1.10_2.png" alt="Lap ローカルAI写真検索 スクリーンショット" width="900">
-</p>
-
-> スクリーンショット内のサンプル画像は [Wikimedia Commons](https://commons.wikimedia.org/) から提供されています。
 
 ## Lapを選ぶ理由
 
-- **クラウド不要**: ライブラリをホスト型サービスにアップロードするのではなく、自身のディスクに保存できます。
-- **デフォルトでプライベート**: 処理はローカルで行われるため、写真は常にユーザーの管理下にあります。
-- **無料で使用可能**: サブスクリプションプランや継続的な費用は一切かかりません。
-- **フォルダーベース**: 既存のフォルダーを直接操作でき、面倒なインポート操作は不要です。
-- **大規模ライブラリ向けの高パフォーマンス**: 大規模なメディアコレクション（1ライブラリあたり10万ファイル以上）でもスムーズな閲覧と整理ができるよう最適化されています。
+- **ローカルファースト設計**: 写真は自分のディスクに保存され、クラウドアカウントやアップロードは不要です。
+- **ライブラリのロックインなし**: すべてを閉じたデータベースに取り込むのではなく、既存のフォルダーを直接扱えます。
+- **プライベートなAIツール**: 検索、類似画像、スマートタグ、顔関連機能はすべてローカルで実行されます。
+- **大規模コレクション向け**: 10万ファイル以上のライブラリでもスムーズに閲覧・整理できるよう最適化されています。
+- **オープンソースで無料**: サブスクリプションや強制的なエコシステムはなく、コードを確認できます。
 
 ## 主な機能
 
-- **閲覧とフィルタ**: 日付、場所、カメラ、レンズ、タグ、お気に入り、評価、人物（ベータ版）で絞り込めます。
-- **複数ライブラリの管理**: 複数のライブラリを作成し、素早く切り替えることができます。
-- **重複項目の検索**: 重複したファイルを特定し、不要なコピーを一括でゴミ箱へ移動できます。
-- **その場で編集**: 切り抜き、回転、反転、リサイズ、および基本的な画質調整が可能です。
-- **フォルダーの同期**: ファイルシステムの変更を感知する操作や手動更新をサポートしています。
-- **ローカルAI検索ツール**: テキスト/画像検索、類似画像検索、顔のクラスタリング、スマートタグを利用できます。
-- **最新の画像形式に対応**: WebP、HEIC/HEIF/HIF、AVIF、JXL (JPEG XL)に対応しています。
-- **RAW写真の表示**: 20以上のカメラメーカーのRAW形式（CR2、NEF、ARW、DNGなど）を内蔵デコーダーで表示できます。
-- **幅広いビデオ互換性**: MP4、MOV、AVI、MKV、および20以上の形式をサポートし、クロスプラットフォーム向けに最適化されています。
+- **柔軟なライブラリ閲覧**: タイムライン、フォルダー、場所、カメラ、レンズ、タグ、お気に入り、評価、被写体、顔で絞り込めます。
+- **スマートアルバム**: ルールベースの表示を保存し、グループ化、並べ替え、順序をカスタマイズできます。
+- **コレクショントレイ**: 元のフォルダーからファイルを移動せずに、必要なファイルを一時的なコレクションとしてまとめられます。
+- **ローカルAI検索**: テキスト検索、視覚的類似検索、被写体、顔クラスタリング、50以上の言語に対応する任意の多言語検索を利用できます。
+- **Apple Live Photos**: HEIC/MOVのペアを認識してビューアーで再生し、名前変更、移動、コピー、削除時には関連するMOVおよびAAEサイドカーファイルをまとめて扱います。
+- **RAW + JPEG/HEICペア**: 同じフォルダー内にある、同名のRAWファイルとJPEGまたはHEICの関連ファイルを、任意で1つの項目としてグループ化します。元のファイルは別々のままで、名前変更、移動、コピー、貼り付け、削除では両方のファイルをまとめて扱います。
+- **フォルダーファーストのワークフロー**: 複数ライブラリ、ドラッグ＆ドロップ読み込み、コピー＆ペースト読み込み、ファイルシステム同期、安全な移動/コピー/削除操作に対応します。
+- **レビューと比較ツール**: 最大4枚の画像を比較できる4ペインの画像ビューアーを搭載しています。
+- **整理ツール**: 重複ファイルを見つけ、不要なファイルを一括でゴミ箱へ移動できます。
+- **内蔵編集**: 切り抜き、回転、反転、リサイズ、基本的な画像調整に対応します。
+- **幅広い形式サポート**: 60以上の写真、RAW、動画形式に対応します。
 
-## 今後の予定
+## メタデータ、コレクション、ファイルの移動
 
-- **Live PhotosとMotion Photosへの対応**: 写真と動画を組み合わせたワークフローをサポート。
-- **メタデータサポートの拡張**: EXIF、XMP、IPTCワークフローの拡充。
+Lapはフォルダーを中心に扱いますが、Lapに表示されるすべての情報が元のファイルに埋め込まれているわけではありません。同じフォルダーをFinder、エクスプローラー、または別の写真アプリでも管理する場合は、この違いが重要です。
+
+### ファイルとともに残るもの
+
+- 元の写真と動画は、既存のフォルダー内の通常のファイルのままです。
+- EXIFの撮影日時、カメラ、レンズ、GPS、向きなど、ファイルにすでに埋め込まれているメタデータは、Lapがインデックスを作成する際にそのファイルから読み取られます。
+- 内蔵の画像編集を保存すると、編集後の画像が選択した保存先に書き込まれます。これはLapだけに保存される表示上の回転とは別のものです。
+- ファイルを**Lap内で**名前変更、移動、コピー、削除すると、Lapは同時にローカルカタログを更新します。Apple Live Photoの構成ファイル、AAEサイドカーファイル、有効にしたRAW + JPEG/HEICペアなど、対応する関連ファイルもまとめて扱います。
+
+### Lapがローカルに保存するもの
+
+次の情報はLapのライブラリデータです。Lapのローカルデータベースまたはライブラリ設定に保存され、EXIF、IPTC、XMPサイドカーファイルには書き込まれません。
+
+- コレクションとそのメンバー
+- タグ
+- コメント
+- お気に入り、評価、レビュー状態（PicksおよびRejectsを含む）
+- Lapの表示上の回転と、ライブラリ専用のその他の状態
+- スマートアルバムと、そのルール、グループ化、並べ替え、順序
+- AI検索データ、顔データ、サムネイル、その他のインデックスまたはキャッシュデータ
+
+これらのデータは、Lapの外でファイルをコピー、書き出し、移動してもファイルとともには移動せず、他のアプリで自動的に利用できるものでもありません。
+
+### Lapの外でファイルを扱う場合
+
+Lapはフォルダーを再スキャンし、多くのファイルシステム上の変更を検出できます。ただし、Lapの外でファイルの名前変更、移動、置き換え、コピーを行った場合、特にコレクションへの所属やその他のライブラリ専用データといったローカルの関連付けがファイルに追従することは保証できません。
+
+コレクション、タグ、コメント、お気に入り、評価、レビュー状態、またはLapの表示上の回転に依存するワークフローでは、可能な限りLapでファイルを移動・名前変更してください。Lapの外で頻繁に作業する場合は、これらの機能をLap内だけの整理情報として扱い、写真のバックアップとあわせてLapのデータベースと設定もバックアップしてください。データベースの場所の確認・変更、およびデータベースのバックアップ作成は、**設定 → ストレージ**から行えます。
+
+Lapのデータベースまたは設定を削除すると、このローカルの整理情報とインデックスデータは削除されますが、元のメディアファイルは削除されません。
+
+## Lapのアンインストール
+
+Lapは既存の写真フォルダーを直接使用します。Lapをアンインストールしたり、データベースやキャッシュファイルを削除したりしても、元の写真は削除されません。
+
+通常のアンインストールではアプリケーションのみが削除されます。Lapを完全に削除するには、まずLapを終了してアプリケーションをアンインストールし、その後、お使いのプラットフォームに対応するコマンドでローカルデータベース、サムネイルキャッシュ、設定ファイルを削除してください。
+
+### macOS
+
+HomebrewでLapをインストールした場合：
+
+```bash
+brew uninstall --cask lap
+```
+
+手動でインストールした場合は、Lapを終了し、`Applications`フォルダーの`Lap.app`をゴミ箱に移動してください。
+
+Lapのデータベース、キャッシュ、設定ファイルをすべて削除するには：
+
+```bash
+rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
+       "$HOME/Library/Caches/com.julyx10.lap" \
+       "$HOME/Library/WebKit/com.julyx10.lap"
+rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
+```
+
+### Windows
+
+**設定 > アプリ > インストールされているアプリ**を開き、**Lap**を探して**アンインストール**を選択します。
+
+次にPowerShellを開き、Lapのデータベース、キャッシュ、設定ファイルをすべて削除します：
+
+```powershell
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com.julyx10.lap"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
+```
+
+### Linux
+
+Debianベースのディストリビューションでは、パッケージをアンインストールします：
+
+```bash
+sudo apt remove lap
+```
+
+次に、Lapのデータベース、キャッシュ、設定ファイルをすべて削除します：
+
+```bash
+rm -rf "$HOME/.local/share/com.julyx10.lap" \
+       "$HOME/.cache/com.julyx10.lap" \
+       "$HOME/.config/com.julyx10.lap"
+```
+
+Lapの設定でカスタムデータベース保存先を選択している場合は、そのフォルダーにLapのデータベースファイルのみが含まれていることを確認してから、別途削除してください。
 
 ## ソースからのビルド
 
 要件: Node.js 20+、pnpm、Rust stable.
-
-Linuxでの動画再生については、上記のダウンロードセクションのパッケージに関する備考をご覧ください。
 
 ```bash
 # macOS システム依存関係
 xcode-select --install
 brew install nasm pkg-config autoconf automake libtool cmake
 
-# Linux システム依存関係 (Ubuntu/Debian)
+# Linux システム依存関係
 # sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
 #   patchelf nasm clang pkg-config autoconf automake libtool cmake
 
@@ -104,11 +176,21 @@ cargo tauri dev
 
 ## 対応形式
 
+Lapは60以上の写真、RAW、動画形式に対応しています。
+
 | タイプ | 形式 |
 | :--- | :--- |
-| 画像 | JPG/JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL |
+| 画像 | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW写真 | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
 | 動画 | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX など。H.264再生は全プラットフォームでサポートされており、ネイティブ再生が利用できない場合は自動的に互換性処理が行われます。HEVC/H.265およびVP9はmacOSでネイティブサポートされています。 |
+
+### Linuxでの動画再生に関する備考
+
+Linux Mint/Ubuntu/Debianでは、動画再生のサポートを向上させるために以下のパッケージをインストールしてください：
+
+```bash
+sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+```
 
 ## アーキテクチャ
 
@@ -122,7 +204,9 @@ cargo tauri dev
 | :-- | :-- |
 | [LibRaw](https://github.com/LibRaw/LibRaw) | RAW画像のデコードとサムネイル抽出 |
 | [libheif](https://github.com/strukturag/libheif) | HEIC/HEIF/HIF画像のデコードとプレビュー生成 |
+| [libjpeg-turbo](https://libjpeg-turbo.org/) | 高速なJPEGデコードとサムネイル生成 |
 | [FFmpeg](https://ffmpeg.org/) | 動画処理とサムネイル生成 |
+| [Video.js](https://videojs.com/) | クロスプラットフォームの動画再生UI |
 | [ONNX Runtime](https://onnxruntime.ai/) | ローカルAIモデル推論エンジン |
 | [CLIP](https://github.com/openai/CLIP) | 画像・テキストの類似度検索 |
 | [InsightFace](https://github.com/deepinsight/insightface) | 顔検出と認識 |

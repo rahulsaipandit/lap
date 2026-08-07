@@ -3,6 +3,7 @@
  */
 import { defineStore } from 'pinia';
 import { getCurrentLibraryState, saveLibraryState, getAppConfig } from '@/common/api';
+import { LIB_ITEM } from '@/common/constants';
 import { setThumbLibraryId } from '@/common/utils';
 
 export const useLibraryStore = defineStore('libraryStore', {
@@ -12,6 +13,19 @@ export const useLibraryStore = defineStore('libraryStore', {
     _initialized: false,
 
     // Per-library state
+    /** @type {'main' | 'collection'} */
+    activePane: 'main',
+
+    /** @type {{ item: 'all-files' | 'favorites' | 'ratings' | 'culling' | 'subjects' | 'on-this-day', smartId: string | null, ratingsExpanded: boolean, cullingExpanded: boolean, subjectsExpanded: boolean, subjectCounts: Record<string, number> }} */
+    library: {
+      item: LIB_ITEM.ALL,
+      smartId: null,
+      ratingsExpanded: true,
+      cullingExpanded: true,
+      subjectsExpanded: true,
+      subjectCounts: {},
+    },
+
     /** @type {{ id: number, folderId: number | null, folderPath: string, selected: boolean, activateTick: number }} */
     album: {
       id: 0,                  // current album id (0: show all files)
@@ -21,20 +35,32 @@ export const useLibraryStore = defineStore('libraryStore', {
       activateTick: 0,        // increments on each album/folder click (even same target)
     },
 
-    /** @type {{ tab: 'favorite' | 'rating', albumId: number | null, folderId: number, folderPath: string, rating: number | null }} */
-    favorite: {
-      tab: 'favorite',
-      albumId: null,
-      folderId: 0,            // 0 means favorite files (default)
-      folderPath: '',
-      rating: null,           // null: all favorites, 0: unrated, 1-5: rated files
+    /** @type {{ type: 'system' | 'custom', id: string | number | null }} */
+    smartAlbum: {
+      type: 'system',         // selected smart album type
+      id: null,               // selected smart album id
     },
 
-    /** @type {{ id: number | null, smartId: string | null, tab: 'smart' | 'custom' }} */
+    /** @type {Array<{ id: string, name: string, description: string, source: 'rules', query: { version: number, match: 'all' | 'any', rules: Array<{ id: string, field: string, operator: string, value: any }> }, group: { type: number }, sort: { type: number, order: number }, coverFileId: number | null, count: number | null, createdAt: number, updatedAt: number }>} */
+    smartAlbums: [],          // custom smart albums
+
+    /** @type {{ selectedId: number | null }} */
+    collection: {
+      selectedId: null,      // selected collection id
+    },
+
+    /** @type {{ item: number | null }} */
+    rating: {
+      item: null,             // 0: unrated, 1-5: rated files
+    },
+
+    culling: {
+      item: 'pick',
+    },
+
+    /** @type {{ id: number | null }} */
     tag: {
       id: null,
-      smartId: null,
-      tab: 'custom',
     },
 
     /** @type {{ year: number | null, month: number | null, date: number | null }} */
@@ -44,9 +70,8 @@ export const useLibraryStore = defineStore('libraryStore', {
       date: null,             // selected date (1-31), -1 means selecting a month
     },
 
-    /** @type {{ tab: 'camera' | 'lens', make: string | null, model: string | null, lensMake: string | null, lensModel: string | null }} */
+    /** @type {{ make: string | null, model: string | null, lensMake: string | null, lensModel: string | null }} */
     camera: {
-      tab: 'camera',
       make: null,             // selected camera make
       model: null,            // selected camera model
       lensMake: null,         // selected lens make
@@ -66,15 +91,11 @@ export const useLibraryStore = defineStore('libraryStore', {
       name: null,             // selected person name
     },
 
-    /** @type {{ searchType: number, searchText: string, searchHistory: (string | { text: string, fileId: number | null })[], searchHistoryIndex: number, similarImageHistory: number[], similarImageHistoryIndex: number, fileName: string }} */
+    /** @type {{ searchText: string, searchHistory: (string | { text: string, count: number | null })[], searchHistoryIndex: number }} */
     search: {
-      searchType: 0,            // 0: ai search, 1: similar image, 2: filename search
       searchText: '',         // AI search text
       searchHistory: [],      // AI search history
       searchHistoryIndex: -1, // current AI search history index
-      similarImageHistory: [],// similar image history
-      similarImageHistoryIndex: -1, // current similar image history index
-      fileName: '',           // filename search text
     },
 
     /** @type {{ albumId: number | null, folderId: number | null, folderPath: string | null, selected: boolean }} */
@@ -128,6 +149,9 @@ export const useLibraryStore = defineStore('libraryStore', {
         this.index.pausedAlbumIds = Array.isArray(this.index.pausedAlbumIds)
           ? Array.from(new Set(this.index.pausedAlbumIds.map(id => Number(id)).filter(id => id > 0)))
           : [];
+        this.collection.selectedId = Number(this.collection.selectedId || 0) > 0
+          ? Number(this.collection.selectedId)
+          : null;
 
         this._initialized = true;
 
@@ -157,8 +181,12 @@ export const useLibraryStore = defineStore('libraryStore', {
       if (this._libraryId && this._initialized) {
         try {
           const stateToSave = {
+            library: this.library,
             album: this.album,
-            favorite: this.favorite,
+            smartAlbum: this.smartAlbum,
+            smartAlbums: this.smartAlbums,
+            collection: this.collection,
+            rating: this.rating,
             tag: this.tag,
             calendar: this.calendar,
             camera: this.camera,

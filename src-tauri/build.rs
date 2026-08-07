@@ -46,8 +46,10 @@ fn build_libheif() {
     let binary_dir = build_root.join("build");
     fs::create_dir_all(&binary_dir).unwrap();
 
-    let is_windows = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
-    let libde265 = match build_libde265(&manifest_dir, &out_dir, is_windows) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let is_windows = target_os == "windows";
+    let use_cmake_default_generator = is_windows;
+    let libde265 = match build_libde265(&manifest_dir, &out_dir, use_cmake_default_generator) {
         Some(build) => build,
         None => {
             println!(
@@ -64,6 +66,7 @@ fn build_libheif() {
     }
     configure
         .arg("-DCMAKE_BUILD_TYPE=Release")
+        .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
         .arg("-DBUILD_SHARED_LIBS=OFF")
         .arg("-DBUILD_DOCUMENTATION=OFF")
         .arg("-DBUILD_TESTING=OFF")
@@ -131,17 +134,35 @@ fn build_libheif() {
         ("heif", binary_dir.join("libheif.a")),
         ("heif", binary_dir.join("Release").join("libheif.a")),
         ("heif", binary_dir.join("libheif").join("libheif.a")),
-        ("heif", binary_dir.join("libheif").join("Release").join("libheif.a")),
+        (
+            "heif",
+            binary_dir.join("libheif").join("Release").join("libheif.a"),
+        ),
         ("heif", binary_dir.join("heif.lib")),
         ("heif", binary_dir.join("Release").join("heif.lib")),
         ("heif", binary_dir.join("Debug").join("heif.lib")),
-        ("heif", binary_dir.join("libheif").join("Release").join("heif.lib")),
-        ("heif", binary_dir.join("libheif").join("Debug").join("heif.lib")),
+        (
+            "heif",
+            binary_dir.join("libheif").join("Release").join("heif.lib"),
+        ),
+        (
+            "heif",
+            binary_dir.join("libheif").join("Debug").join("heif.lib"),
+        ),
         ("libheif", binary_dir.join("libheif.lib")),
         ("libheif", binary_dir.join("Release").join("libheif.lib")),
         ("libheif", binary_dir.join("Debug").join("libheif.lib")),
-        ("libheif", binary_dir.join("libheif").join("Release").join("libheif.lib")),
-        ("libheif", binary_dir.join("libheif").join("Debug").join("libheif.lib")),
+        (
+            "libheif",
+            binary_dir
+                .join("libheif")
+                .join("Release")
+                .join("libheif.lib"),
+        ),
+        (
+            "libheif",
+            binary_dir.join("libheif").join("Debug").join("libheif.lib"),
+        ),
     ];
 
     let (lib_name, lib_path) = match candidates.iter().find(|(_, p)| p.exists()) {
@@ -159,11 +180,16 @@ fn build_libheif() {
     let lib_dir = lib_path.parent().unwrap_or(&binary_dir);
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static={}", lib_name);
-    println!("cargo:rustc-link-search=native={}", libde265.lib_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        libde265.lib_dir.display()
+    );
     println!("cargo:rustc-link-lib=static={}", libde265.lib_name);
-    if !is_windows {
-        // Some libheif builds depend on stdc++.
-        println!("cargo:rustc-link-lib=stdc++");
+    match target_os.as_str() {
+        "macos" => println!("cargo:rustc-link-lib=c++"),
+        "windows" => {}
+        // Some libheif builds depend on the C++ runtime.
+        _ => println!("cargo:rustc-link-lib=stdc++"),
     }
 
     // Enable the Rust-side libheif bindings only when the native library is available.
@@ -178,22 +204,46 @@ fn write_build_info() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards");
+    // This intentionally records the real build time for About/version
+    // metadata, so Cargo will rewrite build_info.rs on each build.
     let timestamp = now.as_secs();
+    let commit_hash = current_git_commit_hash().unwrap_or_default();
 
     let mut formatted = String::new();
     write!(
         &mut formatted,
-        "pub const BUILD_UNIX_TIME: u64 = {};",
-        timestamp
+        "pub const BUILD_UNIX_TIME: u64 = {};\npub const GIT_COMMIT_HASH: &str = {:?};",
+        timestamp, commit_hash
     )
     .unwrap();
 
     fs::write(dest_path, formatted).unwrap();
 }
 
+fn current_git_commit_hash() -> Option<String> {
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/refs/heads");
+    println!("cargo:rerun-if-changed=../.git/packed-refs");
+
+    let output = Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let hash = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!hash.is_empty()).then_some(hash)
+}
+
 fn build_libraw() {
-    let is_windows = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows";
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let is_windows = target_os == "windows";
+    let is_linux_aarch64 = target_os == "linux" && target_arch == "aarch64";
+    const LIBRAW_LINK_NAME: &str = "raw";
+    const SHIM_LINK_NAME: &str = "lap_libraw_shim";
 
     println!("cargo:rerun-if-changed=src/libraw_shim.cpp");
     println!("cargo:rerun-if-changed=src/jpeg_shim.cpp");
@@ -220,6 +270,7 @@ fn build_libraw() {
     let mut build = cc::Build::new();
     build
         .cpp(true)
+        .cargo_metadata(false)
         .include(&libraw_source)
         .warnings(false)
         .define("LIBRAW_BUILDLIB", None);
@@ -235,6 +286,12 @@ fn build_libraw() {
             .flag_if_supported("-std=c++17")
             .flag_if_supported("-w");
     }
+    if is_linux_aarch64 {
+        // Avoid GCC's AArch64 outline atomics helpers
+        // (__aarch64_swp8_sync / __aarch64_ldadd8_sync), which are not
+        // resolved by libatomic on the GitHub Actions ARM runner.
+        build.flag_if_supported("-mno-outline-atomics");
+    }
 
     if let Some(jpeg) = &jpeg_build {
         for inc in &jpeg.include_dirs {
@@ -247,28 +304,13 @@ fn build_libraw() {
         build.file(source_file);
     }
 
-    build.compile("raw");
+    build.compile(LIBRAW_LINK_NAME);
 
-    // Link dependencies
-    if let Some(jpeg) = &jpeg_build {
-        println!("cargo:rustc-link-search=native={}", jpeg.lib_dir.display());
-        println!("cargo:rustc-link-lib=static={}", jpeg.lib_name);
-    }
-    if is_windows {
-        println!("cargo:rustc-link-lib=ws2_32");
-    } else {
-        println!("cargo:rustc-link-lib=z");
-        println!("cargo:rustc-link-lib=m");
-        match target_os.as_str() {
-            "macos" => println!("cargo:rustc-link-lib=c++"),
-            "linux" => println!("cargo:rustc-link-lib=stdc++"),
-            _ => {}
-        }
-    }
-
-    // Build the shim
+    // Build the shim (must compile before emitting -ljpeg so the linker
+    // processes libjpeg after liblap_libraw_shim, which references jpeg).
     let mut shim = cc::Build::new();
     shim.cpp(true)
+        .cargo_metadata(false)
         .include(&libraw_source)
         .include(libraw_source.join("libraw"))
         .warnings(false)
@@ -289,8 +331,70 @@ fn build_libraw() {
     } else {
         shim.flag_if_supported("-std=c++17");
     }
+    if is_linux_aarch64 {
+        shim.flag_if_supported("-mno-outline-atomics");
+    }
 
-    shim.compile("lap_libraw_shim");
+    shim.compile(SHIM_LINK_NAME);
+
+    // cc::Build is compiled with cargo_metadata(false), so emit the search
+    // path and link directives explicitly to preserve linker ordering.
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    if let Some(jpeg) = &jpeg_build {
+        println!("cargo:rustc-link-search=native={}", jpeg.lib_dir.display());
+    }
+
+    // On Linux with static linking, libraw, libjpeg, and the shim are
+    // interdependent. Use --start-group / --end-group via raw linker args to
+    // let the linker resolve symbols across the archives iteratively, and to
+    // bypass Cargo's deduplication of rustc-link-lib directives.
+    if target_os == "linux" {
+        println!("cargo:rustc-link-arg=-Wl,--start-group");
+        println!("cargo:rustc-link-arg=-l{}", LIBRAW_LINK_NAME);
+        if let Some(jpeg) = &jpeg_build {
+            println!("cargo:rustc-link-arg=-l{}", jpeg.lib_name);
+        }
+        println!("cargo:rustc-link-arg=-l{}", SHIM_LINK_NAME);
+        println!("cargo:rustc-link-arg=-Wl,--end-group");
+    } else {
+        println!("cargo:rustc-link-lib=static={}", LIBRAW_LINK_NAME);
+        println!("cargo:rustc-link-lib=static={}", SHIM_LINK_NAME);
+        if let Some(jpeg) = &jpeg_build {
+            println!("cargo:rustc-link-lib=static={}", jpeg.lib_name);
+        }
+    }
+
+    if is_windows {
+        println!("cargo:rustc-link-lib=ws2_32");
+    } else {
+        println!("cargo:rustc-link-lib=z");
+        println!("cargo:rustc-link-lib=m");
+        match target_os.as_str() {
+            "macos" => println!("cargo:rustc-link-lib=c++"),
+            "linux" => println!("cargo:rustc-link-lib=stdc++"),
+            _ => {}
+        }
+    }
+
+    // Native clipboard shims for formats that must be published together.
+    if target_os == "macos" {
+        println!("cargo:rerun-if-changed=src/pasteboard.mm");
+        cc::Build::new()
+            .file("src/pasteboard.mm")
+            .compile("lap_pasteboard");
+        println!("cargo:rustc-link-lib=framework=AppKit");
+    } else if target_os == "linux" {
+        println!("cargo:rerun-if-changed=src/clipboard_linux.c");
+        let gtk = pkg_config::Config::new()
+            .probe("gtk+-3.0")
+            .expect("gtk+-3.0 is required to build the Linux clipboard shim");
+        let mut build = cc::Build::new();
+        build.file("src/clipboard_linux.c");
+        for include_path in gtk.include_paths {
+            build.include(include_path);
+        }
+        build.compile("lap_clipboard");
+    }
 }
 
 struct JpegBuild {
@@ -336,6 +440,7 @@ fn build_libjpeg(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Optio
         }
         configure
             .arg("-DCMAKE_BUILD_TYPE=Release")
+            .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
             .arg("-DENABLE_SHARED=FALSE")
             .arg("-DENABLE_STATIC=TRUE")
             .arg(source_dir.as_os_str())
@@ -372,7 +477,11 @@ fn build_libjpeg(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Optio
     })
 }
 
-fn build_libde265(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Option<LibDe265Build> {
+fn build_libde265(
+    manifest_dir: &Path,
+    out_dir: &Path,
+    use_cmake_default_generator: bool,
+) -> Option<LibDe265Build> {
     let source_dir = manifest_dir.join("third_party/libde265");
     if !source_dir.exists() {
         println!(
@@ -386,18 +495,6 @@ fn build_libde265(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Opti
     let binary_dir = build_root.join("build");
     fs::create_dir_all(&binary_dir).unwrap();
 
-    let release_candidates: [PathBuf; 9] = [
-        binary_dir.join("libde265.a"),
-        binary_dir.join("Release").join("libde265.a"),
-        binary_dir.join("libde265").join("libde265.a"),
-        binary_dir.join("de265.lib"),
-        binary_dir.join("Release").join("de265.lib"),
-        binary_dir.join("libde265.lib"),
-        binary_dir.join("Release").join("libde265.lib"),
-        binary_dir.join("libde265").join("Release").join("de265.lib"),
-        binary_dir.join("libde265").join("Release").join("libde265.lib"),
-    ];
-
     let candidates: [(&str, PathBuf); 13] = [
         ("de265", binary_dir.join("libde265.a")),
         ("de265", binary_dir.join("Release").join("libde265.a")),
@@ -405,22 +502,46 @@ fn build_libde265(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Opti
         ("de265", binary_dir.join("de265.lib")),
         ("de265", binary_dir.join("Release").join("de265.lib")),
         ("de265", binary_dir.join("Debug").join("de265.lib")),
-        ("de265", binary_dir.join("libde265").join("Release").join("de265.lib")),
-        ("de265", binary_dir.join("libde265").join("Debug").join("de265.lib")),
+        (
+            "de265",
+            binary_dir
+                .join("libde265")
+                .join("Release")
+                .join("de265.lib"),
+        ),
+        (
+            "de265",
+            binary_dir.join("libde265").join("Debug").join("de265.lib"),
+        ),
         ("libde265", binary_dir.join("libde265.lib")),
         ("libde265", binary_dir.join("Release").join("libde265.lib")),
         ("libde265", binary_dir.join("Debug").join("libde265.lib")),
-        ("libde265", binary_dir.join("libde265").join("Release").join("libde265.lib")),
-        ("libde265", binary_dir.join("libde265").join("Debug").join("libde265.lib")),
+        (
+            "libde265",
+            binary_dir
+                .join("libde265")
+                .join("Release")
+                .join("libde265.lib"),
+        ),
+        (
+            "libde265",
+            binary_dir
+                .join("libde265")
+                .join("Debug")
+                .join("libde265.lib"),
+        ),
     ];
 
-    let have_existing = release_candidates.iter().any(|path| path.exists());
+    let have_existing = candidates.iter().any(|(_, path)| path.exists());
     if !have_existing {
         let mut configure = Command::new("cmake");
-        if !is_windows {
+        // Windows keeps CMake's default generator; other targets use Makefiles
+        // to match the GitHub Actions build environment.
+        if !use_cmake_default_generator {
             configure.arg("-G").arg("Unix Makefiles");
         }
         configure
+            .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON")
             .arg("-DBUILD_SHARED_LIBS=OFF")
             .arg("-DENABLE_SDL=OFF")
             .arg("-DENABLE_DECODER=ON")
@@ -469,11 +590,20 @@ fn build_libde265(manifest_dir: &Path, out_dir: &Path, is_windows: bool) -> Opti
         include_libde265_dir.join("de265.h"),
     )
     .unwrap();
-    fs::copy(
+    let version_header_candidates = [
         binary_dir.join("libde265").join("de265-version.h"),
-        include_libde265_dir.join("de265-version.h"),
-    )
-    .unwrap();
+        binary_dir.join("de265-version.h"),
+        binary_dir.join("Release").join("de265-version.h"),
+        binary_dir.join("Debug").join("de265-version.h"),
+    ];
+    let Some(version_header) = version_header_candidates.iter().find(|path| path.exists()) else {
+        println!(
+            "cargo:warning=libde265 build completed but generated de265-version.h was not found under {}",
+            binary_dir.display()
+        );
+        return None;
+    };
+    fs::copy(version_header, include_libde265_dir.join("de265-version.h")).unwrap();
     let lib_dir = lib_path.parent().unwrap_or(&binary_dir).to_path_buf();
 
     Some(LibDe265Build {
@@ -500,6 +630,7 @@ fn collect_cpp_sources(dir: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    sources.sort();
     sources
 }
 
@@ -543,8 +674,8 @@ fn log_library_search_failure(binary_dir: &Path, library_name: &str) {
 fn run_command(command: &mut Command, description: &str) {
     let status = command
         .status()
-        .unwrap_or_else(|e| panic!("Failed to {}: {}", description, e));
+        .unwrap_or_else(|e| panic!("Failed to {description}: {e}"));
     if !status.success() {
-        panic!("Failed to {}: exit status {}", description, status);
+        panic!("Failed to {description}: exit status {status}");
     }
 }

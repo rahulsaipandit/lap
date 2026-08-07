@@ -13,23 +13,26 @@
       :id="'folder-' + child.id" 
       :class="{ 'pl-4': child.path !== rootPath }"
     >
-      <div v-if="child.id != 0 || selection.folderPath.value == rootPath" 
+      <div v-if="child.id != 0 || selection.folderPath.value == rootPath"
+        :data-file-drop-path="child.path"
+        :data-file-drop-album-id="albumId"
         :class="[
-          'mx-1 p-1 h-8 flex items-center rounded-box whitespace-nowrap cursor-pointer group',
-          !selection.selected.value && selection.folderPath.value === child.path && !isRenamingFolder ? 'text-primary bg-base-100 hover:bg-base-100' : 'hover:text-base-content hover:bg-base-100/30',
-        ]" 
+          'p-1 h-8 flex items-center rounded-box whitespace-nowrap cursor-pointer group border-2',
+          !selection.selected.value && selection.folderPath.value === child.path && !isRenamingFolder ? `${isMainSourceActive ? 'text-primary' : 'text-base-content/70 bg-base-100/30 hover:bg-base-100/30'} bg-base-100 hover:bg-base-100 border-transparent` : 'hover:text-base-content hover:bg-base-100/30 border-transparent',
+        ]"
         @click="clickFolder(albumId, child)"
         @dblclick="expandFolder(child)"
+        @contextmenu.prevent.stop="(e: MouseEvent) => handleFolderContextMenu(child, e)"
       >
         <IconRight
           :class="[
             'p-1 w-6 h-6 shrink-0 transition-transform',
-            (!child.children || child.children.length > 0) ? '' : 'opacity-0 pointer-events-none',
+            child.has_subfolders && !child.is_excluded_from_search ? '' : 'opacity-0 pointer-events-none',
             child.is_expanded ? 'rotate-90' : ''
           ]"
           @click.stop="expandFolder(child)"
         />
-        <component :is="child.is_favorite ? IconFolderFavorite : IconFolder" class="p-1 w-6 h-6 shrink-0"/>
+        <IconFolder class="p-1 w-6 h-6 shrink-0"/>
 
         <!-- name -->
         <input v-if="isRenamingFolder && selection.folderPath.value === child.path"
@@ -49,12 +52,10 @@
             {{ child.name }}
           </div>
           <div class="ml-auto flex flex-row items-center text-base-content/30">
-            <!-- <TButton v-if="child.is_favorite" 
-              :icon="IconHeartFilled"
-              :disabled="true"
-              :buttonSize="'small'"
-            /> -->
+            <IconHeartFilled v-if="child.is_favorite" class="mr-1 w-4 h-4 shrink-0 text-error/70" />
+            <IconHide v-if="child.is_excluded_from_search" class="mr-1 w-4 h-4 shrink-0" />
             <ContextMenu v-if="allowContextMenu && !isRenamingFolder"
+              :ref="(el: any) => { if (el) folderContextMenus[child.path] = el }"
               :class="[
                 selection.folderPath.value != child.path ? 'invisible group-hover:visible' : ''
               ]"
@@ -65,7 +66,7 @@
           </div>
         </template>
       </div>
-      <AlbumFolder v-if="child.is_expanded && child.id != 0" 
+      <AlbumFolder v-if="child.is_expanded && child.id != 0 && !child.is_excluded_from_search"
         :key="child.id"
         :children="child.children" 
         :albumId="albumId"
@@ -93,16 +94,30 @@
   <!-- trash folder -->
   <MessageBox
     v-if="showTrashFolderMsgbox"
-    :title="$t('msgbox.trash_folder.title')"
-    :message="`${$t('msgbox.trash_folder.content', { folder: selectedFolder?.name })}`"
-    :OkText="$t('msgbox.trash_folder.ok')"
+    :title="trashFolderDialogTitle"
+    :message="trashFolderDialogMessage"
+    :OkText="trashFolderDialogOkText"
     :cancelText="$t('msgbox.cancel')"
     :warningOk="true"
+    :checkboxText="$t('msgbox.permanent_delete.checkbox')"
+    :checkboxChecked="deletePermanently"
     @ok="clickTrashFolder"
     @cancel="showTrashFolderMsgbox = false"
+    @checkbox-change="deletePermanently = $event"
   />
 
-  <!-- move to -->
+  <MessageBox
+    v-if="showTrashFailedFolderMsgbox"
+    :title="$t('msgbox.trash_failed.title')"
+    :message="$t('msgbox.trash_failed.folder_content', { folder: selectedFolder?.name || '' })"
+    :OkText="$t('msgbox.trash_failed.ok')"
+    :cancelText="$t('msgbox.cancel')"
+    :warningOk="true"
+    @ok="confirmTrashFailedFolderDelete"
+    @cancel="showTrashFailedFolderMsgbox = false"
+  />
+
+  <!-- move within library -->
   <MoveTo
     v-if="showMoveTo"
     :title="`${$t('msgbox.move_to.title', { source: shortenFilename(selectedFolder?.name ?? '', 32) })}`"
@@ -113,15 +128,12 @@
     @cancel="showMoveTo = false"
   />
 
-  <!-- copy to -->
-  <MoveTo
-    v-if="showCopyTo"
-    :title="`${$t('msgbox.copy_to.title', { source: shortenFilename(selectedFolder?.name ?? '', 32) })}`"
-    :message="$t('msgbox.copy_to.content')"
-    :OkText="$t('msgbox.copy_to.ok')"
-    :cancelText="$t('msgbox.cancel')"
-    @ok="clickCopyTo"
-    @cancel="showCopyTo = false"
+  <FileConflictDialog
+    v-if="fileConflictDialog.show"
+    :name="fileConflictDialog.name"
+    :destination="fileConflictDialog.destination"
+    :allowReplace="fileConflictDialog.allowReplace"
+    @resolve="resolveFileConflict"
   />
 </template>
 
@@ -131,9 +143,13 @@ import { ref, nextTick, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
-import { isMac, shortenFilename, isValidFileName } from '@/common/utils';
-import { createFolder, renameFolder, fetchFolder, moveFolder, copyFolder, revealPath, deleteFolder } from '@/common/api';
-import { setFolderFavorite } from '@/common/api';
+import { isMac, shortenFilename, isValidFileName, getFolderPath, getFullPath, normalizePathForCompare, isWithinRootPath } from '@/common/utils';
+import {
+  createFolder, renameFolder, fetchFolder, getAllAlbums, moveFolder, moveFolderOutsideLibrary,
+  copyFolder, checkFileExists, revealPath, deleteFolder, deleteFolderPermanently, recountAlbum, selectFolder as selectFolderInDb,
+  setFolderFavorite, setFolderSearchExcluded, hasImportableClipboard, syncAlbumFolderMtimes,
+} from '@/common/api';
+import { DEFAULT_PLATFORM, getShortcutLabel } from '@/common/shortcuts';
 import { Album, Folder } from '@/common/types';
 import { useAlbumSelection } from '@/composables/useAlbumSelection';
 
@@ -142,22 +158,24 @@ import ContextMenu from '@/components/ContextMenu.vue';
 import MoveTo from '@/components/MoveTo.vue';
 import MessageBox from '@/components/MessageBox.vue';
 import TButton from '@/components/TButton.vue';
+import FileConflictDialog from '@/components/FileConflictDialog.vue';
 import { useToast } from '@/common/toast';
+import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 
 import {
   IconRight,
   IconMore,
   IconNewFolder,
   IconRename,
-  IconMoveTo,
+  IconMove,
   IconTrash,
-  IconHeart,
-  IconFolderFavorite,
-  IconHeartFilled,
   IconFolder,
+  IconHide,
+  IconUnhide,
   IconRefresh,
-  IconStar,
-  IconUnFavorite
+  IconClipboard,
+  IconHeart,
+  IconHeartFilled
 } from '@/common/icons';
 
 // used for cross-component communication (Content.vue listens for this event)
@@ -181,7 +199,7 @@ const emit = defineEmits<{
 const selection = useAlbumSelection();
 
 /// i18n
-const { locale, messages } = useI18n();
+const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 const uiStore = useUIStore();
 
@@ -199,6 +217,23 @@ const getFolderByPath = (children: Folder[] | undefined, path: string): Folder |
 };
 
 const selectedFolder = computed(() => getFolderByPath(props.children, selection.folderPath.value));
+const isMainSourceActive = computed(() => libConfig.activePane !== 'collection');
+
+const trashFolderDialogTitle = computed(() =>
+  deletePermanently.value
+    ? t('msgbox.permanent_delete.title')
+    : t('msgbox.move_to_trash.title')
+);
+const trashFolderDialogOkText = computed(() =>
+  deletePermanently.value
+    ? t('msgbox.permanent_delete.ok')
+    : t('msgbox.move_to_trash.ok')
+);
+const trashFolderDialogMessage = computed(() =>
+  deletePermanently.value
+    ? t('msgbox.permanent_delete.folder_content', { folder: selectedFolder.value?.name || '' })
+    : t('msgbox.move_to_trash.folder_content', { folder: selectedFolder.value?.name || '' })
+);
 
 // rename folder
 const isRenamingFolder = ref(false);
@@ -208,22 +243,38 @@ const originalFolderName = ref(''); // restore original folder name when cancel 
 // message boxes
 const showNewFolderMsgbox = ref(false);
 const showTrashFolderMsgbox = ref(false);
+const showTrashFailedFolderMsgbox = ref(false);
 const showMoveTo = ref(false);
-const showCopyTo = ref(false);
+const permanentDeleteChecked = ref(false);
+const deletePermanently = ref(false);
+const folderContextMenus = ref<Record<string, any>>({});
+
+function handleFolderContextMenu(folder: Folder, event: MouseEvent) {
+  clickFolder(props.albumId, folder);
+  folderContextMenus.value[folder.path]?.open?.(event.clientX, event.clientY);
+}
+type FileConflictPolicy = 'skip' | 'keep_both' | 'replace';
+const fileConflictDialog = ref({
+  show: false,
+  name: '',
+  destination: '',
+  allowReplace: true,
+});
+let fileConflictResolver: ((policy: FileConflictPolicy) => void) | null = null;
 
 const toast = useToast();
 const treeRootRef = ref<HTMLElement | null>(null);
 
 // more menuitems - function that takes the folder being right-clicked
-const getMenuItemsForFolder = (folder: any) => {
+const getMenuItemsForFolder = async (folder: any) => {
   const isRoot = folder.path === props.rootPath;
+  const canPaste = await hasImportableClipboard();
   return [
     {
-      label: !folder?.is_favorite ? localeMsg.value.menu.meta.favorite : localeMsg.value.menu.meta.unfavorite,
-      icon: !folder?.is_favorite ? IconHeart : IconHeart,
-      disabled: isRoot,
+      label: folder?.is_favorite ? localeMsg.value.menu.meta.unfavorite : localeMsg.value.menu.meta.favorite,
+      icon: folder?.is_favorite ? IconHeartFilled : IconHeart,
       action: () => {
-        toggleFavorite();
+        void toggleFolderFavorite(folder);
       }
     },
     {
@@ -252,20 +303,44 @@ const getMenuItemsForFolder = (folder: any) => {
       }
     },
     {
-      label: localeMsg.value.menu.file.move_to,
-      icon: IconMoveTo,
-      disabled: isRoot,
+      label: t('menu.file.paste'),
+      icon: IconClipboard,
+      shortcut: getShortcutLabel('file.paste', DEFAULT_PLATFORM),
+      disabled: !canPaste,
       action: () => {
-        showMoveTo.value = true;
+        void tauriEmit('paste-clipboard-to-folder', {
+          albumId: props.albumId,
+          folderPath: folder.path,
+        });
       }
     },
     {
-      label: localeMsg.value.menu.file.copy_to,
-      // icon: IconCopyTo, 
+      label: t('menu.file.move_copy'),
       disabled: isRoot,
-      action: () => {
-        showCopyTo.value = true;
-      }
+      children: [
+        {
+          label: t('menu.file.move_within_library'),
+          icon: IconMove,
+          disabled: isRoot,
+          action: () => {
+            showMoveTo.value = true;
+          }
+        },
+        {
+          label: t('menu.file.move_to_folder'),
+          disabled: isRoot,
+          action: () => {
+            void clickMoveToFolder();
+          }
+        },
+        {
+          label: t('menu.file.copy_to_folder'),
+          disabled: isRoot,
+          action: () => {
+            void clickCopyToFolder();
+          }
+        },
+      ]
     },
     {
       label: isMac ? localeMsg.value.menu.file.reveal_in_finder : localeMsg.value.menu.file.reveal_in_file_explorer,
@@ -274,19 +349,42 @@ const getMenuItemsForFolder = (folder: any) => {
       }
     },
     {
+      label: "-",
+      action: null
+    },
+    {
       label: localeMsg.value.menu.album.refresh,
       icon: IconRefresh,
-      action: () => {
-        tauriEmit('refresh-content');
-        // always refresh the folder tree as well
-        expandFolder(folder, true);
+      action: async () => {
+        // The context-menu target may differ from the folder currently shown
+        // in Content. Select and sync this exact folder before reloading its
+        // tree, so the filesystem and database cannot drift apart.
+        await selection.selectFolder(props.albumId, folder);
+        const folderId = Number(selection.folderId.value || 0);
+        if (folderId > 0) {
+          await syncAlbumFolderMtimes(props.albumId, folderId, folder.path);
+        }
+        await expandFolder(folder, true);
+        await tauriEmit('refresh-content');
       }
     },
     {
-      label: isMac ? localeMsg.value.menu.file.move_to_trash : localeMsg.value.menu.file.delete,
+      label: folder?.is_excluded_from_search ? localeMsg.value.menu.album.include_in_search : localeMsg.value.menu.album.exclude_from_search,
+      icon: folder?.is_excluded_from_search ? IconUnhide : IconHide,
+      action: () => {
+        toggleFolderSearchExcluded(folder);
+      }
+    },
+    {
+      label: "-",
+      action: null
+    },
+    {
+      label: localeMsg.value.menu.file.move_to_trash,
       icon: IconTrash,
       disabled: isRoot,
       action: () => {
+        deletePermanently.value = permanentDeleteChecked.value;
         showTrashFolderMsgbox.value = true;
       }
     },
@@ -302,13 +400,28 @@ const clickFolder = async (albumIdVal: number, folder: Folder) => {
   await selection.selectFolder(albumIdVal, folder);
 };
 
+const toggleFolderFavorite = async (folder: Folder) => {
+  const persistedFolder = await selectFolderInDb(props.albumId, folder.path);
+  const folderId = Number(persistedFolder?.id || 0);
+  if (folderId <= 0) return;
+
+  const nextValue = !folder.is_favorite;
+  const result = await setFolderFavorite(folderId, nextValue);
+  if (result !== null) {
+    folder.is_favorite = nextValue;
+  }
+};
+
 /// click expand icon to toggle folder expansion
 const expandFolder = async (folder: any, forceRefresh = false) => {
+  if (folder.is_excluded_from_search) return;
+  if (!forceRefresh && folder.has_subfolders === false) return;
   folder.is_expanded = forceRefresh ? true : !folder.is_expanded;
 
   if (folder.is_expanded && (!folder.children || forceRefresh)) {
     const subFolders = await fetchFolder(folder.path, false, config.settings.folderSort);
     if (subFolders) {
+      folder.has_subfolders = subFolders.has_subfolders;
       folder.children = subFolders.children;
     }
   }
@@ -403,9 +516,11 @@ const handleTreeKeyDown = async (event: { payload: { key: string } }) => {
       }
       break;
     case 'ArrowRight':
+      if (currentFolder.has_subfolders === false) break;
       if (!currentFolder.children || currentFolder.children.length === 0) {
         const subFolders = await fetchFolder(currentFolder.path, false, config.settings.folderSort);
         if (subFolders) {
+          currentFolder.has_subfolders = subFolders.has_subfolders;
           currentFolder.children = subFolders.children;
         }
       }
@@ -564,22 +679,169 @@ const clickMoveTo = async () => {
   });
 };
 
-// copy folder to dest folder
-const clickCopyTo = async () => {
-  copyFolder(selection.folderPath.value, libConfig.destFolder.folderPath ?? '').then((newPath) => {
-    if (newPath) {
-      // close copy-to dialog
-      showCopyTo.value = false;
-    } else {
-      toast.error(localeMsg.value.msgbox.copy_to.error);
-    }
+const selectSystemDestination = async (title: string) => {
+  const destination = await openDialog({
+    title,
+    multiple: false,
+    directory: true,
+  });
+  return !destination || Array.isArray(destination) ? null : String(destination);
+};
+
+const requestFileConflict = (
+  name: string,
+  destination: string,
+  allowReplace = true,
+): Promise<FileConflictPolicy> => {
+  fileConflictDialog.value = { show: true, name, destination, allowReplace };
+  return new Promise(resolve => {
+    fileConflictResolver = resolve;
   });
 };
 
-/// trash selected folder
+const resolveFileConflict = (result: { policy: FileConflictPolicy }) => {
+  fileConflictDialog.value.show = false;
+  fileConflictResolver?.(result.policy);
+  fileConflictResolver = null;
+};
+
+const resolveFolderConflictPolicy = async (
+  folder: Folder,
+  destPath: string,
+  sameDestinationMeansSkip: boolean,
+) => {
+  const destinationPath = getFullPath(destPath, folder.name);
+  const isSamePath =
+    normalizePathForCompare(folder.path) === normalizePathForCompare(destinationPath);
+  if (sameDestinationMeansSkip && isSamePath) {
+    toast.info(t('msgbox.file_conflict.same_folder'));
+    return 'skip' as FileConflictPolicy;
+  }
+  return await checkFileExists(destinationPath)
+    ? requestFileConflict(folder.name, destPath, !isSamePath)
+    : 'keep_both' as FileConflictPolicy;
+};
+
+const removeSelectedFolderFromTree = () => {
+  const folderPath = selection.folderPath.value;
+  if (!props.children) return;
+  const index = (props.children as Folder[]).findIndex(child => child.path === folderPath);
+  if (index !== -1) {
+    (props.children as Folder[]).splice(index, 1);
+  }
+};
+
+const clickMoveToFolder = async () => {
+  const folder = selectedFolder.value;
+  if (!folder) return;
+
+  const destPath = await selectSystemDestination(t('msgbox.move_to_folder.title'));
+  if (!destPath) return;
+
+  const oldAlbumId = Number(selection.albumId.value || 0);
+  const albums = await getAllAlbums();
+  const destinationAlbum = Array.isArray(albums)
+    ? albums.find(album => isWithinRootPath(destPath, album.path))
+    : null;
+  const conflictPolicy = await resolveFolderConflictPolicy(folder, destPath, true);
+  if (conflictPolicy === 'skip') return;
+
+  if (!destinationAlbum) {
+    const confirmed = await ask(
+      t('msgbox.move_to_folder.warning', { source: folder.name, dest: destPath }),
+      {
+        title: t('msgbox.move_to_folder.confirm_title'),
+        kind: 'warning',
+        okLabel: t('msgbox.move_to_folder.ok'),
+        cancelLabel: t('msgbox.cancel'),
+      },
+    );
+    if (!confirmed) return;
+  }
+
+  const newPath = destinationAlbum
+    ? await moveFolder(folder.path, destinationAlbum.id, destPath, conflictPolicy)
+    : await moveFolderOutsideLibrary(folder.path, destPath, conflictPolicy);
+  if (!newPath) {
+    toast.error(t('msgbox.move_to_folder.error', { source: folder.name, dest: destPath }));
+    return;
+  }
+
+  removeSelectedFolderFromTree();
+  toast.success(t('msgbox.move_to_folder.success', { source: folder.name, dest: destPath }));
+  const albumIds = new Set([oldAlbumId, Number(destinationAlbum?.id || 0)]);
+  const refreshedAlbums = (
+    await Promise.all(Array.from(albumIds).filter(id => id > 0).map(id => recountAlbum(id)))
+  ).filter(Boolean);
+  if (refreshedAlbums.length > 0) await tauriEmit('albums-refreshed', { albums: refreshedAlbums });
+  if (destinationAlbum) {
+    await selection.expandAndSelectFolder(destinationAlbum.id, newPath);
+  } else {
+    await selection.expandAndSelectFolder(oldAlbumId, getFolderPath(folder.path));
+  }
+  await tauriEmit('library-total-refreshed', { source: 'album-folder' });
+  await tauriEmit('refresh-content');
+};
+
+const clickCopyToFolder = async () => {
+  const folder = selectedFolder.value;
+  if (!folder) return;
+
+  const destPath = await selectSystemDestination(t('msgbox.copy_to_folder.title'));
+  if (!destPath) return;
+
+  const conflictPolicy = await resolveFolderConflictPolicy(folder, destPath, false);
+  if (conflictPolicy === 'skip') return;
+
+  const albums = await getAllAlbums();
+  const destinationAlbum = Array.isArray(albums)
+    ? albums.find(album => isWithinRootPath(destPath, album.path))
+    : null;
+  const newPath = await copyFolder(
+    folder.path,
+    destPath,
+    Number(destinationAlbum?.id || 0),
+    conflictPolicy,
+  );
+  if (newPath) {
+    toast.success(t('msgbox.copy_to_folder.success', { source: folder.name, dest: destPath }));
+    if (destinationAlbum) {
+      const album = await recountAlbum(destinationAlbum.id);
+      if (album) await tauriEmit('albums-refreshed', { albums: [album] });
+      await tauriEmit('refresh-content');
+    }
+  } else {
+    toast.error(t('msgbox.copy_to_folder.error', { source: folder.name, dest: destPath }));
+  }
+};
+
+/// trash or permanently delete selected folder
 const clickTrashFolder = async () => {
   const folderName = selectedFolder.value?.name || '';
-  const isDeleted = await deleteFolder(selection.folderPath.value);
+  permanentDeleteChecked.value = deletePermanently.value;
+  const deleteFn = deletePermanently.value ? deleteFolderPermanently : deleteFolder;
+  let deleteResult = 0;
+  let deleteErrored = false;
+  try {
+    deleteResult = await deleteFn(selection.folderPath.value);
+  } catch (error) {
+    deleteErrored = true;
+    console.error('Failed to delete folder:', error);
+  }
+  if (deleteErrored) {
+    toast.error(
+      deletePermanently.value
+        ? t('msgbox.permanent_delete.folder_error')
+        : t('msgbox.move_to_trash.folder_error')
+    );
+    return;
+  }
+  if (!deletePermanently.value && !deleteResult) {
+    showTrashFolderMsgbox.value = false;
+    showTrashFailedFolderMsgbox.value = true;
+    return;
+  }
+  const isDeleted = !!deleteResult;
   if (isDeleted) {
     const deletedFolderPath = selection.folderPath.value;
 
@@ -606,22 +868,48 @@ const clickTrashFolder = async () => {
 
     showTrashFolderMsgbox.value = false;
     toast.success(
-      localeMsg.value.msgbox.trash_folder.success.replace('{folder}', folderName)
+      deletePermanently.value
+        ? t('msgbox.permanent_delete.folder_success', { folder: folderName })
+        : t('msgbox.move_to_trash.folder_success', { folder: folderName })
     );
   } else {
-    console.log('AlbumFolder.vue-clickTrashFolder', localeMsg.value.msgbox.trash_folder.error);
-    toast.error(localeMsg.value.msgbox.trash_folder.error);
+    toast.error(
+      deletePermanently.value
+        ? t('msgbox.permanent_delete.folder_error')
+        : t('msgbox.move_to_trash.folder_error')
+    );
   }
 };
 
-/// toggle folder favorite
-const toggleFavorite = async () => {
-  const folder = selectedFolder.value;
-  if (!folder || !selection.folderId.value) {
+const confirmTrashFailedFolderDelete = async () => {
+  const previousDeletePermanently = deletePermanently.value;
+  const previousPermanentDeleteChecked = permanentDeleteChecked.value;
+  showTrashFailedFolderMsgbox.value = false;
+  deletePermanently.value = true;
+  try {
+    await clickTrashFolder();
+  } finally {
+    deletePermanently.value = previousDeletePermanently;
+    permanentDeleteChecked.value = previousPermanentDeleteChecked;
+  }
+};
+
+/// toggle whether folder and children are excluded from search
+const toggleFolderSearchExcluded = async (folder: Folder) => {
+  if (!folder?.path || !props.albumId) {
     return;
   }
-  folder.is_favorite = !folder.is_favorite;
-  await setFolderFavorite(selection.folderId.value, folder.is_favorite ?? false);
+
+  const nextValue = !folder.is_excluded_from_search;
+  const result = await setFolderSearchExcluded(props.albumId, folder.path, nextValue);
+  if (result !== null) {
+    folder.is_excluded_from_search = nextValue;
+    const album = await recountAlbum(props.albumId);
+    if (album) {
+      tauriEmit('albums-refreshed', { albums: [album], refreshFolders: false });
+    }
+    tauriEmit('library-total-refreshed');
+  }
 };
 
 </script>

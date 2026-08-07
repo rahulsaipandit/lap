@@ -6,11 +6,11 @@
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/v/release/julyx10/lap" alt="GitHub release"></a>
     <a href="https://github.com/julyx10/lap/releases"><img src="https://img.shields.io/github/downloads/julyx10/lap/total" alt="GitHub all releases"></a>
     <a href="https://github.com/julyx10/lap/stargazers"><img src="https://img.shields.io/github/stars/julyx10/lap" alt="GitHub stars"></a>
-    <a href="https://github.com/julyx10/lap/blob/main/LICENSE"><img src="https://img.shields.io/github/license/julyx10/lap" alt="GitHub license"></a>
   </p>
 </div>
 
-English | [简体中文](i18n/README.zh-CN.md) | [日本語](i18n/README.ja.md) | [한국어](i18n/README.ko.md) | [Deutsch](i18n/README.de.md) | [Français](i18n/README.fr.md) | [Español](i18n/README.es.md) | [Português](i18n/README.pt.md) | [Русский](i18n/README.ru.md)
+
+English | [Deutsch](i18n/README.de.md) | [Français](i18n/README.fr.md) | [Español](i18n/README.es.md) | [Português](i18n/README.pt.md) | [Русский](i18n/README.ru.md) | [简体中文](i18n/README.zh-CN.md) | [日本語](i18n/README.ja.md) | [한국어](i18n/README.ko.md)
 
 Lap is an open-source, local-first photo manager for browsing family albums, finding old photos quickly, and managing large personal media libraries offline.
 It is a privacy-focused alternative to cloud photo services: no forced upload, local AI search, folder-first workflow, and free to use.
@@ -23,117 +23,144 @@ It is a privacy-focused alternative to cloud photo services: no forced upload, l
 
 Open the [latest release page](https://github.com/julyx10/lap/releases/latest), then download the file that matches your system:
 
-| Platform | Package | Status |
+| Platform | Package | Note |
 | :-- | :-- | :-- |
-| **macOS (Apple Silicon)** | `_aarch64.dmg` | Notarized by Apple |
-| **macOS (Intel)** | `_x64.dmg` | Notarized by Apple |
-| **Windows 10/11 (x64)** | `_x64_en-US.msi` | Currently unsigned (SmartScreen warning may appear) |
-| **Windows 10/11 (ARM64)** | `_arm64_en-US.msi` | Currently unsigned (SmartScreen warning may appear) |
-| **Ubuntu/Debian (amd64)** | `_amd64.deb` | For better video playback support, see the Linux note below. |
+| **macOS (Apple Silicon / Intel)** | `_aarch64.dmg` / `_x64.dmg` | Notarized by Apple |
+| **Windows 10/11 (x64 / ARM64)** | `_x64_en-US.msi` / `_arm64_en-US.msi` | Unsigned — if SmartScreen blocks the download, click **Keep anyway** |
+| **Linux (amd64 / arm64)** | `_amd64.deb` / `_arm64.deb` | For Debian-based distros (Ubuntu, Debian, Linux Mint, etc.) |
 
-## Windows Installation
-
-### Option 1: Download Prebuilt Installer (Recommended for End Users)
-Download the Windows MSI from the [latest release](https://github.com/julyx10/lap/releases/latest):
-- For x64 systems: `_x64_en-US.msi`
-- For ARM64 systems: `_arm64_en-US.msi`
-Run the MSI installer and launch Lap from your Start menu.
-
-### Option 2: Build from Source (For Developers)
-Ensure prerequisites: Node.js 20+, pnpm, Rust stable.
-
-```powershell
-# Update submodules
-Why do I need to run this - To initialize and update Git submodules, which contain the source code for dependencies like LibRaw (for RAW image decoding) and libheif (for HEIC/HEIF decoding). These submodules are required for building Lap, as the project depends on their code rather than precompiled libraries. Without this step, the Rust build will fail due to missing submodule sources.
-Run: 
-  git submodule update --init --recursive
-
-# Install Tauri CLI
-Install Rust first, as cargo is the Rust package manager. On Windows, download and run the installer from https://rustup.rs/ or use PowerShell: Invoke-WebRequest -Uri https://win.rustup.rs -OutFile rustup-init.exe; .\rustup-init.exe -y. After installation, restart your terminal and run the cargo command.
-
-Run: 
-  cargo install tauri-cli --version "^2.0.0" --locked
-
-# Download models and FFmpeg
-.\scripts\download_models.ps1
-.\scripts\download_ffmpeg_sidecar.ps1
-
-# Install frontend dependencies
-cd src-vite
-pnpm install
-cd ..
-
-## Check Chocolatey Version and if it is installed
-choco --version
-2.4.3
-
-Run:
-   choco install cmake --yes
-
-
-# Run in development mode
-cargo tauri dev
-```
-
-To build a release installer: `cargo tauri build` (outputs MSI in `src-tauri\target\release\bundle\msi\`).
-
-### Linux Video Playback Notes
-
-On Ubuntu/Debian/Linux Mint, install these packages for better video playback support:
+### macOS with Homebrew
 
 ```bash
-sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+brew tap julyx10/lap
+brew install --cask lap
 ```
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/public/screenshots/lap-home-0.1.10_1.png" alt="Lap local photo library manager screenshot" width="900">
+  <img src="docs/public/screenshots/Lap_0.3.0_main_1.png" alt="Lap local photo library manager screenshot" width="900">
 </p>
-
-<p align="center">
-  <img src="docs/public/screenshots/lap-home-0.1.10_2.png" alt="Lap local AI photo search screenshot" width="900">
-</p>
-
-> Screenshot sample images come from [Wikimedia Commons](https://commons.wikimedia.org/).
 
 ## Why Lap
 
-- **No cloud required**: keep your library on your own disk instead of uploading it to a hosted service.
-- **Private by default**: processing happens locally, so your photos stay under your control.
-- **Free to use**: no subscription plan or recurring fee.
-- **Folder-first**: work directly with your existing folders, no import step required.
-- **High performance for large libraries**: optimized for smooth browsing and organization across huge media collections (100k+ files per library).
+- **Local-first by design**: your photos stay on your own disk, with no required cloud account or upload.
+- **No library lock-in**: work directly with your existing folders instead of importing everything into a closed database.
+- **Private AI tools**: search, similarity, smart tags, and face features run locally on your machine.
+- **Built for large collections**: optimized for smooth browsing and organization across libraries with 100k+ files.
+- **Open source and free**: no subscription, no forced ecosystem, and code you can inspect.
 
 ## Features
 
-- **Browse and filter** by date, location, camera, lens, tags, favorites, ratings, and faces (BETA).
-- **Manage multiple libraries** and switch between them quickly.
-- **Find duplicates** and batch move unwanted copies to trash.
-- **Edit in place** with crop, rotate, flip, resize, and basic adjustments.
-- **Keep folders in sync** with filesystem-aware operations and refresh support.
-- **Use local search tools** such as text/image search, similar-image search, face clustering, and smart tags.
-- **Open modern image formats** including WebP, HEIC/HEIF/HIF, AVIF, and JXL (JPEG XL).
-- **View RAW photos** with built-in decoding for 20+ camera RAW formats (CR2, NEF, ARW, DNG, etc.).
-- **Broad video compatibility** supporting MP4, MOV, AVI, MKV, and 20+ other formats with cross-platform optimization.
+- **Flexible library browsing** with timeline, folder, location, camera, lens, tag, favorite, rating, subject, and face filters.
+- **Smart Albums** save rule-based views with custom grouping, sorting, ordering.
+- **Collection tray** keep ad-hoc collections of files without moving them from their original folders.
+- **Local AI search** for text prompts, visual similarity, subjects, face clustering, and optional multilingual search in 50+ languages.
+- **Apple Live Photos** recognize paired HEIC/MOV Live Photos, play them in the viewer, and keep linked MOV and AAE sidecars together during rename, move, copy, and delete operations.
+- **RAW + JPEG/HEIC pairs** optionally group a RAW file and its same-named JPEG or HEIC companion in the same folder as one item. The originals remain separate files, while rename, move, copy, paste, and delete operations keep the pair together.
+- **Folder-first workflow** with multiple libraries, drag-and-drop import, copy-paste import, filesystem sync, and safe move/copy/delete operations.
+- **Review and comparison tools** including a four-pane image comparison viewer.
+- **Cleanup tools** to find duplicates and batch move unwanted files to trash.
+- **Built-in editing** for crop, rotate, flip, resize, and basic image adjustments.
+- **Broad format support** for 60+ photo, RAW, and video formats.
 
-## Planned Features
+## Metadata, Collections, and Moving Files
 
-- **Support Live Photos and Motion Photos** for mixed photo/video workflows.
-- **Expand metadata support** for EXIF, XMP, and IPTC workflows.
+Lap is folder-first, but not every piece of information shown in Lap is embedded in the original file. This distinction matters when you also manage the same folders in Finder, Explorer, or another photo app.
+
+### What stays with the file
+
+- Your original photos and videos always remain ordinary files in their existing folders.
+- File metadata already embedded in a file, such as EXIF capture date, camera, lens, GPS, and orientation, is read from that file when Lap indexes it.
+- Saving a built-in image edit writes the resulting image to the selected destination. This is separate from Lap's library-only display rotation.
+- When you rename, move, copy, or delete files **in Lap**, Lap updates its local catalog at the same time. It also keeps supported grouped assets, such as Apple Live Photo components, AAE sidecars, and enabled RAW + JPEG/HEIC pairs, together.
+
+### What is stored locally by Lap
+
+The following are Lap library data. They are stored in Lap's local database or library configuration, not written into EXIF, IPTC, or XMP sidecars:
+
+- Collections and their membership
+- Tags
+- Comments
+- Favorites, ratings, and review states (including Picks and Rejects)
+- Lap's display rotation and other library-only state
+- Smart Albums and their rules, grouping, sorting, and ordering
+- AI search data, face data, thumbnails, and other index/cache data
+
+This data does not travel with a file when it is copied, exported, or moved outside Lap, and it is not available automatically to other applications.
+
+### Working with files outside Lap
+
+Lap can rescan folders and detect many filesystem changes. However, when files are renamed, moved, replaced, or copied outside Lap, Lap cannot guarantee that local associations—especially Collection membership and other library-only data—will follow the file.
+
+For a workflow that depends on Collections, Tags, Comments, Favorites, Ratings, review states, or Lap rotation, use Lap for file moves and renames whenever possible. If you work extensively outside Lap, treat those features as local-to-Lap organization and keep a backup of Lap's database and configuration alongside your photo backup. You can view or change the database location, and create a database backup, in **Settings → Storage**.
+
+Deleting Lap's database or configuration removes this local organization and index data, but does not delete your original media files.
+
+## Uninstall Lap
+
+Lap works directly with your existing photo folders. Uninstalling Lap, or deleting its database and cache files, does **not** delete your original photos.
+
+The standard uninstall steps remove the application. To remove Lap completely, quit Lap first, uninstall the application, then delete its local database, thumbnail cache, and configuration files using the cleanup command for your platform.
+
+### macOS
+
+If you installed Lap with Homebrew:
+
+```bash
+brew uninstall --cask lap
+```
+
+For a manual installation, quit Lap and move `Lap.app` from the `Applications` folder to the Trash.
+
+To remove all Lap database, cache, and configuration files:
+
+```bash
+rm -rf "$HOME/Library/Application Support/com.julyx10.lap" \
+       "$HOME/Library/Caches/com.julyx10.lap" \
+       "$HOME/Library/WebKit/com.julyx10.lap"
+rm -f "$HOME/Library/Preferences/com.julyx10.lap.plist"
+```
+
+### Windows
+
+Open **Settings > Apps > Installed apps**, find **Lap**, and select **Uninstall**.
+
+Then open PowerShell and remove all Lap database, cache, and configuration files:
+
+```powershell
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\com.julyx10.lap"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:APPDATA\com.julyx10.lap"
+```
+
+### Linux
+
+For Debian-based distributions, uninstall the package:
+
+```bash
+sudo apt remove lap
+```
+
+Then remove all Lap database, cache, and configuration files:
+
+```bash
+rm -rf "$HOME/.local/share/com.julyx10.lap" \
+       "$HOME/.cache/com.julyx10.lap" \
+       "$HOME/.config/com.julyx10.lap"
+```
+
+If you selected a custom database storage directory in Lap settings, delete that directory separately after confirming that it contains only Lap database files.
 
 ## Build from Source
 
 Requirements: Node.js 20+, pnpm, Rust stable.
-
-For Linux runtime video playback, see the package note in the download section above.
 
 ```bash
 # macOS system deps
 xcode-select --install
 brew install nasm pkg-config autoconf automake libtool cmake
 
-# Linux system deps (Ubuntu/Debian)
+# Linux system deps
 # sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
 #   patchelf nasm clang pkg-config autoconf automake libtool cmake
 
@@ -150,11 +177,21 @@ cargo tauri dev
 
 ## Supported Formats
 
+Lap supports 60+ photo, RAW, and video formats.
+
 | Type | Formats |
 | :--- | :--- |
-| Images | JPG/JPEG, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL |
+| Images | JPG/JPEG/JFIF, PNG, GIF, BMP, TIFF, WebP, HEIC/HEIF/HIF, AVIF, JXL, PSD, EXR, HDR/RGBE, TGA, JPEG 2000 (JP2/J2K/J2C/JPC/JPF/JPX), DDS, DPX, QOI |
 | RAW photos | CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, RAF, RW2, ORF, PEF, DNG, SRW, RWL, MRW, 3FR, MOS, DCR, KDC, ERF, MEF, RAW, MDC |
 | Videos | MP4, MOV, M4V, MKV, AVI, FLV, TS/M2TS, WMV, WebM, 3GP/3G2, F4V, VOB, MPG/MPEG, ASF, DIVX and more. H.264 playback is supported on all platforms, with automatic compatibility processing when native playback is unavailable. HEVC/H.265 and VP9 are natively supported on macOS. |
+
+### Linux Video Playback Notes
+
+On Ubuntu/Debian/Linux Mint, install these packages for better video playback support:
+
+```bash
+sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good
+```
 
 ## Architecture
 
@@ -168,7 +205,9 @@ cargo tauri dev
 | :-- | :-- |
 | [LibRaw](https://github.com/LibRaw/LibRaw) | RAW image decoding and thumbnail extraction |
 | [libheif](https://github.com/strukturag/libheif) | HEIC/HEIF/HIF image decoding and preview generation |
+| [libjpeg-turbo](https://libjpeg-turbo.org/) | Fast JPEG decoding and thumbnail generation |
 | [FFmpeg](https://ffmpeg.org/) | Video processing and thumbnail generation |
+| [Video.js](https://videojs.com/) | Cross-platform video playback UI |
 | [ONNX Runtime](https://onnxruntime.ai/) | Local AI model inference engine |
 | [CLIP](https://github.com/openai/CLIP) | Image-text similarity search |
 | [InsightFace](https://github.com/deepinsight/insightface) | Face detection and recognition |

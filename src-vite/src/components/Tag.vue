@@ -2,23 +2,10 @@
 
   <div class="sidebar-panel">
     <div class="sidebar-panel-header">
-      <div role="tablist" class="sidebar-header-tabs">
-        <button
-          role="tab"
-          :class="['sidebar-header-tab', activeTab === 'smart' ? 'tab-active' : '']"
-          @click="activeTab = 'smart'"
-        >
-          {{ localeMsg.tag.smart_group }}
-        </button>
-        <button
-          role="tab"
-          :class="['sidebar-header-tab', activeTab === 'custom' ? 'tab-active' : '']"
-          @click="activeTab = 'custom'"
-        >
-          {{ localeMsg.tag.custom_group }}
-        </button>
-      </div>
-      <div v-if="activeTab === 'custom'" class="flex items-center gap-1">
+      <span class="sidebar-panel-header-title flex-1">
+        {{ localeMsg.tag.title }}<template v-if="allTags.length > 0"> ({{ allTags.length.toLocaleString() }})</template>
+      </span>
+      <div class="flex items-center gap-1">
         <TButton
           :icon="IconAdd"
           :buttonSize="'small'"
@@ -28,30 +15,43 @@
       </div>
     </div>
 
-    <div class="grow overflow-x-hidden overflow-y-auto">
-      <ul v-if="activeTab === 'smart'">
-        <li v-for="item in smartTagItems" :key="item.id" :id="'smart-tag-' + item.id">
-          <div
-            :class="[
-              'sidebar-item',
-              selectedSmartTagId === item.id ? 'sidebar-item-selected' : 'sidebar-item-hover',
-            ]"
-            @click="selectSmartTag(item.id)"
-          >
-            <IconSmartTag class="mx-1 h-5 shrink-0" />
-            <span class="sidebar-item-label">{{ item.label }}</span>
-          </div>
-        </li>
-      </ul>
+    <div class="mx-1 mb-2 px-1 shrink-0">
+      <div
+        :class="[
+          'h-8 flex items-center rounded-box transition-colors bg-base-100/40',
+          isTagSearchFocused ? 'border-2 border-primary' : 'border border-base-content/10 hover:border-base-content/30',
+        ]"
+      >
+        <IconSearch class="ml-2 w-4 h-4 shrink-0" :class="isTagSearchFocused ? 'text-primary/70' : 'text-base-content/30'" />
+        <input
+          type="text"
+          v-model="tagSearch"
+          :placeholder="$t('tag.search_tags')"
+          class="w-full min-w-0 bg-transparent border-none focus:ring-0 px-2 text-sm placeholder-base-content/30 focus:outline-none"
+          @focus="isTagSearchFocused = true"
+          @blur="isTagSearchFocused = false"
+        />
+        <button
+          v-if="tagSearch"
+          type="button"
+          class="mr-1 p-1 rounded-box text-base-content/30 hover:text-base-content/70"
+          @click="tagSearch = ''"
+        >
+          <IconClose class="w-4 h-4" />
+        </button>
+      </div>
+    </div>
 
-      <ul v-else-if="allTags.length > 0">
-        <li v-for="tag in sortedTags" :key="tag.id" :id="'tag-' + tag.id">
+    <div class="grow overflow-x-hidden overflow-y-auto">
+      <ul v-if="filteredTags.length > 0">
+        <li v-for="tag in filteredTags" :key="tag.id" :id="'tag-' + tag.id">
           <div
             :class="[
               'sidebar-item group',
               selectedTag && selectedTag.id === tag.id && !isRenamingTag ? 'sidebar-item-selected' : 'sidebar-item-hover',
             ]"
             @click="selectTag(tag)"
+            @contextmenu.prevent.stop="(e: MouseEvent) => handleTagContextMenu(tag, e)"
           >
             <IconTag class="mx-1 h-5 shrink-0" />
             <input v-if="selectedTag && selectedTag.id === tag.id && isRenamingTag"
@@ -65,15 +65,13 @@
               @blur="handleRenameTag"
             />
             <span v-else class="sidebar-item-label">{{ tag.name }}</span>
-            <span v-if="!isRenamingTag && tag.count" class="sidebar-item-count">{{ tag.count.toLocaleString() }}</span>
+            <span v-if="!isRenamingTag && tag.count" :class="['sidebar-item-count', selectedTag?.id === tag.id ? 'hidden' : 'group-hover:hidden']">{{ tag.count.toLocaleString() }}</span>
             <div
               v-if="!isRenamingTag"
-              :class="[
-                'ml-auto flex flex-row items-center text-base-content/30',
-                selectedTag && selectedTag.id === tag.id ? '' : 'hidden'
-              ]"
+              :class="['ml-auto flex flex-row items-center text-base-content/30', selectedTag?.id === tag.id ? '' : 'hidden group-hover:flex']"
             >
               <ContextMenu
+                :ref="(el: any) => { if (el) tagContextMenus[tag.id] = el }"
                 :iconMenu="IconMore"
                 :menuItems="getMoreMenuItems()"
                 :smallIcon="true"
@@ -82,6 +80,10 @@
           </div>
         </li>
       </ul>
+
+      <div v-else-if="allTags.length > 0" class="sidebar-empty text-sm">
+        <span class="text-center">{{ $t('tag.not_found') }}</span>
+      </div>
 
       <div v-else class="mt-2 px-2 flex flex-col items-center justify-center text-base-content/30">
         <!-- <IconTag class="w-8 h-8 mb-2" /> -->
@@ -124,13 +126,13 @@ import { config, libConfig } from '@/common/config';
 import { getAllTags, renameTag, deleteTag, createTag } from '@/common/api';
 import { 
   IconAdd,
+  IconClose,
   IconMore,
-  IconSmartTag,
+  IconSearch,
   IconTag,
   IconRename, 
   IconTrash,
 } from '@/common/icons';
-import { SMART_TAG_CATEGORIES, getSmartTagById } from '@/common/smartTags';
 
 import ContextMenu from '@/components/ContextMenu.vue';
 import MessageBox from '@/components/MessageBox.vue';
@@ -152,32 +154,28 @@ const emit = defineEmits(['editDataChanged']);
 // tags
 const allTags = ref<any[]>([]);
 const selectedTag = ref<any>(null);
-const selectedSmartTagId = ref<string | null>(libConfig.tag.smartId || null);
-const activeTab = computed<'smart' | 'custom'>({
-  get: () => (libConfig.tag.tab === 'smart' ? 'smart' : 'custom'),
-  set: (value) => {
-    libConfig.tag.tab = value;
-  },
-});
 const isRenamingTag = ref(false);
 const originalTagName = ref('');
 const tagInputRef = ref<HTMLInputElement[]>([]);
+const tagSearch = ref('');
+const isTagSearchFocused = ref(false);
 
 const sortedTags = computed(() => allTags.value);
-
-const smartTagItems = computed(() => {
-  return SMART_TAG_CATEGORIES.map(category => {
-    const item = category.items[0];
-    return {
-      id: item.id,
-      label: localeMsg.value.tag.smart_items?.[item.id] || item.id,
-    };
-  });
+const filteredTags = computed(() => {
+  const query = tagSearch.value.trim().toLowerCase();
+  if (!query) return sortedTags.value;
+  return sortedTags.value.filter(tag => tag.name.toLowerCase().includes(query));
 });
 
 // message boxes
 const showDeleteTagMsgbox = ref(false);
 const showNewTagMsgbox = ref(false);
+const tagContextMenus = ref<Record<number, any>>({});
+
+function handleTagContextMenu(tag: any, event: MouseEvent) {
+  selectTag(tag);
+  tagContextMenus.value[tag.id]?.open?.(event.clientX, event.clientY);
+}
 
 // more menuitems
 const getMoreMenuItems = () => [
@@ -194,6 +192,7 @@ const getMoreMenuItems = () => [
       });
     }
   },
+  { label: "-", action: null },
   {
     label: localeMsg.value.menu.tag.delete,
     icon: IconTrash,
@@ -204,13 +203,6 @@ const getMoreMenuItems = () => [
 ];
 
 onMounted(() => {
-  if (selectedSmartTagId.value && !getSmartTagById(selectedSmartTagId.value)) {
-    selectedSmartTagId.value = null;
-    libConfig.tag.smartId = null;
-    if (activeTab.value === 'smart') {
-      activeTab.value = 'custom';
-    }
-  }
   loadTags();
 });
 
@@ -239,16 +231,8 @@ async function loadTags() {
 
 function selectTag(tag: any) {
   if (isRenamingTag.value) return;
-  activeTab.value = 'custom';
   selectedTag.value = tag;
   libConfig.tag.id = tag.id;
-}
-
-function selectSmartTag(smartTagId: string) {
-  if (isRenamingTag.value) return;
-  activeTab.value = 'smart';
-  selectedSmartTagId.value = smartTagId;
-  libConfig.tag.smartId = smartTagId;
 }
 
 async function handleRenameTag() {

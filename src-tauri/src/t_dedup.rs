@@ -15,11 +15,13 @@ use tauri::Emitter;
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct DedupScanStatus {
     pub state: String, // "running", "idle", "finished", "error"
     pub processed: u64,
     pub total: u64,
     pub groups: u64,
+    pub is_scanning: bool,
 }
 
 impl Default for DedupScanStatus {
@@ -29,6 +31,7 @@ impl Default for DedupScanStatus {
             processed: 0,
             total: 0,
             groups: 0,
+            is_scanning: false,
         }
     }
 }
@@ -39,6 +42,7 @@ pub struct DedupDeleteResult {
     pub deleted_file_ids: Vec<i64>,
     pub failed_count: usize,
     pub errors: Vec<String>,
+    pub trash_failed_file_ids: Vec<i64>,
 }
 
 #[derive(Default)]
@@ -63,7 +67,13 @@ pub fn start_scan(
     app_handle: tauri::AppHandle,
     dedup_state: tauri::State<'_, DedupState>,
     query_params: Option<QueryParams>,
+    collection_id: Option<i64>,
+    file_ids: Option<Vec<i64>>,
 ) -> Result<(), String> {
+    if file_ids.is_some() && (collection_id.is_some() || query_params.is_some()) {
+        return Err("File ID scope cannot be combined with query or collection scope.".into());
+    }
+
     if dedup_state
         .is_scanning
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -84,11 +94,18 @@ pub fn start_scan(
         status.processed = 0;
         status.total = 0;
         status.groups = 0;
+        status.is_scanning = true;
     }
 
     std::thread::spawn(move || {
-        let result =
-            scan_and_hash_files(&app_handle, &status_clone, &cancel_flag_clone, query_params);
+        let result = scan_and_hash_files(
+            &app_handle,
+            &status_clone,
+            &cancel_flag_clone,
+            query_params,
+            collection_id,
+            file_ids,
+        );
 
         let mut final_status = status_clone.lock().unwrap();
         match result {
@@ -106,6 +123,7 @@ pub fn start_scan(
         }
 
         is_scanning_clone.store(false, Ordering::SeqCst);
+        final_status.is_scanning = false;
         let _ = app_handle.emit("dedup-scan-progress", final_status.clone());
     });
 
@@ -117,21 +135,20 @@ fn scan_and_hash_files(
     status_mutex: &Arc<Mutex<DedupScanStatus>>,
     cancel_flag: &Arc<AtomicBool>,
     query_params: Option<QueryParams>,
+    collection_id: Option<i64>,
+    file_ids: Option<Vec<i64>>,
 ) -> Result<(), String> {
     let mut conn = get_db_conn()?;
-    let has_scope = query_params.is_some();
+    let has_scope = collection_id.is_some() || file_ids.is_some() || query_params.is_some();
 
-    let files_to_check = if let Some(params) = query_params.as_ref() {
+    let files_to_check = if let Some(file_ids) = file_ids {
+        AFile::get_files_by_ids(&file_ids)?
+    } else if let Some(collection_id) = collection_id {
+        get_files_by_collection(collection_id, query_params.as_ref())?
+    } else if let Some(params) = query_params.as_ref() {
         get_files_by_query(params)?
     } else {
-        // Step 1: Find suspicious sizes (sizes shared by >1 file)
-        let suspicious_sizes = get_suspicious_file_sizes(&conn)?;
-        if suspicious_sizes.is_empty() {
-            rebuild_duplicate_groups(&mut conn, None)?;
-            return Ok(());
-        }
-        // Step 2: Get all files with those sizes
-        get_files_by_sizes(&conn, &suspicious_sizes)?
+        get_files_by_sizes(&conn)?
     };
 
     let files_to_check = filter_suspicious_files(files_to_check);
@@ -236,32 +253,10 @@ fn get_db_conn() -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn get_suspicious_file_sizes(conn: &Connection) -> Result<Vec<i64>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT size 
-         FROM afiles 
-         GROUP BY size 
-         HAVING COUNT(size) > 1 AND size > 0",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let sizes = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .collect();
-
-    Ok(sizes)
-}
-
-fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, String> {
-    // Basic trick: parameterize the sizes. SQLite limits to 999 max vars usually.
-    // For safety, let's fetch in chunks if huge. But we'll just do a joined query.
-
+fn get_files_by_sizes(conn: &Connection) -> Result<Vec<AFile>, String> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.folder_id, a.name, a.name_pinyin, a.size, a.file_type, a.format_label,
-                a.created_at, a.modified_at, a.taken_date, a.width, a.height, a.duration, 
+                a.created_at, a.modified_at, a.inode, a.taken_date, a.width, a.height, a.duration,
                 a.is_favorite, a.rating, a.rotate, a.comments, a.has_tags, a.has_faces, 
                 a.e_make, a.e_model, a.e_date_time, a.e_software, a.e_artist, a.e_copyright, 
                 a.e_description, a.e_lens_make, a.e_lens_model, a.e_exposure_bias, a.e_exposure_time, 
@@ -271,7 +266,17 @@ fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, S
                 f.path || '/' || a.name as file_path
          FROM afiles a
          JOIN afolders f ON a.folder_id = f.id
-         WHERE a.size IN (SELECT size FROM afiles GROUP BY size HAVING COUNT(size) > 1 AND size > 0)
+         WHERE a.id NOT IN (
+             SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+         )
+         AND a.size IN (
+             SELECT size FROM afiles
+             WHERE id NOT IN (
+                 SELECT live_photo_video_id FROM afiles WHERE live_photo_video_id IS NOT NULL
+             )
+             GROUP BY size
+             HAVING COUNT(size) > 1 AND size > 0
+         )
          ORDER BY a.size DESC"
     ).map_err(|e| e.to_string())?;
 
@@ -287,45 +292,52 @@ fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, S
                 format_label: row.get(6)?,
                 created_at: row.get(7)?,
                 modified_at: row.get(8)?,
-                taken_date: row.get(9)?,
-                width: row.get(10)?,
-                height: row.get(11)?,
-                duration: row.get(12)?,
-                is_favorite: row.get(13)?,
-                rating: row.get(14)?,
-                rotate: row.get(15)?,
-                comments: row.get(16)?,
-                has_tags: row.get(17)?,
-                has_faces: row.get(18)?,
-                e_make: row.get(19)?,
-                e_model: row.get(20)?,
-                e_date_time: row.get(21)?,
-                e_software: row.get(22)?,
-                e_artist: row.get(23)?,
-                e_copyright: row.get(24)?,
-                e_description: row.get(25)?,
-                e_lens_make: row.get(26)?,
-                e_lens_model: row.get(27)?,
-                e_exposure_bias: row.get(28)?,
-                e_exposure_time: row.get(29)?,
-                e_f_number: row.get(30)?,
-                e_focal_length: row.get(31)?,
-                e_iso_speed: row.get(32)?,
-                e_flash: row.get(33)?,
-                e_orientation: row.get(34)?,
-                gps_latitude: row.get(35)?,
-                gps_longitude: row.get(36)?,
-                gps_altitude: row.get(37)?,
-                geo_name: row.get(38)?,
-                geo_admin1: row.get(39)?,
-                geo_admin2: row.get(40)?,
-                geo_cc: row.get(41)?,
-                file_path: row.get(42)?,
+                inode: row.get(9)?,
+                taken_date: row.get(10)?,
+                width: row.get(11)?,
+                height: row.get(12)?,
+                duration: row.get(13)?,
+                is_favorite: row.get(14)?,
+                rating: row.get(15)?,
+                culling_flag: None,
+                rotate: row.get(16)?,
+                comments: row.get(17)?,
+                has_tags: row.get(18)?,
+                has_faces: row.get(19)?,
+                e_make: row.get(20)?,
+                e_model: row.get(21)?,
+                e_date_time: row.get(22)?,
+                e_software: row.get(23)?,
+                e_artist: row.get(24)?,
+                e_copyright: row.get(25)?,
+                e_description: row.get(26)?,
+                e_lens_make: row.get(27)?,
+                e_lens_model: row.get(28)?,
+                e_exposure_bias: row.get(29)?,
+                e_exposure_time: row.get(30)?,
+                e_f_number: row.get(31)?,
+                e_focal_length: row.get(32)?,
+                e_iso_speed: row.get(33)?,
+                e_flash: row.get(34)?,
+                e_orientation: row.get(35)?,
+                gps_latitude: row.get(36)?,
+                gps_longitude: row.get(37)?,
+                gps_altitude: row.get(38)?,
+                geo_name: row.get(39)?,
+                geo_admin1: row.get(40)?,
+                geo_admin2: row.get(41)?,
+                geo_cc: row.get(42)?,
+                file_path: row.get(43)?,
                 album_id: None,
                 album_name: None,
                 has_thumbnail: None,
+                has_collections: None,
                 has_embedding: None,
                 last_scan_time: Some(0),
+                content_identifier: None,
+                media_subtype: None,
+                live_photo_video_id: None,
+                live_photo_video_path: None,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -340,13 +352,39 @@ fn get_files_by_sizes(conn: &Connection, _sizes: &[i64]) -> Result<Vec<AFile>, S
     Ok(files)
 }
 
-fn get_files_by_query(params: &QueryParams) -> Result<Vec<AFile>, String> {
+pub fn get_files_by_query(params: &QueryParams) -> Result<Vec<AFile>, String> {
     let mut all_files = Vec::new();
     let mut offset: i64 = 0;
     let chunk_size: i64 = 2000;
 
     loop {
         let files = AFile::get_query_files(params, offset, chunk_size)?;
+        let fetched = files.len() as i64;
+        if fetched == 0 {
+            break;
+        }
+        all_files.extend(files);
+        if fetched < chunk_size {
+            break;
+        }
+        offset += chunk_size;
+    }
+
+    Ok(all_files)
+}
+
+pub fn get_files_by_collection(
+    collection_id: i64,
+    params: Option<&QueryParams>,
+) -> Result<Vec<AFile>, String> {
+    let params =
+        params.ok_or_else(|| "Collection dedup query parameters are required".to_string())?;
+    let mut all_files = Vec::new();
+    let mut offset: i64 = 0;
+    let chunk_size: i64 = 2000;
+
+    loop {
+        let files = AFile::get_collection_files(collection_id, params, offset, chunk_size)?;
         let fetched = files.len() as i64;
         if fetched == 0 {
             break;
@@ -598,10 +636,16 @@ pub fn get_overview() -> Result<DedupOverview, String> {
         .query_row(
             "SELECT 
                 COALESCE(COUNT(*), 0),
-                COALESCE(SUM(file_count), 0),
-                COALESCE(SUM(total_size - file_size), 0)
-             FROM duplicate_groups
-             WHERE file_count > 1",
+                COALESCE(SUM(current_file_count - 1), 0),
+                COALESCE(SUM((current_file_count - 1) * file_size), 0)
+             FROM (
+                SELECT file_size,
+                       (SELECT COUNT(*)
+                        FROM duplicate_group_items
+                        WHERE group_id = duplicate_groups.id) AS current_file_count
+                FROM duplicate_groups
+             )
+             WHERE current_file_count > 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -651,13 +695,20 @@ pub fn list_groups(
          FROM duplicate_groups
          {}
          ORDER BY {}
-         LIMIT ?1 OFFSET ?2",
-        filter_clause, order_clause
+         {}",
+        filter_clause,
+        order_clause,
+        if page_size == 0 { "" } else { "LIMIT ?1 OFFSET ?2" }
     );
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+    let query_params = if page_size == 0 {
+        Vec::new()
+    } else {
+        vec![page_size, offset]
+    };
     let groups_iter = stmt
-        .query_map(params![page_size, offset], |row| {
+        .query_map(rusqlite::params_from_iter(query_params), |row| {
             Ok(DedupGroup {
                 id: row.get(0)?,
                 hash: row.get(1)?,
@@ -717,34 +768,6 @@ fn get_group_items(conn: &Connection, group_id: i64) -> Result<Vec<DedupGroupIte
     }
 
     Ok(items)
-}
-
-pub fn get_group(group_id: i64) -> Result<DedupGroup, String> {
-    let conn = get_db_conn()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, hash, file_size, file_count, total_size, reviewed, updated_at
-         FROM duplicate_groups WHERE id = ?1",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut group = stmt
-        .query_row(params![group_id], |row| {
-            Ok(DedupGroup {
-                id: row.get(0)?,
-                hash: row.get(1)?,
-                file_size: row.get(2)?,
-                file_count: row.get(3)?,
-                total_size: row.get(4)?,
-                reviewed: row.get(5)?,
-                updated_at: row.get(6)?,
-                items: Vec::new(),
-            })
-        })
-        .map_err(|e| e.to_string())?;
-
-    group.items = get_group_items(&conn, group_id)?;
-    Ok(group)
 }
 
 pub fn set_keep(group_id: i64, file_id: i64) -> Result<(), String> {
@@ -849,8 +872,10 @@ pub fn delete_selected(
 
     let mut failures: Vec<String> = Vec::new();
     let mut deleted_file_ids: Vec<i64> = Vec::new();
+    let mut trash_failed_file_ids: Vec<i64> = Vec::new();
     for (file_id, file_path) in files_to_delete {
         if let Err(e) = t_utils::trash_path(&file_path) {
+            trash_failed_file_ids.push(file_id);
             failures.push(format!("Failed to move to trash: {} ({})", file_path, e));
             continue;
         }
@@ -872,12 +897,16 @@ pub fn delete_selected(
                 failures.push(format!("Failed to clean up empty duplicate groups: {}", e));
             }
         }
-        Err(e) => failures.push(format!("Failed to open DB for duplicate group cleanup: {}", e)),
+        Err(e) => failures.push(format!(
+            "Failed to open DB for duplicate group cleanup: {}",
+            e
+        )),
     }
 
     Ok(DedupDeleteResult {
         deleted_file_ids,
         failed_count: failures.len(),
         errors: failures,
+        trash_failed_file_ids,
     })
 }

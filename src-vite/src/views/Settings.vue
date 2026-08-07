@@ -7,7 +7,7 @@
       <!-- Sidebar -->
       <div class="w-40 m-1 p-2 bg-base-200/30 flex flex-col rounded-box overflow-y-auto shrink-0 select-none">
         <div
-          v-for="(tab, index) in ['settings.general.title', 'settings.view.title', 'settings.library.title', 'settings.image_search.title', 'settings.about.title']"
+          v-for="(tab, index) in settingsTabs"
           :key="index"
           :class="[
             'px-3 py-2 rounded-box cursor-pointer transition-all duration-200 font-medium flex items-center',
@@ -22,14 +22,14 @@
       </div>
 
       <!-- Main Content -->
-      <div class="p-2 mr-1 flex-1 overflow-y-auto scrollbar-hide bg-base-300 cursor-default">
+      <div class="p-2 mr-1 mb-2 flex-1 overflow-y-auto scrollbar-hide bg-base-300 cursor-default select-none">
           
         <!-- General Tab -->
         <div v-if="config.settings.tabIndex === 0" class="flex flex-col space-y-2">
           
           <!-- languange -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
+            <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.general.section_language') }}</span>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -45,7 +45,7 @@
 
           <!-- appearance -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
+            <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.general.section_appearance') }}</span>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -74,73 +74,10 @@
             </div>
           </div>
 
-          <!-- external app -->
-          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
-              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_view.section_external_apps') }}</span>
-            </div>
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.external_image_editor') }}</div>
-                <div class="text-xs text-base-content/30 truncate" :title="config.settings.externalImageAppPath || ''">
-                  {{ externalImageAppName }}
-                </div>
-              </div>
-              <div class="shrink-0 flex items-center gap-1">
-                <button 
-                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content" 
-                  @click="selectExternalApp('image')"
-                >
-                  {{ $t('settings.image_view.choose_app') }}
-                </button>
-                <button
-                  class="btn btn-sm btn-ghost "
-                  :disabled="!config.settings.externalImageAppPath"
-                  :title="$t('settings.image_view.clear_app')"
-                  :aria-label="$t('settings.image_view.clear_app')"
-                  @click="clearExternalApp('image')"
-                >
-                  <IconClose class="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.external_video_app') }}</div>
-                <div class="text-xs text-base-content/30 truncate" :title="config.settings.externalVideoAppPath || ''">
-                  {{ externalVideoAppName }}
-                </div>
-              </div>
-              <div class="shrink-0 flex items-center gap-1">
-                <button 
-                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content" 
-                  @click="selectExternalApp('video')"
-                >
-                  {{ $t('settings.image_view.choose_app') }}
-                </button>
-                <button
-                  class="btn btn-sm btn-ghost"
-                  :disabled="!config.settings.externalVideoAppPath"
-                  :title="$t('settings.image_view.clear_app')"
-                  :aria-label="$t('settings.image_view.clear_app')"
-                  @click="clearExternalApp('video')"
-                >
-                  <IconClose class="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-
           <!-- display -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
+            <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.general.section_interface') }}</span>
-            </div>
-            <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.general.show_button_text') }}</div>
-              </div>
-              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.showButtonText" />
             </div>
             <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
@@ -156,122 +93,55 @@
             </div>
           </div>
 
-        </div>
-
-        <!-- View Tab -->
-        <div v-else-if="config.settings.tabIndex === 1" class="flex flex-col space-y-2">
-
-          <!-- grid view -->
+          <!-- updates -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
-              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.view.section_layout') }}</span>
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.general.section_updates') }}</span>
             </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+            <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.view.style') }}</div>
+                <div>{{ $t('settings.general.auto_check_updates') }}</div>
               </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.style">
-                <option v-for="(option, index) in gridStyleOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.view.scaling') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.scaling" :disabled="config.settings.grid.style !== 0 && config.settings.grid.style !== 1">
-                <option v-for="(option, index) in gridScalingOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.view.label_primary') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.labelPrimary" :disabled="config.settings.grid.style !== 0">
-                  <option v-for="(option, index) in gridLabelOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.view.label_secondary') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.labelSecondary" :disabled="config.settings.grid.style !== 0">
-                  <option v-for="(option, index) in gridLabelOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.view.justify_mode') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.justifyMode" :disabled="config.settings.grid.style !== 2">
-                <option v-for="(option, index) in justifyModeOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.filmstrip_view.preview_position') }}</div>
-                <!-- <div class="text-xs text-base-content/30">{{ $t('settings.filmstrip_view.preview_position_hint') }}</div> -->
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.previewPosition">
-                  <option v-for="(option, index) in filmStripViewPreviewPositionOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-          </div>
-
-          <!-- preview -->
-          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
-              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_view.section_viewing') }}</span>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.mouse_wheel') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.mouseWheelMode">
-                <option v-for="(item, index) in wheelOptions" :key="index" :value="item.value">
-                  {{ item.label }}
-                </option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.navigator_view') }}</div>
-              </div>
-              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.navigatorViewMode">
-                  <option v-for="(option, index) in navigatorViewModeOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.navigator_view__size') }}</div>
-              </div>
-                <select class="select select-bordered select-sm min-w-32" v-model="config.settings.navigatorViewSize">
-                  <option v-for="(option, index) in navigatorViewSizeOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.slide_show_transition') }}</div>
-              </div>
-                <select class="select select-bordered select-sm min-w-32" v-model="config.settings.slideShowTransition">
-                  <option v-for="(option, index) in slideShowTransitionOptions" :key="index" :value="option.value">{{ option.label }}</option>
-              </select>
-            </div>
-            <div class="flex items-center justify-between px-1 h-8 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.image_view.auto_play_video') }}</div>
-              </div>
-              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.autoPlayVideo" />
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.autoCheckUpdates" />
             </div>
           </div>
 
         </div>
 
         <!-- Library Tab -->
-        <div v-else-if="config.settings.tabIndex === 2" class="flex flex-col space-y-2">
+        <div v-else-if="config.settings.tabIndex === 1" class="flex flex-col space-y-2">
+
+          <!-- album -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.library.section_album') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.library.show_subfolder_files') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.library.show_subfolder_files_hint') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.showSubfolderFiles" />
+            </div>
+          </div>
+
+          <!-- file grouping -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.library.section_file_grouping') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.library.group_raw_jpeg_pairs') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.library.group_raw_jpeg_pairs_hint') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.groupRawJpegPairs" />
+            </div>
+          </div>
 
           <!-- sorting -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
+            <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.library.section_sorting') }}</span>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -303,75 +173,221 @@
             </div>
           </div>
 
-          <!-- storage -->
-          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
-              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.database.section_storage') }}</span>
-            </div>
-
-            <!-- current location -->
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.database.current_location') }}</div>
-                <div class="text-xs text-base-content/30 truncate" :title="dbStorageDir || ''">
-                  {{ hasCustomDbStorage ? (dbStorageDir || '-') : $t('settings.database.system_default') }}
-                </div>
-              </div>
-              <div class="shrink-0 flex items-center">
-                <button
-                  class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
-                  :disabled="isChangingDbStorage"
-                  @click="selectDbStorageDir"
-                >
-                  {{ isChangingDbStorage ? $t('tooltip.loading') : $t('settings.database.change_location') }}
-                </button>
-                <button
-                  v-if="hasCustomDbStorage"
-                  class="btn btn-sm btn-ghost"
-                  :disabled="isChangingDbStorage"
-                  :title="$t('settings.database.restore_default_location')"
-                  :aria-label="$t('settings.database.restore_default_location')"
-                  @click="restoreDefaultDbStorageDir"
-                >
-                  <IconRestore class="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <!-- backup / restore buttons -->
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.database.backup_title') }}</div>
-                <div class="text-xs text-base-content/30">{{ $t('settings.database.backup_hint') }}</div>
-              </div>
-              <button
-                class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
-                @click="showBackupDialog = true"
-              >
-                {{ $t('settings.database.backup') }}
-              </button>
-            </div>
-
-            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
-              <div class="flex flex-col gap-0.5 text-sm leading-5">
-                <div>{{ $t('settings.database.restore_title') }}</div>
-                <div class="text-xs text-base-content/30">{{ $t('settings.database.restore_hint') }}</div>
-              </div>
-              <button
-                class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
-                @click="showRestoreDialog = true"
-              >
-                {{ $t('settings.database.restore') }}
-              </button>
-            </div>
-          </div>
         </div>
 
-        <!-- Image Search Tab -->
-        <div v-else-if="config.settings.tabIndex === 3" class="flex flex-col overflow-hidden space-y-2">
+        <!-- Browse Tab -->
+        <div v-else-if="config.settings.tabIndex === 2" class="flex flex-col space-y-2">
+
+          <!-- grid view -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
-              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_search.section_search') }}</span>
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.browse.section_grid') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.style') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.style">
+                <option v-for="(option, index) in gridStyleOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.scaling') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.scaling" :disabled="config.settings.grid.style !== 0 && config.settings.grid.style !== 1">
+                <option v-for="(option, index) in gridScalingOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.show_thumbnail_badges') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.thumbnailBadge">
+                <option v-for="option in thumbnailBadgeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.label_primary') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.labelPrimary" :disabled="config.settings.grid.style !== 0">
+                  <option v-for="(option, index) in gridLabelOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.label_secondary') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.labelSecondary" :disabled="config.settings.grid.style !== 0">
+                  <option v-for="(option, index) in gridLabelOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- filmstrip -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.browse.filmstrip_view.title') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.filmstrip_view.enable_filmstrip') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.grid.showFilmStrip" />
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.browse.filmstrip_view.preview_position') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.grid.previewPosition" :disabled="!config.settings.grid.showFilmStrip">
+                <option v-for="(option, index) in filmStripViewPreviewPositionOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Viewer Tab -->
+        <div v-else-if="config.settings.tabIndex === 3" class="flex flex-col space-y-2">
+
+          <!-- navigation -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_view.section_navigation') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.mouse_wheel') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.mouseWheelMode">
+                <option v-for="(item, index) in wheelOptions" :key="index" :value="item.value">
+                  {{ item.label }}
+                </option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.navigator_view') }}</div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.navigatorViewMode">
+                  <option v-for="(option, index) in navigatorViewModeOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.navigator_view__size') }}</div>
+              </div>
+                <select class="select select-bordered select-sm min-w-32" v-model="config.settings.navigatorViewSize">
+                  <option v-for="(option, index) in navigatorViewSizeOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- view -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_view.section_view') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.view_background') }}</div>
+                <div class="text-xs text-base-content/30">
+                  {{ $t('settings.image_view.view_background_hint') }}
+                </div>
+              </div>
+              <select class="select select-bordered select-sm min-w-32" v-model="config.settings.viewBackground">
+                <option v-for="option in viewBackgroundOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+            <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.slide_show_transition') }}</div>
+              </div>
+                <select class="select select-bordered select-sm min-w-32" v-model="config.settings.slideShowTransition">
+                  <option v-for="(option, index) in slideShowTransitionOptions" :key="index" :value="option.value">{{ option.label }}</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- video -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_view.section_video') }}</span>
+            </div>
+            <div class="flex items-center justify-between px-1 h-8 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.auto_play_video') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.autoPlayVideo" />
+            </div>
+            <div class="flex items-center justify-between px-1 h-8 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_view.loop_video') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.loopVideo" />
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Search Tab -->
+        <div v-else-if="config.settings.tabIndex === 4" class="flex flex-col overflow-hidden space-y-2">
+
+          <!-- image search -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_search.search_image') }}</span>
+            </div>
+            <div class="flex items-start justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.image_search.search_model') }}</div>
+                <div class="text-xs text-base-content/30">
+                  {{ imageSearchModelHint }}
+                </div>
+              </div>
+              <select
+                class="select select-bordered select-sm min-w-36 shrink-0"
+                :value="config.settings.imageSearch.model"
+                :disabled="isDownloadingMultilingualModel"
+                @change="onImageSearchModelChange"
+              >
+                <option
+                  v-for="option in imageSearchModelOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+            <div v-if="isDownloadingMultilingualModel" class="px-1 pt-1 space-y-1">
+              <div class="flex items-center justify-between text-xs text-base-content/30">
+                <span>{{ $t('settings.image_search.downloading_multilingual_model') }}</span>
+                <span>{{ multilingualModelDownloadSizeText }}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <progress
+                  class="progress progress-primary h-1.5 flex-1"
+                  :value="multilingualModelDownloadProgress"
+                  max="100"
+                ></progress>
+                <button
+                  class="btn btn-ghost btn-xs h-6 min-h-0 w-6 p-0 text-base-content/30 hover:text-base-content"
+                  :title="$t('msgbox.cancel')"
+                  :aria-label="$t('msgbox.cancel')"
+                  @click="cancelMultilingualModelDownload"
+                >
+                  <IconClose class="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- find similar -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.image_search.find_similar') }}</span>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
               <div class="flex flex-col gap-0.5 text-sm leading-5">
@@ -384,8 +400,9 @@
             </div>
           </div>
 
+          <!-- face recognition -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
-            <div class="flex items-center gap-2 text-base-content/70">
+            <div class="flex items-center gap-2 text-base-content/30">
               <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.face_recognition.title') }}</span>
             </div>
             <div class="flex items-center justify-between px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -417,8 +434,166 @@
           </div>
         </div>
 
+        <!-- Shortcuts Tab -->
+        <div v-else-if="config.settings.tabIndex === 5" class="flex flex-col space-y-2">
+          <div
+            v-for="section in shortcutSections"
+            :key="section.key"
+            class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm"
+          >
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ section.title }}</span>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-4 gap-y-1">
+              <div
+                v-for="item in section.items"
+                :key="item.actionId"
+                class="min-h-9 flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200"
+              >
+                <div class="min-w-0 text-sm leading-5 truncate">{{ item.label }}</div>
+                <div class="shrink-0 flex items-center gap-1">
+                  <span
+                    v-for="(key, keyIndex) in item.keys"
+                    :key="`${item.actionId}-${keyIndex}-${key}`"
+                    class="min-w-7 h-7 px-2 inline-flex items-center justify-center rounded-box border border-base-content/10 bg-base-100/40 text-xs font-semibold text-base-content/30 shadow-sm"
+                  >
+                    {{ key }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Advanced Tab -->
+        <div v-else-if="config.settings.tabIndex === 6" class="flex flex-col space-y-2">
+
+          <!-- external app -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.advanced.section_external_apps') }}</span>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.advanced.external_image_editor') }}</div>
+                <div class="text-xs text-base-content/30 truncate" :title="config.settings.externalImageAppPath || ''">
+                  {{ externalImageAppName }}
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1">
+                <button
+                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  @click="selectExternalApp('image')"
+                >
+                  {{ $t('settings.advanced.choose_app') }}
+                </button>
+                <TButton v-if="config.settings.externalImageAppPath"
+                  :icon="IconTrash"
+                  :buttonSize="'small'"
+                  :tooltip="$t('settings.advanced.clear_app')"
+                  @click="clearExternalApp('image')"
+                />
+              </div>
+            </div>
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.advanced.external_video_app') }}</div>
+                <div class="text-xs text-base-content/30 truncate" :title="config.settings.externalVideoAppPath || ''">
+                  {{ externalVideoAppName }}
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-1">
+                <button
+                  class="btn btn-sm btn-ghost min-w-20 rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  @click="selectExternalApp('video')"
+                >
+                  {{ $t('settings.advanced.choose_app') }}
+                </button>
+                <TButton v-if="config.settings.externalVideoAppPath"
+                  :icon="IconTrash"
+                  :buttonSize="'small'"
+                  :tooltip="$t('settings.advanced.clear_app')"
+                  @click="clearExternalApp('video')"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- data -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.database.section_storage') }}</span>
+            </div>
+
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.database.current_location') }}</div>
+                <div class="text-xs text-base-content/30 truncate" :title="dbStorageDir || ''">
+                  {{ hasCustomDbStorage ? (dbStorageDir || '-') : $t('settings.database.system_default') }}
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-2">
+                <button
+                  class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  :disabled="isChangingDbStorage"
+                  @click="selectDbStorageDir"
+                >
+                  {{ isChangingDbStorage ? $t('tooltip.loading') : $t('settings.database.change_location') }}
+                </button>
+                <TButton
+                  v-if="hasCustomDbStorage"
+                  :icon="IconRestore"
+                  :buttonSize="'small'"
+                  :disabled="isChangingDbStorage"
+                  :tooltip="$t('settings.database.restore_default_location')"
+                  @click="restoreDefaultDbStorageDir"
+                />
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.database.backup_title') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.database.backup_hint') }}</div>
+              </div>
+              <button
+                class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                @click="showBackupDialog = true"
+              >
+                {{ $t('settings.database.backup') }}
+              </button>
+            </div>
+
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.database.restore_title') }}</div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.database.restore_hint') }}</div>
+              </div>
+              <button
+                class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                @click="showRestoreDialog = true"
+              >
+                {{ $t('settings.database.restore') }}
+              </button>
+            </div>
+          </div>
+
+          <!-- diagnostics -->
+          <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
+            <div class="flex items-center gap-2 text-base-content/30">
+              <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('settings.advanced.section_diagnostics') }}</span>
+            </div>
+            <div class="flex items-center justify-between p-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.advanced.debug_mode') }}</div>
+              </div>
+              <input type="checkbox" class="toggle toggle-primary toggle-sm" v-model="config.settings.debugMode" />
+            </div>
+          </div>
+        </div>
+
         <!-- About Tab -->
-        <div v-else-if="config.settings.tabIndex === 4" class="py-2">
+        <div v-else-if="config.settings.tabIndex === 7" class="py-2">
             <SettingsAbout />
         </div>
 
@@ -465,29 +640,55 @@ import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit } from '@tauri-apps/api/event';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
-import { getExternalAppDisplayName, getDbStorageDir, changeDbStorageDir, resetDbStorageDir, isFaceIndexing, isUsingCustomDbStorage } from '@/common/api';
-import { isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { THUMBNAIL_BADGE } from '@/common/constants';
+import {
+  getExternalAppDisplayName,
+  getDbStorageDir,
+  changeDbStorageDir,
+  resetDbStorageDir,
+  isFaceIndexing,
+  isUsingCustomDbStorage,
+  getImageSearchModelStatus,
+  setImageSearchModel,
+  downloadMultilingualImageSearchModel,
+  cancelMultilingualImageSearchModelDownload,
+  listenImageSearchModelDownloadProgress,
+} from '@/common/api';
+import { formatFileSize, isLinux, isMac, setTheme, SCALE_VALUES } from '@/common/utils';
+import { getShortcutLabels, ShortcutActionId, ShortcutPlatform } from '@/common/shortcuts';
 import { useToast } from '@/common/toast';
-import { IconClose, IconRestore } from '@/common/icons';
+import { IconTrash, IconRestore, IconClose } from '@/common/icons';
 
 import TitleBar from '@/components/TitleBar.vue';
 import SettingsAbout from '@/components/SettingsAbout.vue';
 import MessageBox from '@/components/MessageBox.vue';
 import BackupDialog from '@/components/BackupDialog.vue';
 import RestoreDialog from '@/components/RestoreDialog.vue';
+import TButton from '@/components/TButton.vue';
 
 /// i18n
 const { locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[config.settings.language] as any);
 const toast = useToast();
+const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
+const settingsTabs = [
+  'settings.general.title',
+  'settings.library.title',
+  'settings.browse.title',
+  'settings.image_view.title',
+  'settings.image_search.title',
+  'settings.shortcuts.title',
+  'settings.advanced.title',
+  'settings.about.title',
+];
 
 const appWindow = getCurrentWebviewWindow()
 let gridSizeEmitTimer: number | null = null;
 const SETTINGS_BASE_WIDTH = 600;
-const SETTINGS_BASE_HEIGHT = 600;
+const SETTINGS_BASE_HEIGHT = 620;
 const dbStorageDir = ref('');
 const isChangingDbStorage = ref(false);
 const hasCustomDbStorage = ref(false);
@@ -495,6 +696,13 @@ const showChangeDbStorageDialog = ref(false);
 const showResetDbStorageDialog = ref(false);
 const showBackupDialog = ref(false);
 const showRestoreDialog = ref(false);
+const isDownloadingMultilingualModel = ref(false);
+const isCancelingMultilingualModelDownload = ref(false);
+const multilingualModelDownloadProgress = ref(0);
+const multilingualModelDownloadedBytes = ref(0);
+const multilingualModelTotalBytes = ref(0);
+const isMultilingualModelAvailable = ref(false);
+let unlistenImageSearchModelDownloadProgress: (() => void) | null = null;
 
 const onRestoreDone = () => {
   showRestoreDialog.value = false;
@@ -586,11 +794,11 @@ const categorySortOptions = computed(() => {
 });
 
 const externalImageAppName = computed(() =>
-  String(config.settings.externalImageAppName || '') || localeMsg.value.settings.image_view.external_app_not_selected
+  String(config.settings.externalImageAppName || '') || localeMsg.value.settings.advanced.external_app_not_selected
 );
 
 const externalVideoAppName = computed(() =>
-  String(config.settings.externalVideoAppName || '') || localeMsg.value.settings.image_view.external_app_not_selected
+  String(config.settings.externalVideoAppName || '') || localeMsg.value.settings.advanced.external_app_not_selected
 );
 
 // Define the wheel options using computed to react to language changes
@@ -604,7 +812,7 @@ const wheelOptions = computed(() => {
 
 // Define the grid scaling options
 const gridScalingOptions = computed(() => {
-  const options = localeMsg.value.settings.view.scaling_options;
+  const options = localeMsg.value.settings.browse.scaling_options;
   const result = [];
 
   for (let i = 0; i < options.length; i++) {
@@ -616,7 +824,7 @@ const gridScalingOptions = computed(() => {
 
 // Define the grid style options
 const gridStyleOptions = computed(() => {
-  const options = localeMsg.value.settings.view.style_options;
+  const options = localeMsg.value.settings.browse.style_options;
   const result = [];
 
   for (let i = 0; i < options.length; i++) {
@@ -628,7 +836,7 @@ const gridStyleOptions = computed(() => {
 
 // Define the grid label options
 const gridLabelOptions = computed(() => {
-  const options = localeMsg.value.settings.view.label_options;
+  const options = localeMsg.value.settings.browse.label_options;
   const result = [];
 
   for (let i = 0; i < options.length; i++) {
@@ -636,6 +844,23 @@ const gridLabelOptions = computed(() => {
   }
 
   return result;
+});
+
+const thumbnailBadgeOptions = computed(() => {
+  const options = localeMsg.value.settings.browse.thumbnail_badge_options;
+  const values = [
+    THUMBNAIL_BADGE.EMPTY,
+    THUMBNAIL_BADGE.FILE_FORMAT,
+    THUMBNAIL_BADGE.ISO,
+    THUMBNAIL_BADGE.SHUTTER_SPEED,
+    THUMBNAIL_BADGE.APERTURE,
+    THUMBNAIL_BADGE.FOCAL_LENGTH,
+    THUMBNAIL_BADGE.EXPOSURE,
+  ];
+  return options.map((label: string, index: number) => ({
+    label,
+    value: values[index],
+  }));
 });
 
 // Define the navigator view mode options
@@ -662,6 +887,10 @@ const navigatorViewSizeOptions = computed(() => {
   return result;
 });
 
+const viewBackgroundOptions = computed(() => {
+  const options = localeMsg.value.settings.image_view.view_background_options;
+  return options.map((label: string, value: number) => ({ label, value }));
+});
 const slideShowTransitionOptions = computed(() => {
   const options = localeMsg.value.settings.image_view.slide_show_transition_options;
   const result = [];
@@ -673,17 +902,8 @@ const slideShowTransitionOptions = computed(() => {
   return result;
 });
 
-const justifyModeOptions = computed(() => {
-  const options = localeMsg.value.settings.view.justify_mode_options;
-  const result = [];
-  for (let i = 0; i < options.length; i++) {
-    result.push({ label: options[i], value: i });
-  }
-  return result;
-});
-
 const filmStripViewPreviewPositionOptions = computed(() => {
-  const options = localeMsg.value.settings.filmstrip_view.preview_position_options;
+  const options = localeMsg.value.settings.browse.filmstrip_view.preview_position_options;
   return options.map((label, i) => ({ label, value: i }));
 });
 
@@ -696,6 +916,46 @@ const similarityOptions = computed(() => {
   return values.map((val, i) => ({ label: options[i], value: i }));
 });
 
+const imageSearchModelOptions = computed(() => {
+  const options = localeMsg.value.settings.image_search.search_model_options || ['Default', 'Multilingual model'];
+  return options.map((label: string, i: number) => ({ label, value: i }));
+});
+
+const imageSearchModelHint = computed(() => {
+  return Number(config.settings.imageSearch.model || 0) === 1
+    ? localeMsg.value.settings.image_search.multilingual_model_hint
+    : localeMsg.value.settings.image_search.default_model_hint;
+});
+
+const multilingualModelDownloadSizeText = computed(() => {
+  const downloaded = multilingualModelDownloadedBytes.value;
+  const total = multilingualModelTotalBytes.value;
+  if (total > 0) {
+    return `${formatFileSize(downloaded)} / ${formatFileSize(total)}`;
+  }
+  return formatFileSize(downloaded);
+});
+
+const syncImageSearchModelStatus = async () => {
+  const status = await getImageSearchModelStatus();
+  if (!status) return;
+
+  isMultilingualModelAvailable.value = Boolean(status.multilingualAvailable);
+  if (Number(config.settings.imageSearch.model || 0) === 1 && !isMultilingualModelAvailable.value) {
+    config.settings.imageSearch.model = 0;
+    await setImageSearchModel(0);
+    return;
+  }
+
+  try {
+    await setImageSearchModel(config.settings.imageSearch.model || 0);
+  } catch (error) {
+    console.error('Failed to activate image search model:', error);
+    config.settings.imageSearch.model = 0;
+    await setImageSearchModel(0);
+  }
+};
+
 // Define the face cluster threshold options
 const faceClusterOptions = computed(() => {
   const options = localeMsg.value.settings.face_recognition?.cluster_threshold_options || 
@@ -704,11 +964,289 @@ const faceClusterOptions = computed(() => {
   return options.map((label: string, i: number) => ({ label, value: i }));
 });
 
+type ShortcutDisplayItem = {
+  actionId: ShortcutActionId;
+  labelKey: string;
+  keys?: string[];
+  backgroundValue?: number;
+};
+
+const shortcutDisplaySections: Array<{ key: string; items: ShortcutDisplayItem[] }> = [
+  {
+    key: 'global',
+    items: [
+      { actionId: 'app.sidebar.toggle', labelKey: 'toggle_sidebar' },
+      { actionId: 'app.preferences', labelKey: 'open_settings' },
+      { actionId: 'app.scale.increase', labelKey: 'font_increase' },
+      { actionId: 'app.scale.decrease', labelKey: 'font_decrease' },
+      { actionId: 'app.scale.reset', labelKey: 'font_reset' },
+      { actionId: 'app.search', labelKey: 'search' },
+    ],
+  },
+  {
+    key: 'image_browsing',
+    items: [
+      { actionId: 'view.zoomIn', labelKey: 'thumbnail_increase' },
+      { actionId: 'view.zoomOut', labelKey: 'thumbnail_decrease' },
+      { actionId: 'view.previous', labelKey: 'previous_image' },
+      { actionId: 'view.next', labelKey: 'next_image' },
+      { actionId: 'view.first', labelKey: 'first_image' },
+      { actionId: 'view.last', labelKey: 'last_image' },
+      { actionId: 'view.quickPreview', labelKey: 'quick_preview' },
+      { actionId: 'view.close', labelKey: 'close_viewer' },
+      { actionId: 'file.openNewWindow', labelKey: 'open_new_window' },
+      { actionId: 'file.openExternalApp', labelKey: 'open_external_app' },
+      { actionId: 'file.editImage', labelKey: 'edit_image' },
+      { actionId: 'file.searchSimilar', labelKey: 'search_similar' },
+    ],
+  },
+  {
+    key: 'viewing',
+    items: [
+      { actionId: 'view.zoomIn', labelKey: 'zoom_in' },
+      { actionId: 'view.zoomOut', labelKey: 'zoom_out' },
+      { actionId: 'view.zoomFit', labelKey: 'zoom_fit' },
+      { actionId: 'view.cycleBackground', labelKey: 'cycle_background' },
+      { actionId: 'view.backgroundTheme', labelKey: 'cycle_background', backgroundValue: 0 },
+      { actionId: 'view.backgroundBlack', labelKey: 'cycle_background', backgroundValue: 1 },
+      { actionId: 'view.backgroundDarkGray', labelKey: 'cycle_background', backgroundValue: 2 },
+      { actionId: 'view.backgroundMediumGray', labelKey: 'cycle_background', backgroundValue: 3 },
+      { actionId: 'view.backgroundLightGray', labelKey: 'cycle_background', backgroundValue: 4 },
+      { actionId: 'view.backgroundWhite', labelKey: 'cycle_background', backgroundValue: 5 },
+      { actionId: 'slideshow.toggle', labelKey: 'toggle_slideshow' },
+    ],
+  },
+  {
+    key: 'file_actions',
+    items: [
+
+      { actionId: 'file.rename', labelKey: 'rename_file' },
+      { actionId: 'file.moveTo', labelKey: 'move_within_library' },
+      { actionId: 'file.moveToFolder', labelKey: 'move_to_folder' },
+      { actionId: 'file.copy', labelKey: 'copy_file' },
+      { actionId: 'file.paste', labelKey: 'paste_file' },
+      { actionId: 'file.reveal', labelKey: 'reveal_in_file_manager' },
+      { actionId: 'file.trash', labelKey: 'move_to_trash' },
+    ],
+  },
+  {
+    key: 'selection',
+    items: [
+      { actionId: 'file.selectAll', labelKey: 'select_all' },
+      { actionId: 'file.selectNone', labelKey: 'select_none' },
+      { actionId: 'file.invertSelection', labelKey: 'invert_selection' },
+    ],
+  },
+  {
+    key: 'metadata',
+    items: [
+      { actionId: 'meta.favorite', labelKey: 'toggle_favorite' },
+      { actionId: 'meta.rating.clear', labelKey: 'set_clear_rating', keys: ['0 ~ 5'] },
+      { actionId: 'meta.culling.pick', labelKey: 'mark_pick' },
+      { actionId: 'meta.culling.reject', labelKey: 'mark_rejected' },
+      { actionId: 'meta.culling.unreviewed', labelKey: 'mark_unreviewed' },
+      { actionId: 'meta.tag', labelKey: 'edit_tags' },
+      { actionId: 'meta.collection', labelKey: 'add_to_collections' },
+      { actionId: 'meta.comment', labelKey: 'edit_comment' },
+      { actionId: 'meta.rotate', labelKey: 'rotate' },
+      { actionId: 'meta.info', labelKey: 'show_info' },
+    ],
+  },
+];
+
+const shortcutSections = computed(() => {
+  const shortcutMessages = localeMsg.value.settings.shortcuts;
+  return shortcutDisplaySections.map((section) => ({
+    key: section.key,
+    title: shortcutMessages.sections[section.key],
+    items: section.items
+      .map((item) => ({
+        actionId: item.actionId,
+        label: item.backgroundValue === undefined
+          ? shortcutMessages.actions[getShortcutActionLabelKey(item)]
+          : `${localeMsg.value.settings.image_view.view_background}: ${localeMsg.value.settings.image_view.view_background_options[item.backgroundValue]}`,
+        keys: item.keys ?? getDisplayShortcutKeys(item.actionId),
+      }))
+      .filter((item) => item.keys.length > 0),
+  }));
+});
+
+function getShortcutActionLabelKey(item: ShortcutDisplayItem): string {
+  if (item.actionId === 'file.reveal' && shortcutPlatform === 'mac') {
+    return 'reveal_in_finder';
+  }
+  return item.labelKey;
+}
+
+function getDisplayShortcutKeys(actionId: ShortcutActionId): string[] {
+  const labels = getShortcutLabels(actionId, shortcutPlatform);
+  const label = getPreferredShortcutLabel(actionId, labels);
+  return splitShortcutLabel(label);
+}
+
+function getPreferredShortcutLabel(actionId: ShortcutActionId, labels: string[]): string {
+  if (actionId === 'app.scale.increase') {
+    return labels.find((label) => label.includes('+')) || labels[0] || '';
+  }
+  return labels[0] || '';
+}
+
+function splitShortcutLabel(label: string): string[] {
+  if (!label) return [];
+  if (shortcutPlatform === 'mac') {
+    return splitMacShortcutLabel(label);
+  }
+
+  let normalized = label
+    .replace(/←/g, 'Left')
+    .replace(/→/g, 'Right')
+    .replace(/↑/g, 'Up')
+    .replace(/↓/g, 'Down');
+
+  normalized = normalized
+    .replace(/\+\+$/, '+Plus')
+    .replace(/\+=$/, '+=')
+    .replace(/\+-$/, '+Minus')
+    .replace(/\+0$/, '+0')
+    .replace(/\+,/g, '+Comma');
+
+  return normalized
+    .split('+')
+    .filter(Boolean)
+    .map((key) => {
+      key = key.trim();
+      if (key === 'Plus') return '+';
+      if (key === 'Minus') return '-';
+      if (key === 'Comma') return ',';
+      if (key === 'Del') return 'Delete';
+      return key;
+    });
+}
+
+function splitMacShortcutLabel(label: string): string[] {
+  const modifierKeys = new Set(['⌘', '⌥', '⇧', '⌃']);
+  const keys: string[] = [];
+  let remaining = label;
+
+  while (remaining.length > 0 && modifierKeys.has(remaining[0])) {
+    keys.push(remaining[0]);
+    remaining = remaining.slice(1);
+  }
+
+  if (remaining.length > 0) {
+    keys.push(remaining);
+  }
+
+  return keys;
+}
+
+const onImageSearchModelChange = async (event: Event) => {
+  const select = event.target as HTMLSelectElement;
+  const nextModel = Number(select.value || 0);
+  const previousModel = Number(config.settings.imageSearch.model || 0);
+
+  if (nextModel !== 1) {
+    try {
+      await setImageSearchModel(nextModel);
+      config.settings.imageSearch.model = nextModel;
+    } catch (error) {
+      select.value = String(previousModel);
+      toast.error(error?.message || String(error));
+    }
+    return;
+  }
+
+  if (isMultilingualModelAvailable.value) {
+    try {
+      await setImageSearchModel(nextModel);
+      config.settings.imageSearch.model = nextModel;
+    } catch (error) {
+      select.value = String(previousModel);
+      toast.error(error?.message || String(error));
+    }
+    return;
+  }
+
+  select.value = String(previousModel);
+  const shouldDownload = await ask(
+    localeMsg.value.settings.image_search.multilingual_model_download_message,
+    {
+      title: localeMsg.value.settings.image_search.multilingual_model_download_title,
+      kind: 'info',
+      okLabel: localeMsg.value.settings.image_search.download,
+      cancelLabel: localeMsg.value.msgbox?.cancel || 'Cancel',
+    },
+  );
+
+  if (!shouldDownload) {
+    return;
+  }
+
+  await startMultilingualModelDownload(previousModel);
+};
+
+const startMultilingualModelDownload = async (previousModel: number) => {
+  if (isDownloadingMultilingualModel.value) return;
+
+  isDownloadingMultilingualModel.value = true;
+  isCancelingMultilingualModelDownload.value = false;
+  multilingualModelDownloadProgress.value = 0;
+  multilingualModelDownloadedBytes.value = 0;
+  multilingualModelTotalBytes.value = 0;
+
+  try {
+    await downloadMultilingualImageSearchModel();
+    isDownloadingMultilingualModel.value = false;
+    isMultilingualModelAvailable.value = true;
+    await setImageSearchModel(1);
+    config.settings.imageSearch.model = 1;
+    multilingualModelDownloadProgress.value = 100;
+    if (multilingualModelTotalBytes.value > 0) {
+      multilingualModelDownloadedBytes.value = multilingualModelTotalBytes.value;
+    }
+    toast.success(localeMsg.value.settings.image_search.multilingual_model_download_success);
+  } catch (error) {
+    if (isCancelingMultilingualModelDownload.value || String(error).includes('Download canceled')) {
+      isCancelingMultilingualModelDownload.value = false;
+      isDownloadingMultilingualModel.value = false;
+      config.settings.imageSearch.model = previousModel;
+      multilingualModelDownloadProgress.value = 0;
+      multilingualModelDownloadedBytes.value = 0;
+      multilingualModelTotalBytes.value = 0;
+      return;
+    }
+    isDownloadingMultilingualModel.value = false;
+    config.settings.imageSearch.model = previousModel;
+    toast.error(error?.message || localeMsg.value.settings.image_search.multilingual_model_download_failed);
+  }
+};
+
+const cancelMultilingualModelDownload = async () => {
+  if (!isDownloadingMultilingualModel.value) return;
+
+  isCancelingMultilingualModelDownload.value = true;
+  isDownloadingMultilingualModel.value = false;
+  multilingualModelDownloadProgress.value = 0;
+  multilingualModelDownloadedBytes.value = 0;
+  multilingualModelTotalBytes.value = 0;
+  await cancelMultilingualImageSearchModelDownload();
+};
+
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
-  if (typeof config.settings.tabIndex !== 'number' || config.settings.tabIndex < 0 || config.settings.tabIndex > 4) {
+  if (typeof config.settings.tabIndex !== 'number' || config.settings.tabIndex < 0 || config.settings.tabIndex > 7) {
     config.settings.tabIndex = 0;
   }
+  if (typeof config.settings.imageSearch.model !== 'number') {
+    config.settings.imageSearch.model = 0;
+  }
+  unlistenImageSearchModelDownloadProgress = await listenImageSearchModelDownloadProgress((event: any) => {
+    const progress = Number(event?.payload?.progress ?? 0);
+    multilingualModelDownloadProgress.value = Math.max(0, Math.min(100, progress));
+    multilingualModelDownloadedBytes.value = Math.max(0, Number(event?.payload?.downloadedBytes ?? 0));
+    multilingualModelTotalBytes.value = Math.max(0, Number(event?.payload?.totalBytes ?? 0));
+  });
+  await syncImageSearchModelStatus();
   applyWindowScale(Number(config.settings.scale || 1));
   dbStorageDir.value = (await getDbStorageDir()) || '';
   hasCustomDbStorage.value = await isUsingCustomDbStorage();
@@ -734,9 +1272,16 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (isDownloadingMultilingualModel.value) {
+    void cancelMultilingualImageSearchModelDownload();
+  }
   if (gridSizeEmitTimer) {
     clearTimeout(gridSizeEmitTimer);
     gridSizeEmitTimer = null;
+  }
+  if (unlistenImageSearchModelDownloadProgress) {
+    unlistenImageSearchModelDownloadProgress();
+    unlistenImageSearchModelDownloadProgress = null;
   }
   document.documentElement.style.fontSize = '';
   window.removeEventListener('keydown', handleKeyDown);
@@ -779,14 +1324,14 @@ watch(() => config.settings.language, (newValue) => {
   locale.value = newValue;
   emit('settings-language-changed', newValue);
 });
-watch(() => config.settings.showButtonText, (newValue) => {
-  emit('settings-showButtonText-changed', newValue);
-});
 watch(() => config.settings.showToolTip, (newValue) => {
   emit('settings-showToolTip-changed', newValue);
 });
 watch(() => config.settings.showStatusBar, (newValue) => {
   emit('settings-showStatusBar-changed', newValue);
+});
+watch(() => config.settings.autoCheckUpdates, (newValue) => {
+  emit('settings-autoCheckUpdates-changed', newValue);
 });
 // watch(() => config.settings.showComment, (newValue) => {
 //   emit('settings-showComment-changed', newValue);
@@ -802,6 +1347,12 @@ watch(() => config.settings.calendarSort, (newValue) => {
 });
 watch(() => config.settings.categorySort, (newValue) => {
   emit('settings-categorySort-changed', newValue);
+});
+watch(() => config.settings.showSubfolderFiles, (newValue) => {
+  emit('settings-showSubfolderFiles-changed', newValue);
+});
+watch(() => config.settings.groupRawJpegPairs, (newValue) => {
+  emit('settings-groupRawJpegPairs-changed', newValue);
 });
 
 // grid view settings
@@ -827,13 +1378,15 @@ watch(() => config.settings.grid.labelPrimary, (newValue) => {
 watch(() => config.settings.grid.labelSecondary, (newValue) => {
   emit('settings-gridLabelSecondary-changed', newValue);
 });
+watch(() => config.settings.grid.thumbnailBadge, (newValue) => {
+  emit('settings-gridThumbnailBadge-changed', newValue);
+});
+watch(() => config.settings.grid.showFilmStrip, (newValue) => {
+  emit('settings-showFilmStrip-changed', newValue);
+});
 watch(() => config.settings.grid.previewPosition, (newValue) => {
   emit('settings-filmStripViewPreviewPosition-changed', newValue);
 });
-watch(() => config.settings.grid.justifyMode, (newValue) => {
-  emit('settings-justifyMode-changed', newValue);
-});
-
 // image viewer settings
 watch(() => config.settings.mouseWheelMode, (newValue) => {
   emit('settings-mouseWheelMode-changed', newValue);
@@ -844,14 +1397,23 @@ watch(() => config.settings.navigatorViewMode, (newValue) => {
 watch(() => config.settings.navigatorViewSize, (newValue) => {
   emit('settings-navigatorViewSize-changed', newValue);
 });
+watch(() => config.settings.viewBackground, (newValue) => {
+  emit('settings-viewBackground-changed', newValue);
+});
 watch(() => config.settings.slideShowTransition, (newValue) => {
   emit('settings-slideShowTransition-changed', newValue);
 });
 watch(() => config.settings.autoPlayVideo, (newValue) => {
   emit('settings-autoPlayVideo-changed', newValue);
 });
+watch(() => config.settings.loopVideo, (newValue) => {
+  emit('settings-loopVideo-changed', newValue);
+});
 
 // image search settings
+watch(() => config.settings.imageSearch.model, (newValue) => {
+  emit('settings-imageSearchModel-changed', newValue);
+});
 watch(() => config.settings.imageSearch.thresholdIndex, (newValue) => {
   emit('settings-imageSearchThresholdIndex-changed', newValue);
 });
@@ -879,7 +1441,7 @@ function handleKeyDown(event: KeyboardEvent) {
   switch (event.key) {
     case 'Tab':
       config.settings.tabIndex += 1;
-      config.settings.tabIndex = config.settings.tabIndex % 5; // 5 tabs
+      config.settings.tabIndex = config.settings.tabIndex % settingsTabs.length;
       break;
     case 'Escape':
       // Close the topmost dialog first

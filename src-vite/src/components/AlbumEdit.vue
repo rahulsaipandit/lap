@@ -1,16 +1,16 @@
 <template>
   <ModalDialog :title="isNewAlbum ? $t('album.edit.title_add') : $t('album.edit.title')" @cancel="clickCancel">
-    <section class="rounded-box p-3 bg-base-300/30 border border-base-content/5 shadow-sm">
+    <section>
       <!-- two column grid layout -->
-      <div class="w-full grid grid-cols-[80px_1fr] gap-x-4 gap-y-2 items-center text-xs">
+      <div class="w-full grid grid-cols-[80px_1fr] gap-x-4 gap-y-2 items-center text-xs select-none">
         <!-- Folder -->
-        <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.folder') }}</div>
+        <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/30">{{ $t('album.edit.folder') }}</div>
         <div class="h-8 flex items-center justify-between gap-x-2">
           <input v-if="selectedFolder !== ''"
             type="text"
             readonly
             :value="selectedFolder"
-            class="w-full bg-transparent border-none p-0 text-xs font-semibold text-base-content/65 focus:border-none focus:ring-0 focus:outline-none"
+            class="w-full bg-transparent border-none p-0 text-xs font-semibold text-base-content/30 focus:border-none focus:ring-0 focus:outline-none"
           />
           <button v-if="selectedFolder === ''"
             class="btn btn-primary btn-sm rounded-box"
@@ -27,7 +27,7 @@
         </div>
 
         <!-- Name -->
-        <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.name') }}</div>
+        <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/70">{{ $t('album.edit.name') }}</div>
         <div>
           <input
             ref="inputNameRef"
@@ -40,9 +40,11 @@
         </div>
 
         <!-- Description -->
-        <div class="h-8 flex items-start pt-2 text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.description') }}</div>
+        <div class="h-8 flex items-start pt-2 text-[10px] uppercase tracking-widest font-bold text-base-content/70">{{ $t('album.edit.description') }}</div>
         <div>
           <textarea
+            v-if="showDescription"
+            ref="descriptionRef"
             v-model="inputDescriptionValue"
             rows="2"
             maxlength="1024"
@@ -50,11 +52,19 @@
             :disabled="selectedFolder === ''"
             class="w-full textarea textarea-sm min-h-[56px] max-h-[200px] text-xs font-semibold"
           ></textarea>
+          <TButton
+            v-else
+            :icon="IconEdit"
+            :buttonSize="'small'"
+            :tooltip="$t('album.edit.description')"
+            :disabled="selectedFolder === ''"
+            @click="showDescriptionInput"
+          />
         </div>
 
         <template v-if="selectedFolder !== ''">
           <!-- Files Breakdown Label (Left Column) -->
-          <div class="h-8 flex items-start pt-3 text-[10px] uppercase tracking-widest font-bold text-base-content/25">
+          <div class="h-8 flex items-start pt-3 text-[10px] uppercase tracking-widest font-bold text-base-content/30">
             {{ isScanning ? $t('search.index.indexing', { count: '', total: '' }).split('...')[0] : (isNewAlbum ? $t('album.edit.files_to_scan') : $t('album.edit.scanned_files')) }}
           </div>
           
@@ -62,7 +72,7 @@
           <div class="py-3 flex flex-col gap-2">
             <!-- Total Summary (Right Aligned) -->
             <div class="flex justify-end items-baseline mb-0.5">
-              <span class="text-xs font-bold text-base-content/70" :class="{ 'animate-pulse': totalImageCount < 0 }">
+              <span class="text-xs font-bold text-base-content/30" :class="{ 'animate-pulse': totalImageCount < 0 }">
                 {{ totalImageCount >= 0 ? $t('album.edit.files_count', { count: (totalImageCount + totalVideoCount).toLocaleString(), size: formatFileSize(totalImageSize + totalVideoSize) }) : $t('album.edit.files_counting') }}
               </span>
             </div>
@@ -96,17 +106,17 @@
                 <!-- Images info -->
                 <div class="flex flex-col">
                   <span class="text-[10px] font-bold text-primary/70 uppercase tracking-tight">{{ $t('album.edit.images') }}</span>
-                  <span class="text-[11px] font-semibold text-base-content/60">
+                  <span class="text-[11px] font-semibold text-base-content/30">
                     {{ totalImageCount >= 0 ? totalImageCount.toLocaleString() : '...' }} 
-                    <span v-if="!isScanning" class="text-[9px] opacity-40 font-medium ml-0.5">{{ totalImageCount >= 0 ? formatFileSize(totalImageSize) : '' }}</span>
+                    <span v-if="!isScanning" class="text-[9px] font-medium ml-0.5">{{ totalImageCount >= 0 ? formatFileSize(totalImageSize) : '' }}</span>
                   </span>
                 </div>
                 <!-- Videos info -->
                 <div class="flex flex-col items-end">
                   <span class="text-[10px] font-bold text-primary/40 uppercase tracking-tight">{{ $t('album.edit.videos') }}</span>
-                  <span class="text-[11px] font-semibold text-base-content/50">
+                  <span class="text-[11px] font-semibold text-base-content/30">
                     {{ totalVideoCount >= 0 ? totalVideoCount.toLocaleString() : '...' }}
-                    <span v-if="!isScanning" class="text-[9px] opacity-40 font-medium ml-0.5">{{ totalVideoCount >= 0 ? formatFileSize(totalVideoSize) : '' }}</span>
+                    <span v-if="!isScanning" class="text-[9px] font-medium ml-0.5">{{ totalVideoCount >= 0 ? formatFileSize(totalVideoSize) : '' }}</span>
                   </span>
                 </div>
               </div>
@@ -121,14 +131,14 @@
         
         <template v-if="!isNewAlbum">
           <!-- Created At -->
-          <!-- <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.created_at') }}</div>
-          <div class="h-8 flex items-center text-xs font-semibold text-base-content/65">{{ createdAt }}</div> -->
+          <!-- <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/30">{{ $t('album.edit.created_at') }}</div>
+          <div class="h-8 flex items-center text-xs font-semibold text-base-content/30">{{ createdAt }}</div> -->
           <!-- Modified At -->
-          <!-- <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.modified_at') }}</div>
-          <div class="h-8 flex items-center text-xs font-semibold text-base-content/65">{{ modifiedAt }}</div> -->
+          <!-- <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/30">{{ $t('album.edit.modified_at') }}</div>
+          <div class="h-8 flex items-center text-xs font-semibold text-base-content/30">{{ modifiedAt }}</div> -->
           <!-- Last Scan Time -->
-          <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/25">{{ $t('album.edit.last_scan_time') }}</div>
-          <div class="h-8 flex items-center text-xs font-semibold text-base-content/65">{{ lastScanTime }}</div>
+          <div class="h-8 flex items-center text-[10px] uppercase tracking-widest font-bold text-base-content/30">{{ $t('album.edit.last_scan_time') }}</div>
+          <div class="h-8 flex items-center text-xs font-semibold text-base-content/30">{{ lastScanTime }}</div>
         </template>
       </div>
     </section>
@@ -136,16 +146,14 @@
     <!-- cancel and OK buttons -->
     <div class="mt-4 flex justify-end space-x-4">
       <button 
-        class="px-4 py-1 rounded-box hover:bg-base-100 hover:text-base-content cursor-pointer" 
+        class="t-button-default" 
         @click="clickCancel"
       >
         {{ $t('msgbox.cancel') }}
       </button>
       <button 
-        :class="[
-          'px-4 py-1 rounded-box transition-colors duration-200', 
-          inputNameValue.trim().length > 0 && selectedFolder.length > 0 && !isScanning ? 'hover:bg-primary hover:text-base-100 cursor-pointer bg-base-content/10' : 'text-base-content/20 cursor-default bg-base-content/5',
-        ]" 
+        class="t-button-primary"
+        :disabled="inputNameValue.trim().length === 0 || selectedFolder.length === 0"
         @click="clickOk"
       >
         {{ $t('msgbox.ok') }}
@@ -156,7 +164,7 @@
 
 <script setup lang="ts">
 
-import { ref, watch, onMounted, onUnmounted, computed } from 'vue';
+import { ref, watch, onMounted, onUnmounted, computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { countFolder, getAllAlbums, listenIndexProgress, listenIndexFinished } from '@/common/api';
 import { useToast } from '@/common/toast';
@@ -167,7 +175,7 @@ import { getAlbumScanState } from '@/common/scanStatus';
 
 import ModalDialog from '@/components/ModalDialog.vue';
 import TButton from '@/components/TButton.vue';
-import { IconNewFolder } from '@/common/icons';
+import { IconEdit, IconNewFolder } from '@/common/icons';
 
 const props = defineProps({
   isNewAlbum: {
@@ -220,8 +228,10 @@ const selectedFolder = ref('');
 
 // input 
 const inputNameRef = ref<HTMLInputElement | null>(null);
+const descriptionRef = ref<HTMLTextAreaElement | null>(null);
 const inputNameValue = ref(props.inputName);
 const inputDescriptionValue = ref(props.inputDescription);
+const showDescription = ref(inputDescriptionValue.value.trim().length > 0);
 
 // total file count of the album (from disk probe)
 const totalFolderCount = ref(0);
@@ -261,6 +271,7 @@ watch(() => selectedFolder.value, (newPath) => {
       // get folder name
       inputNameValue.value = getFolderName(newPath);
       inputDescriptionValue.value = '';
+      showDescription.value = false;
     }
 
     countFolder(newPath).then((res) => {
@@ -293,7 +304,7 @@ onMounted(async () => {
     }
   });
 
-  if (!props.isNewAlbum) {
+  if (props.albumPath) {
     selectedFolder.value = props.albumPath;
 
     setTimeout(() => {
@@ -320,6 +331,12 @@ const clickSelectFolder = async () => {
     }, 100);
   }
 };
+
+async function showDescriptionInput() {
+  showDescription.value = true;
+  await nextTick();
+  descriptionRef.value?.focus();
+}
 
 function handleKeyDown(event: KeyboardEvent) {
   if (!uiStore.isInputActive('AlbumEdit')) return;

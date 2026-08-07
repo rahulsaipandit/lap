@@ -8,6 +8,7 @@ struct Migration {
 
 fn get_migrations() -> Vec<Migration> {
     vec![
+        // v0.1.0 — initial release schema
         Migration {
             version: 1,
             description: "Create deduplication tables",
@@ -48,22 +49,148 @@ fn get_migrations() -> Vec<Migration> {
                 CREATE INDEX IF NOT EXISTS idx_dup_items_file ON duplicate_group_items(file_id);
             ",
         },
+        // v0.1.x — RAW / format_label support
         Migration {
             version: 2,
             description: "Add afiles.format_label column",
             sql: "",
         },
+        // v0.2.2 — thumbnail cache
         Migration {
             version: 3,
             description: "Add thumbnail cache metadata columns",
             sql: "",
         },
+        // v0.2.2 — incremental scan foundation
         Migration {
             version: 4,
             description: "Add last_scan_time for file and album sync",
             sql: "",
         },
+        // v0.2.4 — folder exclusion, inode, search exclusion
+        Migration {
+            version: 5,
+            description: "Post v0.2.2 schema updates",
+            sql: "",
+        },
+        // Post v0.2.4 — collections, unique folder names, Live Photo,
+        // case-insensitive index, folder scan state
+        Migration {
+            version: 9,
+            description: "Post v0.2.4 schema updates",
+            sql: "",
+        },
+        Migration {
+            version: 10,
+            description: "Create visual similarity review tables",
+            sql: "
+                CREATE TABLE IF NOT EXISTS similarity_scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL UNIQUE,
+                    source_version INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    group_count INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    completed_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS similarity_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id INTEGER NOT NULL,
+                    representative_file_id INTEGER NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    latest_taken_date INTEGER NOT NULL DEFAULT 0,
+                    min_score REAL NOT NULL DEFAULT 0,
+                    max_score REAL NOT NULL DEFAULT 0,
+                    FOREIGN KEY (scan_id) REFERENCES similarity_scans(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_similarity_groups_scan ON similarity_groups(scan_id);
+                CREATE TABLE IF NOT EXISTS similarity_group_items (
+                    group_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    PRIMARY KEY (group_id, file_id),
+                    FOREIGN KEY (group_id) REFERENCES similarity_groups(id) ON DELETE CASCADE,
+                    FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_similarity_items_group ON similarity_group_items(group_id);
+                CREATE INDEX IF NOT EXISTS idx_similarity_items_file ON similarity_group_items(file_id);
+            ",
+        },
+        Migration {
+            version: 11,
+            description: "Add file culling status",
+            sql: "",
+        },
+        Migration {
+            version: 12,
+            description: "Cache direct subfolder state on folders",
+            sql: "",
+        },
+        Migration {
+            version: 13,
+            description: "Persist folder filesystem identity",
+            sql: "",
+        },
     ]
+}
+
+fn migrate_unique_album_files(conn: &Connection) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Migration 9 (deduplicate album files) failed starting transaction: {}", e))?;
+
+    tx.execute_batch(
+        "
+        CREATE TEMP TABLE duplicate_afile_map (
+            old_id INTEGER PRIMARY KEY,
+            new_id INTEGER NOT NULL
+        );
+
+        INSERT INTO duplicate_afile_map (old_id, new_id)
+        SELECT a.id, duplicates.new_id
+        FROM afiles a
+        JOIN (
+            SELECT folder_id, name, MAX(id) AS new_id
+            FROM afiles
+            GROUP BY folder_id, name
+            HAVING COUNT(*) > 1
+        ) duplicates
+          ON duplicates.folder_id = a.folder_id
+         AND duplicates.name = a.name
+        WHERE a.id <> duplicates.new_id;
+
+        UPDATE albums
+        SET cover_file_id = (
+            SELECT new_id
+            FROM duplicate_afile_map
+            WHERE old_id = albums.cover_file_id
+        )
+        WHERE cover_file_id IN (SELECT old_id FROM duplicate_afile_map);
+
+        UPDATE persons
+        SET cover_face_id = NULL
+        WHERE cover_face_id IN (
+            SELECT faces.id
+            FROM faces
+            JOIN duplicate_afile_map ON duplicate_afile_map.old_id = faces.file_id
+        );
+
+        DELETE FROM afiles
+        WHERE id IN (SELECT old_id FROM duplicate_afile_map);
+
+        DROP INDEX IF EXISTS idx_afiles_folder_id_name;
+        DROP INDEX IF EXISTS uidx_afiles_folder_id_name;
+        CREATE UNIQUE INDEX uidx_afiles_folder_id_name
+            ON afiles(folder_id, name);
+
+        DROP TABLE duplicate_afile_map;
+        ",
+    )
+    .map_err(|e| format!("Migration 9 (deduplicate album files) failed: {}", e))?;
+
+    tx.commit()
+        .map_err(|e| format!("Migration 9 (deduplicate album files) failed committing transaction: {}", e))
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
@@ -128,18 +255,162 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                 .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
             } else if migration.version == 4 {
                 if !table_has_column(conn, "afiles", "last_scan_time")? {
-                    conn.execute("ALTER TABLE afiles ADD COLUMN last_scan_time INTEGER DEFAULT 0", [])
-                        .map_err(|e| format!("Migration {} failed adding last_scan_time: {}", migration.version, e))?;
+                    conn.execute(
+                        "ALTER TABLE afiles ADD COLUMN last_scan_time INTEGER DEFAULT 0",
+                        [],
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "Migration {} failed adding last_scan_time: {}",
+                            migration.version, e
+                        )
+                    })?;
                 }
                 if !table_has_column(conn, "albums", "last_scan_time")? {
-                    conn.execute("ALTER TABLE albums ADD COLUMN last_scan_time INTEGER DEFAULT 0", [])
-                        .map_err(|e| format!("Migration {} failed adding last_scan_time: {}", migration.version, e))?;
+                    conn.execute(
+                        "ALTER TABLE albums ADD COLUMN last_scan_time INTEGER DEFAULT 0",
+                        [],
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "Migration {} failed adding last_scan_time: {}",
+                            migration.version, e
+                        )
+                    })?;
                 }
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_afiles_last_scan_time ON afiles(last_scan_time)",
                     [],
                 )
                 .map_err(|e| format!("Migration {} failed adding last_scan_time index: {}", migration.version, e))?;
+            } else if migration.version == 5 {
+                if !table_has_column(conn, "afolders", "is_excluded_from_search")? {
+                    conn.execute(
+                        "ALTER TABLE afolders ADD COLUMN is_excluded_from_search INTEGER DEFAULT 0",
+                        [],
+                    )
+                    .map_err(|e| {
+                        format!(
+                            "Migration {} failed adding is_excluded_from_search: {}",
+                            migration.version, e
+                        )
+                    })?;
+                }
+                if !table_has_column(conn, "afiles", "inode")? {
+                    conn.execute("ALTER TABLE afiles ADD COLUMN inode INTEGER", [])
+                        .map_err(|e| {
+                            format!("Migration {} failed adding inode: {}", migration.version, e)
+                        })?;
+                }
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afolders_is_excluded_from_search ON afolders(is_excluded_from_search)",
+                    [],
+                )
+                .map_err(|e| {
+                    format!(
+                        "Migration {} failed adding is_excluded_from_search index: {}",
+                        migration.version, e
+                    )
+                })?;
+            } else if migration.version == 9 {
+                // --- collections ---
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS acollections (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        sort_order INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_acollections_sort ON acollections(sort_order, id);
+
+                    CREATE TABLE IF NOT EXISTS acollections_files (
+                        collection_id INTEGER NOT NULL,
+                        file_id INTEGER NOT NULL,
+                        added_at INTEGER NOT NULL,
+                        PRIMARY KEY (collection_id, file_id),
+                        FOREIGN KEY (collection_id) REFERENCES acollections(id) ON DELETE CASCADE,
+                        FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_acollections_files_file ON acollections_files(file_id);
+                    CREATE INDEX IF NOT EXISTS idx_acollections_files_collection_added
+                        ON acollections_files(collection_id, added_at DESC, file_id);",
+                )
+                .map_err(|e| format!("Migration 9 failed creating collections: {}", e))?;
+
+                // --- deduplicate album files ---
+                migrate_unique_album_files(conn)?;
+
+                // --- Live Photo pairing columns ---
+                if !table_has_column(conn, "afiles", "content_identifier")? {
+                    conn.execute("ALTER TABLE afiles ADD COLUMN content_identifier TEXT", [])
+                        .map_err(|e| format!("Migration 9 failed adding content_identifier: {}", e))?;
+                }
+                if !table_has_column(conn, "afiles", "media_subtype")? {
+                    conn.execute("ALTER TABLE afiles ADD COLUMN media_subtype TEXT", [])
+                        .map_err(|e| format!("Migration 9 failed adding media_subtype: {}", e))?;
+                }
+                if !table_has_column(conn, "afiles", "live_photo_video_id")? {
+                    conn.execute("ALTER TABLE afiles ADD COLUMN live_photo_video_id INTEGER", [])
+                        .map_err(|e| format!("Migration 9 failed adding live_photo_video_id: {}", e))?;
+                }
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afiles_content_identifier ON afiles(content_identifier)",
+                    [],
+                ).map_err(|e| format!("Migration 9 failed adding content_identifier index: {}", e))?;
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afiles_live_photo_video_id ON afiles(live_photo_video_id)",
+                    [],
+                ).map_err(|e| format!("Migration 9 failed adding live_photo_video_id index: {}", e))?;
+
+                // --- case-insensitive filename index ---
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afiles_folder_name_nocase
+                     ON afiles(folder_id, name COLLATE NOCASE)",
+                    [],
+                ).map_err(|e| format!("Migration 9 failed adding case-insensitive index: {}", e))?;
+
+                // --- per-folder scan state ---
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS folder_scan_state (
+                        folder_id INTEGER NOT NULL,
+                        scanner TEXT NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 0,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY (folder_id, scanner),
+                        FOREIGN KEY (folder_id) REFERENCES afolders(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_folder_scan_state_scanner_version
+                        ON folder_scan_state(scanner, version);",
+                ).map_err(|e| format!("Migration 9 failed creating folder scan state: {}", e))?;
+            } else if migration.version == 11 {
+                if !table_has_column(conn, "afiles", "culling_flag")? {
+                    conn.execute(
+                        "ALTER TABLE afiles ADD COLUMN culling_flag INTEGER NOT NULL DEFAULT 0",
+                        [],
+                    )
+                    .map_err(|e| format!("Migration 11 failed adding culling_flag: {}", e))?;
+                }
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afiles_culling_flag ON afiles(culling_flag)",
+                    [],
+                )
+                .map_err(|e| format!("Migration 11 failed adding culling_flag index: {}", e))?;
+            } else if migration.version == 12 {
+                if !table_has_column(conn, "afolders", "has_subfolders")? {
+                    conn.execute("ALTER TABLE afolders ADD COLUMN has_subfolders INTEGER", [])
+                        .map_err(|e| format!("Migration 12 failed adding has_subfolders: {}", e))?;
+                }
+            } else if migration.version == 13 {
+                if !table_has_column(conn, "afolders", "inode")? {
+                    conn.execute("ALTER TABLE afolders ADD COLUMN inode INTEGER", [])
+                        .map_err(|e| format!("Migration 13 failed adding inode: {}", e))?;
+                }
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_afolders_album_inode ON afolders(album_id, inode)",
+                    [],
+                )
+                .map_err(|e| format!("Migration 13 failed creating inode index: {}", e))?;
             } else if !migration.sql.trim().is_empty() {
                 conn.execute_batch(migration.sql)
                     .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;

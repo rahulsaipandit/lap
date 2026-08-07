@@ -4,6 +4,7 @@ import { createPinia } from 'pinia'
 import piniaPersistedState from 'pinia-plugin-persistedstate'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
+import 'cally'
 import router from '@/common/router'
 import App from '@/App.vue'
 import { useConfigStore } from '@/stores/configStore'
@@ -86,14 +87,14 @@ listen('settings-externalVideoAppName-changed', (event) => {
 listen('settings-language-changed', (event) => {
   config.setLanguage(event.payload)
 })
-listen('settings-showButtonText-changed', (event) => {
-  config.setShowButtonText(event.payload)
-})
 listen('settings-showToolTip-changed', (event) => {
   config.setShowToolTip(event.payload)
 })
 listen('settings-showStatusBar-changed', (event) => {
   config.setShowStatusBar(event.payload)
+})
+listen('settings-autoCheckUpdates-changed', (event) => {
+  config.setAutoCheckUpdates(event.payload)
 })
 listen('settings-debugMode-changed', (event) => {
   config.setDebugMode(event.payload)
@@ -110,6 +111,9 @@ listen('settings-calendarSort-changed', (event) => {
 listen('settings-categorySort-changed', (event) => {
   config.setCategorySort(event.payload)
 })
+listen('settings-showSubfolderFiles-changed', (event) => {
+  config.setShowSubfolderFiles(event.payload)
+})
 listen('settings-gridSize-changed', (event) => {
   config.setGridSize(event.payload)
 })
@@ -125,8 +129,11 @@ listen('settings-gridLabelPrimary-changed', (event) => {
 listen('settings-gridLabelSecondary-changed', (event) => {
   config.setGridLabelSecondary(event.payload)
 })
-listen('settings-justifyMode-changed', (event) => {
-  config.setJustifyMode(event.payload)
+listen('settings-gridThumbnailBadge-changed', (event) => {
+  config.setGridThumbnailBadge(event.payload)
+})
+listen('settings-showFilmStrip-changed', (event) => {
+  config.setShowFilmStrip(event.payload)
 })
 listen('settings-filmStripViewPreviewPosition-changed', (event) => {
   config.setFilmStripViewPreviewPosition(event.payload)
@@ -140,18 +147,24 @@ listen('settings-slideShowInterval-changed', (event) => {
 listen('settings-autoPlayVideo-changed', (event) => {
   config.setAutoPlayVideo(event.payload)
 })
+listen('settings-loopVideo-changed', (event) => {
+  config.settings.loopVideo = event.payload
+})
+listen('settings-groupRawJpegPairs-changed', (event) => {
+  config.settings.groupRawJpegPairs = event.payload
+})
 listen('settings-navigatorViewMode-changed', (event) => {
   config.setNavigatorViewMode(event.payload)
 })
 listen('settings-navigatorViewSize-changed', (event) => {
   config.setNavigatorViewSize(event.payload)
 })
+listen('settings-viewBackground-changed', (event) => {
+  config.setViewBackground(event.payload)
+})
 listen('settings-slideShowTransition-changed', (event) => {
   config.setSlideShowTransition(event.payload)
 })
-// listen('settings-showComment-changed', (event) => {
-//   config.setShowComment(event.payload)
-// })
 listen('settings-imageSearchThresholdIndex-changed', (event) => {
   config.setImageSearchThresholdIndex(event.payload)
 })

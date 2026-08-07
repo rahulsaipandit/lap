@@ -7,7 +7,8 @@
 use arboard::Clipboard;
 use exif::{In, Reader, Tag};
 use fast_image_resize as fir;
-use image::{DynamicImage, GenericImageView, ImageReader, RgbImage};
+use image::{DynamicImage, GenericImageView, ImageFormat, ImageReader, RgbImage};
+use little_exif::exif_tag::ExifTag;
 use little_exif::filetype::FileExtension;
 use little_exif::ifd::ExifTagGroup;
 use little_exif::metadata::Metadata as LittleExifMetadata;
@@ -29,12 +30,101 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{t_jxl, t_libraw, t_utils};
-// use crate::t_video;
+
+#[derive(Default)]
+pub struct CaptureSettings {
+    pub exposure_time: Option<String>,
+    pub f_number: Option<String>,
+    pub focal_length: Option<String>,
+    pub iso_speed: Option<String>,
+}
+
+/// Reads the core capture settings with the same EXIF reader used when image
+/// edits preserve metadata. This covers JPEGs that little_exif accepts but
+/// kamadak-exif cannot decode.
+pub fn read_capture_settings_with_little_exif(file_path: &str) -> CaptureSettings {
+    if !is_jpeg_path(file_path) {
+        return CaptureSettings::default();
+    }
+
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        let metadata = match LittleExifMetadata::new_from_path(Path::new(file_path)) {
+            Ok(metadata) => metadata,
+            Err(_) => return CaptureSettings::default(),
+        };
+
+        CaptureSettings {
+            exposure_time: metadata
+                .get_tag_by_hex(0x829a, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .and_then(format_little_exif_shutter_speed),
+            f_number: metadata
+                .get_tag_by_hex(0x829d, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .map(|value| format!("f/{value}")),
+            focal_length: metadata
+                .get_tag_by_hex(0x920a, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_rational_value)
+                .map(|value| format!("{value} mm")),
+            iso_speed: metadata
+                .get_tag_by_hex(0x8827, Some(ExifTagGroup::EXIF))
+                .next()
+                .and_then(little_exif_iso_value)
+                .filter(|value| value != "0")
+                .or_else(|| {
+                    metadata
+                        .get_tag_by_hex(0x8833, Some(ExifTagGroup::EXIF))
+                        .next()
+                        .and_then(little_exif_iso_value)
+                        .filter(|value| value != "0")
+                }),
+        }
+    }))
+    .unwrap_or_default()
+}
+
+fn little_exif_rational_value(tag: &ExifTag) -> Option<f64> {
+    let values = match tag {
+        ExifTag::ExposureTime(values) | ExifTag::FNumber(values) | ExifTag::FocalLength(values) => {
+            values
+        }
+        _ => return None,
+    };
+    let value = values.first()?;
+    (value.denominator != 0).then(|| value.nominator as f64 / value.denominator as f64)
+}
+
+fn little_exif_iso_value(tag: &ExifTag) -> Option<String> {
+    match tag {
+        ExifTag::ISO(values) => values.first().map(ToString::to_string),
+        ExifTag::ISOSpeed(values) => values.first().map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn format_little_exif_shutter_speed(value: f64) -> Option<String> {
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    if value >= 1.0 {
+        Some(format!("{value} s"))
+    } else {
+        Some(format!("1/{} s", 1.0 / value))
+    }
+}
 
 /// Quick probing of image dimensions without loading the entire file
 pub fn get_image_dimensions(file_path: &str) -> Result<(u32, u32), String> {
     if t_jxl::is_jxl_path(file_path) {
         return t_jxl::get_jxl_dimensions(file_path);
+    }
+
+    if is_ffmpeg_backed_image_path(file_path) {
+        let metadata = crate::t_video::get_video_metadata(file_path)?;
+        return Ok((metadata.width, metadata.height));
     }
 
     // Catch potential panics in the third-party imagesize crate
@@ -99,20 +189,20 @@ fn get_raw_dimensions_from_exif(file_path: &str) -> Result<Option<(u32, u32)>, S
 pub fn read_exif_from_bytes_permissive(data: &[u8]) -> Option<exif::Exif> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut cursor = Cursor::new(data);
-        if let Ok(exif) = Reader::new().read_from_container(&mut cursor) {
+        if let Some(exif) = read_exif_container_with_recovery(&mut cursor) {
             return Some(exif);
         }
         if let Some(pos) = data.windows(6).position(|w| w == b"Exif\0\0") {
             let exif_start = pos + 6;
             if exif_start < data.len() {
-                if let Ok(exif) = Reader::new().read_raw(data[exif_start..].to_vec()) {
+                if let Some(exif) = read_exif_raw_with_recovery(data[exif_start..].to_vec()) {
                     return Some(exif);
                 }
             }
         }
         for sig in [b"II\x2a\x00", b"MM\x00\x2a"] {
             if let Some(pos) = data.windows(4).position(|w| w == sig) {
-                if let Ok(exif) = Reader::new().read_raw(data[pos..].to_vec()) {
+                if let Some(exif) = read_exif_raw_with_recovery(data[pos..].to_vec()) {
                     return Some(exif);
                 }
             }
@@ -122,29 +212,53 @@ pub fn read_exif_from_bytes_permissive(data: &[u8]) -> Option<exif::Exif> {
     .unwrap_or_else(|_| None)
 }
 
+fn read_exif_container_with_recovery(cursor: &mut Cursor<&[u8]>) -> Option<exif::Exif> {
+    let mut reader = Reader::new();
+    reader.continue_on_error(true);
+    read_exif_result_with_recovery(reader.read_from_container(cursor))
+}
+
+fn read_exif_raw_with_recovery(data: Vec<u8>) -> Option<exif::Exif> {
+    let mut reader = Reader::new();
+    reader.continue_on_error(true);
+    read_exif_result_with_recovery(reader.read_raw(data))
+}
+
+fn read_exif_result_with_recovery(result: Result<exif::Exif, exif::Error>) -> Option<exif::Exif> {
+    result
+        .or_else(|error| error.distill_partial_result(|_| {}))
+        .ok()
+}
+
 /// A very aggressive binary scanner that looks for the EXIF Orientation tag (0x0112)
 /// directly in the byte stream. This is used as a final fallback for non-standard devices.
 pub fn scan_orientation_binary(data: &[u8]) -> Option<i32> {
     // Orientation tag is 0x0112. In TIFF, it's a Short (3) with Count 1.
     // Little Endian: 12 01 03 00 01 00 00 00 [Value] 00 00 00
     // Big Endian:    01 12 00 03 00 00 00 01 00 [Value] 00 00
-    
+
     // Little Endian search
-    if let Some(pos) = data.windows(12).position(|w| {
-        w[0..8] == [0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00]
-    }) {
+    if let Some(pos) = data
+        .windows(12)
+        .position(|w| w[0..8] == [0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00])
+    {
         let val = data[pos + 8] as i32;
-        if (1..=8).contains(&val) { return Some(val); }
+        if (1..=8).contains(&val) {
+            return Some(val);
+        }
     }
-    
+
     // Big Endian search
-    if let Some(pos) = data.windows(12).position(|w| {
-        w[0..8] == [0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01]
-    }) {
+    if let Some(pos) = data
+        .windows(12)
+        .position(|w| w[0..8] == [0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01])
+    {
         let val = data[pos + 9] as i32;
-        if (1..=8).contains(&val) { return Some(val); }
+        if (1..=8).contains(&val) {
+            return Some(val);
+        }
     }
-    
+
     None
 }
 
@@ -154,31 +268,51 @@ pub fn read_exif_permissive(file_path: &str) -> Option<exif::Exif> {
         let mut file = File::open(file_path).ok()?;
         let mut header = [0u8; 2];
         file.read_exact(&mut header).ok()?;
-        
-        if header != [0xFF, 0xD8] { return None; }
+
+        if header != [0xFF, 0xD8] {
+            return None;
+        }
 
         loop {
             let mut marker = [0u8; 2];
-            if file.read_exact(&mut marker).is_err() { break; }
-            if marker[0] != 0xFF { break; }
-            if marker[1] == 0xD9 || marker[1] == 0xDA { break; } 
+            if file.read_exact(&mut marker).is_err() {
+                break;
+            }
+            if marker[0] != 0xFF {
+                break;
+            }
+            if marker[1] == 0xD9 || marker[1] == 0xDA {
+                break;
+            }
 
             let mut len_bytes = [0u8; 2];
-            if file.read_exact(&mut len_bytes).is_err() { break; }
+            if file.read_exact(&mut len_bytes).is_err() {
+                break;
+            }
             let len = u16::from_be_bytes(len_bytes) as usize;
-            if len < 2 { break; }
+            if len < 2 {
+                break;
+            }
             let segment_len = len - 2;
-            
-            if marker[1] == 0xE1 { // APP1
+
+            if marker[1] == 0xE1 {
+                // APP1
                 let mut segment_data = vec![0u8; segment_len];
-                if file.read_exact(&mut segment_data).is_err() { break; }
+                if file.read_exact(&mut segment_data).is_err() {
+                    break;
+                }
                 if segment_data.starts_with(b"Exif\0\0") {
-                    if let Ok(exif) = Reader::new().read_raw(segment_data[6..].to_vec()) {
+                    if let Some(exif) = read_exif_raw_with_recovery(segment_data[6..].to_vec()) {
                         return Some(exif);
                     }
                 }
             } else {
-                if file.seek(std::io::SeekFrom::Current(segment_len as i64)).is_err() { break; }
+                if file
+                    .seek(std::io::SeekFrom::Current(segment_len as i64))
+                    .is_err()
+                {
+                    break;
+                }
             }
         }
         None
@@ -186,7 +320,7 @@ pub fn read_exif_permissive(file_path: &str) -> Option<exif::Exif> {
     .unwrap_or_else(|_| None)
     .or_else(|| {
         let mut file = File::open(file_path).ok()?;
-        let mut buffer = vec![0u8; 128 * 1024]; 
+        let mut buffer = vec![0u8; 128 * 1024];
         let n = file.read(&mut buffer).unwrap_or(0);
         read_exif_from_bytes_permissive(&buffer[..n])
     })
@@ -205,12 +339,15 @@ pub fn get_image_orientation(file_path: &str) -> i32 {
 
     // 1. Try modern logic
     if let Some(exif) = read_exif_from_bytes_permissive(&data) {
-        let orient = exif.get_field(Tag::Orientation, In::PRIMARY)
+        let orient = exif
+            .get_field(Tag::Orientation, In::PRIMARY)
             .or_else(|| exif.fields().find(|f| f.tag == Tag::Orientation))
             .and_then(|field| field.value.get_uint(0))
             .map(|value| value as i32);
-        
-        if let Some(o) = orient { return o; }
+
+        if let Some(o) = orient {
+            return o;
+        }
     }
 
     // 2. Industry Fallback: Binary Scan
@@ -252,10 +389,7 @@ fn encode_jpeg_rgb8(rgb: &image::RgbImage) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Failed to encode JPEG thumbnail: {}", e))
 }
 
-fn resize_rgb_image_to_jpeg(
-    rgb: image::RgbImage,
-    thumbnail_size: u32,
-) -> Result<Vec<u8>, String> {
+fn resize_rgb_image_to_jpeg(rgb: image::RgbImage, thumbnail_size: u32) -> Result<Vec<u8>, String> {
     let (src_w, src_h) = rgb.dimensions();
     let (dst_w, dst_h) = compute_thumbnail_dimensions(src_w, src_h, thumbnail_size);
 
@@ -263,17 +397,13 @@ fn resize_rgb_image_to_jpeg(
         return encode_jpeg_rgb8(&rgb);
     }
 
-    let src_image = fir::images::Image::from_vec_u8(
-        src_w,
-        src_h,
-        rgb.into_raw(),
-        fir::PixelType::U8x3,
-    )
-    .map_err(|e| format!("Failed to prepare RGB source image for resize: {}", e))?;
+    let src_image =
+        fir::images::Image::from_vec_u8(src_w, src_h, rgb.into_raw(), fir::PixelType::U8x3)
+            .map_err(|e| format!("Failed to prepare RGB source image for resize: {}", e))?;
     let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x3);
     let mut resizer = fir::Resizer::new();
-    let options =
-        fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
 
     resizer
         .resize(&src_image, &mut dst_image, &options)
@@ -284,11 +414,51 @@ fn resize_rgb_image_to_jpeg(
     encode_jpeg_rgb8(&resized)
 }
 
-fn is_jpeg_path(file_path: &str) -> bool {
+fn resize_rgba_image_to_png(
+    rgba: image::RgbaImage,
+    thumbnail_size: u32,
+) -> Result<Vec<u8>, String> {
+    let (src_w, src_h) = rgba.dimensions();
+    let (dst_w, dst_h) = compute_thumbnail_dimensions(src_w, src_h, thumbnail_size);
+
+    let resized = if src_w == dst_w && src_h == dst_h {
+        rgba
+    } else {
+        let src_image =
+            fir::images::Image::from_vec_u8(src_w, src_h, rgba.into_raw(), fir::PixelType::U8x4)
+                .map_err(|e| format!("Failed to prepare PNG source image for resize: {}", e))?;
+        let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
+        let mut resizer = fir::Resizer::new();
+        let options = fir::ResizeOptions::new()
+            .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
+
+        resizer
+            .resize(&src_image, &mut dst_image, &options)
+            .map_err(|e| format!("Failed to resize PNG thumbnail: {}", e))?;
+
+        image::RgbaImage::from_raw(dst_w, dst_h, dst_image.into_vec())
+            .ok_or_else(|| "Failed to build resized PNG thumbnail".to_string())?
+    };
+
+    let mut output = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(resized)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG thumbnail: {}", e))?;
+    Ok(output.into_inner())
+}
+
+pub(crate) fn should_use_png_thumbnail(file_path: &str) -> bool {
     Path::new(file_path)
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "jpe"))
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "gif"))
+}
+
+pub fn is_jpeg_path(file_path: &str) -> bool {
+    Path::new(file_path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "jpe" | "jfif"))
         .unwrap_or(false)
 }
 
@@ -309,7 +479,10 @@ fn decode_scaled_jpeg_image(
             Ok(Some(DynamicImage::ImageRgb8(img)))
         }
         Err(e) => {
-            eprintln!("libjpeg-turbo scaled decode failed for {}: {}", file_path, e);
+            eprintln!(
+                "libjpeg-turbo scaled decode failed for {}: {}",
+                file_path, e
+            );
             Ok(None) // Fallback to standard decode
         }
     }
@@ -334,12 +507,13 @@ pub(crate) fn resize_dynamic_image_to_jpeg(
         return encode_jpeg_rgb8(&DynamicImage::ImageRgba8(rgba).to_rgb8());
     }
 
-    let src_image = fir::images::Image::from_vec_u8(src_w, src_h, rgba.into_raw(), fir::PixelType::U8x4)
-        .map_err(|e| format!("Failed to prepare source image for resize: {}", e))?;
+    let src_image =
+        fir::images::Image::from_vec_u8(src_w, src_h, rgba.into_raw(), fir::PixelType::U8x4)
+            .map_err(|e| format!("Failed to prepare source image for resize: {}", e))?;
     let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
     let mut resizer = fir::Resizer::new();
-    let options =
-        fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
 
     resizer
         .resize(&src_image, &mut dst_image, &options)
@@ -399,7 +573,9 @@ pub fn generate_directory_thumbnails(
             };
 
             let relative_path = path.strip_prefix(dir_root).ok().unwrap_or(path.as_path());
-            let output_path = Path::new(output_dir).join(relative_path).with_extension("jpg");
+            let output_path = Path::new(output_dir)
+                .join(relative_path)
+                .with_extension("jpg");
             if let Some(parent) = output_path.parent() {
                 if fs::create_dir_all(parent).is_err() {
                     return false;
@@ -427,6 +603,10 @@ pub fn get_image_thumbnail(
         return t_jxl::get_jxl_thumbnail(file_path, thumbnail_size);
     }
 
+    if is_ffmpeg_backed_image_path(file_path) {
+        return crate::t_video::get_video_thumbnail_sync(file_path, thumbnail_size, None, None);
+    }
+
     if crate::t_libraw::is_tiff_path(file_path) {
         if let Ok(Some(data)) = crate::t_libraw::get_raw_thumbnail(file_path, thumbnail_size) {
             return Ok(Some(data));
@@ -434,38 +614,50 @@ pub fn get_image_thumbnail(
     }
 
     let result = panic::catch_unwind(|| {
-        let img = if let Some(img) = decode_scaled_jpeg_image(file_path, orientation, thumbnail_size)? {
-            img
-        } else {
-            let img_reader =
-                ImageReader::open(file_path).map_err(|e| format!("Failed to open image: {}", e))?;
+        let img =
+            if let Some(img) = decode_scaled_jpeg_image(file_path, orientation, thumbnail_size)? {
+                img
+            } else {
+                let img_reader = ImageReader::open(file_path)
+                    .map_err(|e| format!("Failed to open image: {}", e))?;
 
-            match img_reader.decode() {
-                Ok(img) => img,
-                Err(e) => {
-                    // Some formats/variants (notably AVIF) may fail to decode via `image` depending on
-                    // the underlying codec support. On macOS, fall back to `sips` which supports
-                    // more system formats and returns a JPEG directly.
-                    #[cfg(target_os = "macos")]
-                    if let Ok(Some(data)) = get_thumbnail_with_sips(file_path, thumbnail_size) {
-                        return Ok(Some(data));
-                    }
-                    // On other platforms, fall back to the bundled FFmpeg sidecar when available.
-                    // This is already used for HEIC/HEIF on non-macOS and tends to support more
-                    // real-world AVIF variants than the pure-Rust decode path.
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        if let Ok(Some(data)) =
-                            crate::t_video::get_video_thumbnail_sync(file_path, thumbnail_size, None)
-                        {
+                match img_reader.decode() {
+                    Ok(img) => img,
+                    Err(e) => {
+                        // Some formats/variants (notably AVIF) may fail to decode via `image` depending on
+                        // the underlying codec support. On macOS, fall back to `sips` which supports
+                        // more system formats and returns a JPEG directly.
+                        #[cfg(target_os = "macos")]
+                        if let Ok(Some(data)) = get_thumbnail_with_sips(file_path, thumbnail_size) {
                             return Ok(Some(data));
                         }
+                        // On other platforms, fall back to the bundled FFmpeg sidecar when available.
+                        // This is already used for HEIC/HEIF on non-macOS and tends to support more
+                        // real-world AVIF variants than the pure-Rust decode path.
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            if let Ok(Some(data)) = crate::t_video::get_video_thumbnail_sync(
+                                file_path,
+                                thumbnail_size,
+                                None,
+                                None,
+                            ) {
+                                return Ok(Some(data));
+                            }
+                        }
+                        return Err(format!("Failed to decode image: {}", e));
                     }
-                    return Err(format!("Failed to decode image: {}", e));
                 }
-            }
-        };
-        resize_dynamic_image_to_jpeg(img, orientation, thumbnail_size).map(Some)
+            };
+        if should_use_png_thumbnail(file_path) {
+            resize_rgba_image_to_png(
+                apply_orientation(img, orientation).to_rgba8(),
+                thumbnail_size,
+            )
+            .map(Some)
+        } else {
+            resize_dynamic_image_to_jpeg(img, orientation, thumbnail_size).map(Some)
+        }
     });
 
     match result {
@@ -646,20 +838,7 @@ pub fn get_raw_preview_image(file_path: &str) -> Result<Option<Vec<u8>>, String>
 }
 
 pub fn get_raw_dimensions(file_path: &str) -> Result<(u32, u32), String> {
-    let should_swap_dimensions = |orientation: i32, raw_flip: i32| -> bool {
-        match orientation {
-            5 | 6 | 7 | 8 => true,
-            1 => matches!(raw_flip, 5 | 6),
-            _ => false,
-        }
-    };
-
-    if let Ok((mut width, mut height, raw_flip)) = t_libraw::get_raw_dimensions_with_flip(file_path)
-    {
-        let orientation = get_image_orientation(file_path);
-        if should_swap_dimensions(orientation, raw_flip) {
-            std::mem::swap(&mut width, &mut height);
-        }
+    if let Ok((width, height, _raw_flip)) = t_libraw::get_raw_dimensions_with_flip(file_path) {
         if width > 0 && height > 0 {
             return Ok((width, height));
         }
@@ -775,6 +954,26 @@ pub async fn edit_image(params: EditParams) -> bool {
             _ => image::ImageFormat::Jpeg,
         };
 
+        // Snapshot original metadata before overwriting the file.
+        // For overwrite (source == dest) we must copy the original to a
+        // temp location first — once we File::create the destination the
+        // original EXIF is gone. For save-as-new the source is untouched.
+        let metadata_backup_path = if format == image::ImageFormat::Jpeg
+            || format == image::ImageFormat::WebP
+        {
+            match prepare_metadata_backup_path(&params.source_file_path, &params.dest_file_path) {
+                Ok(path) => path,
+                Err(_) => return false,
+            }
+        } else {
+            None
+        };
+
+        let metadata_source = metadata_backup_path
+            .as_ref()
+            .map(|p| p.as_path())
+            .unwrap_or_else(|| Path::new(&params.source_file_path));
+
         let quality = params.quality.unwrap_or(80);
         let save_ok = if format == image::ImageFormat::Jpeg {
             if let Ok(file) = std::fs::File::create(path) {
@@ -788,23 +987,11 @@ pub async fn edit_image(params: EditParams) -> bool {
         };
 
         if !save_ok {
+            cleanup_metadata_backup(&metadata_backup_path);
             return false;
         }
 
-        if format == image::ImageFormat::Jpeg {
-            let metadata_backup_path = match prepare_metadata_backup_path(
-                &params.source_file_path,
-                &params.dest_file_path,
-            ) {
-                Ok(path) => path,
-                Err(_) => return false,
-            };
-
-            let metadata_source = metadata_backup_path
-                .as_ref()
-                .map(|p| p.as_path())
-                .unwrap_or_else(|| Path::new(&params.source_file_path));
-
+        if format == image::ImageFormat::Jpeg || format == image::ImageFormat::WebP {
             if let Err(_) = copy_metadata_to_output(metadata_source, path) {
                 if metadata_backup_path.is_some() {
                     let _ = fs::copy(metadata_source, path);
@@ -823,7 +1010,10 @@ pub async fn edit_image(params: EditParams) -> bool {
     false
 }
 
-fn prepare_metadata_backup_path(source_file_path: &str, dest_file_path: &str) -> Result<Option<PathBuf>, String> {
+fn prepare_metadata_backup_path(
+    source_file_path: &str,
+    dest_file_path: &str,
+) -> Result<Option<PathBuf>, String> {
     if source_file_path != dest_file_path {
         return Ok(None);
     }
@@ -857,7 +1047,8 @@ fn copy_metadata_to_output(source_path: &Path, dest_path: &Path) -> Result<(), S
     let source_path_buf = source_path.to_path_buf();
 
     // Check file type to detect RAW formats
-    let file_type = crate::t_utils::get_file_type(source_path.to_str().unwrap_or_default()).unwrap_or(0);
+    let file_type =
+        crate::t_utils::get_file_type(source_path.to_str().unwrap_or_default()).unwrap_or(0);
     let is_raw = file_type == 3;
 
     let mut little_exif_worked = false;
@@ -919,7 +1110,7 @@ fn sanitize_edit_output_metadata(metadata: &mut LittleExifMetadata) {
     metadata.remove_tag_by_hex_group(0x0202, ExifTagGroup::GENERIC); // JPEGInterchangeFormatLength
 }
 
-/// Filter for EXIF fields to copy. 
+/// Filter for EXIF fields to copy.
 /// We mainly copy PRIMARY IFD and exclude pointers or hardware-specific tags that
 /// might be invalidated by the image edit (like StripOffsets or Orientation).
 fn should_copy_exif_field(field: &exif::Field) -> bool {
@@ -949,10 +1140,10 @@ fn should_copy_exif_field(field: &exif::Field) -> bool {
 /// Extracts EXIF from a (potentially RAW) source and injects it into a JPEG destination.
 /// Includes a three-pass reduction logic to ensure metadata fits within the 64KB JPEG segment limit.
 fn copy_metadata_from_raw_to_jpeg(source_path: &Path, dest_path: &Path) -> Result<(), String> {
-    let file =
-        File::open(source_path).map_err(|e| format!("Failed to open source metadata file: {}", e))?;
+    let file = File::open(source_path)
+        .map_err(|e| format!("Failed to open source metadata file: {}", e))?;
     let mut reader = BufReader::new(file);
-    
+
     // Try read_from_container first (handles JPEG/TIFF/RAW-TIFF)
     let exif = match Reader::new().read_from_container(&mut reader) {
         Ok(exif) => exif,
@@ -975,7 +1166,8 @@ fn copy_metadata_from_raw_to_jpeg(source_path: &Path, dest_path: &Path) -> Resul
         let mut tiff_cursor = Cursor::new(Vec::new());
         if writer.write(&mut tiff_cursor, exif.little_endian()).is_ok() {
             let data = tiff_cursor.into_inner();
-            if data.len() <= 65527 { // JPEG APP1 max is 65535, minus 8 bytes header
+            if data.len() <= 65527 {
+                // JPEG APP1 max is 65535, minus 8 bytes header
                 return Some(data);
             }
         }
@@ -983,12 +1175,16 @@ fn copy_metadata_from_raw_to_jpeg(source_path: &Path, dest_path: &Path) -> Resul
     };
 
     // Pass 1: Attempt to copy all standard fields
-    let initial_fields: Vec<&exif::Field> = exif.fields().filter(|f| should_copy_exif_field(f)).collect();
+    let initial_fields: Vec<&exif::Field> = exif
+        .fields()
+        .filter(|f| should_copy_exif_field(f))
+        .collect();
     let mut exif_data = encode_and_check(initial_fields);
 
     // Pass 2: If too large, strip typically large vendor blocks (MakerNote, UserComment)
     if exif_data.is_none() {
-        let reduced_fields: Vec<&exif::Field> = exif.fields()
+        let reduced_fields: Vec<&exif::Field> = exif
+            .fields()
             .filter(|f| should_copy_exif_field(f))
             .filter(|f| !matches!(f.tag, Tag::MakerNote | Tag::UserComment))
             .collect();
@@ -997,14 +1193,31 @@ fn copy_metadata_from_raw_to_jpeg(source_path: &Path, dest_path: &Path) -> Resul
 
     // Pass 3: If still too large, keep only the most essential photography and GPS tags
     if exif_data.is_none() {
-        let essential_fields: Vec<&exif::Field> = exif.fields()
+        let essential_fields: Vec<&exif::Field> = exif
+            .fields()
             .filter(|f| should_copy_exif_field(f))
-            .filter(|f| matches!(f.tag, 
-                Tag::Make | Tag::Model | Tag::DateTimeOriginal | Tag::DateTimeDigitized |
-                Tag::ExposureTime | Tag::FNumber | Tag::PhotographicSensitivity | Tag::FocalLength |
-                Tag::LensMake | Tag::LensModel | Tag::ExposureBiasValue |
-                Tag::GPSLatitudeRef | Tag::GPSLatitude | Tag::GPSLongitudeRef | Tag::GPSLongitude | Tag::GPSAltitudeRef | Tag::GPSAltitude
-            ))
+            .filter(|f| {
+                matches!(
+                    f.tag,
+                    Tag::Make
+                        | Tag::Model
+                        | Tag::DateTimeOriginal
+                        | Tag::DateTimeDigitized
+                        | Tag::ExposureTime
+                        | Tag::FNumber
+                        | Tag::PhotographicSensitivity
+                        | Tag::FocalLength
+                        | Tag::LensMake
+                        | Tag::LensModel
+                        | Tag::ExposureBiasValue
+                        | Tag::GPSLatitudeRef
+                        | Tag::GPSLatitude
+                        | Tag::GPSLongitudeRef
+                        | Tag::GPSLongitude
+                        | Tag::GPSAltitudeRef
+                        | Tag::GPSAltitude
+                )
+            })
             .collect();
         exif_data = encode_and_check(essential_fields);
     }
@@ -1064,7 +1277,7 @@ pub fn copy_image_to_clipboard(img: DynamicImage) -> bool {
     false
 }
 
-fn is_heic_path(file_path: &str) -> bool {
+pub(crate) fn is_heic_path(file_path: &str) -> bool {
     matches!(
         t_utils::get_file_extension(file_path)
             .unwrap_or_default()
@@ -1084,12 +1297,21 @@ fn is_avif_path(file_path: &str) -> bool {
     )
 }
 
+pub(crate) fn is_ffmpeg_backed_image_path(file_path: &str) -> bool {
+    t_utils::get_file_extension(file_path).is_some_and(|extension| {
+        crate::t_common::FFMPEG_BACKED_IMGS
+            .iter()
+            .any(|item| item.eq_ignore_ascii_case(&extension))
+    })
+}
+
 fn should_generate_preview_for_file(file_path: &str, file_type: i64) -> bool {
     file_type == 3
         || crate::t_libraw::is_tiff_path(file_path)
         || t_jxl::is_jxl_path(file_path)
         || is_heic_path(file_path)
-        || cfg!(target_os = "linux") && is_avif_path(file_path)
+        || is_ffmpeg_backed_image_path(file_path)
+        || is_avif_path(file_path)
 }
 
 async fn get_generated_preview_bytes(file_path: &str) -> Result<Option<Vec<u8>>, String> {
@@ -1126,15 +1348,22 @@ async fn get_generated_preview_bytes(file_path: &str) -> Result<Option<Vec<u8>>,
         }
         #[cfg(all(not(target_os = "macos"), lap_has_libheif))]
         {
-            return crate::t_heif::get_heif_preview(file_path, get_image_orientation(file_path), 4096);
+            return crate::t_heif::get_heif_preview(
+                file_path,
+                get_image_orientation(file_path),
+                4096,
+            );
         }
         #[cfg(all(not(target_os = "macos"), not(lap_has_libheif)))]
         {
-            return crate::t_video::get_video_thumbnail(file_path, 4096, None).await;
+            return crate::t_video::get_video_thumbnail(file_path, 4096, None, None).await;
         }
     }
 
-    #[cfg(target_os = "linux")]
+    if is_ffmpeg_backed_image_path(file_path) {
+        return crate::t_video::get_video_thumbnail(file_path, 4096, None, None).await;
+    }
+
     if is_avif_path(file_path) {
         return get_image_thumbnail(file_path, get_image_orientation(file_path), 4096);
     }
@@ -1142,19 +1371,51 @@ async fn get_generated_preview_bytes(file_path: &str) -> Result<Option<Vec<u8>>,
     Ok(None)
 }
 
-pub async fn copy_file_to_clipboard(file_path: &str) -> Result<bool, String> {
-    if should_generate_preview_for_file(file_path, t_utils::get_file_type(file_path).unwrap_or(0))
-    {
-        let preview = get_generated_preview_bytes(file_path).await?
-            .ok_or_else(|| format!("Failed to resolve preview image: {}", file_path))?;
-        let img = image::load_from_memory(&preview)
-            .map_err(|e| format!("Failed to decode preview image: {}", e))?;
-        return Ok(copy_image_to_clipboard(img));
+async fn clipboard_preview_png(file_paths: &[String]) -> Option<Vec<u8>> {
+    for file_path in file_paths {
+        let file_type = t_utils::get_file_type(file_path).unwrap_or(0);
+        if file_type != 1 && file_type != 3 {
+            continue;
+        }
+        let img = if should_generate_preview_for_file(file_path, file_type) {
+            let Some(preview) = get_generated_preview_bytes(file_path).await.ok().flatten() else {
+                continue;
+            };
+            let Ok(img) = image::load_from_memory(&preview) else {
+                continue;
+            };
+            img
+        } else {
+            let Ok(img) = image::open(Path::new(file_path)) else {
+                continue;
+            };
+            img
+        };
+        let mut png = std::io::Cursor::new(Vec::new());
+        if img.write_to(&mut png, image::ImageFormat::Png).is_ok() {
+            return Some(png.into_inner());
+        }
     }
+    None
+}
 
-    let img = image::open(Path::new(file_path))
-        .map_err(|e| format!("Failed to open image: {}", e))?;
-    Ok(copy_image_to_clipboard(img))
+pub async fn copy_files_to_clipboard(
+    app_handle: &tauri::AppHandle,
+    file_paths: Vec<String>,
+) -> Result<usize, String> {
+    let file_paths = file_paths
+        .into_iter()
+        .filter(|path| Path::new(path).is_file())
+        // The UI limits copying to 10 content items. RAW+JPEG pairs expand
+        // one item into two physical files, so retain both components.
+        .take(20)
+        .collect::<Vec<_>>();
+    if file_paths.is_empty() {
+        return Err("No valid files to copy".to_string());
+    }
+    let preview = clipboard_preview_png(&file_paths).await;
+    crate::t_pasteboard::copy_files_and_image(app_handle, &file_paths, preview.as_deref()).await?;
+    Ok(file_paths.len())
 }
 
 /// copy an edited image to clipboard
@@ -1169,10 +1430,25 @@ pub async fn copy_edited_image_to_clipboard(params: EditParams) -> bool {
 async fn get_edited_image(params: &EditParams) -> Result<DynamicImage, String> {
     let file_type = t_utils::get_file_type(&params.source_file_path).unwrap_or(0);
     let mut img = if should_generate_preview_for_file(&params.source_file_path, file_type) {
-        let preview = get_generated_preview_bytes(&params.source_file_path).await?
+        let preview = get_generated_preview_bytes(&params.source_file_path)
+            .await?
             .ok_or_else(|| "Failed to resolve editable preview image".to_string())?;
-        image::load_from_memory(&preview)
-            .map_err(|e| format!("Failed to decode editable preview image: {}", e))?
+        let img = image::load_from_memory(&preview)
+            .map_err(|e| format!("Failed to decode editable preview image: {}", e))?;
+
+        #[cfg(target_os = "macos")]
+        {
+            if is_heic_path(&params.source_file_path) {
+                apply_orientation(img, params.orientation)
+            } else {
+                img
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            img
+        }
     } else {
         let path = Path::new(&params.source_file_path);
         let mut img = image::open(path).map_err(|e| e.to_string())?;
@@ -1513,9 +1789,19 @@ pub async fn get_file_image_bytes_cached(file_path: &str) -> Result<Vec<u8>, Str
         }
         #[cfg(all(not(target_os = "macos"), not(lap_has_libheif)))]
         {
-            crate::t_video::get_video_thumbnail(file_path, 4096, None).await?
+            crate::t_video::get_video_thumbnail(file_path, 4096, None, None)
+                .await?
                 .ok_or_else(|| format!("Failed to resolve HEIC preview image: {}", file_path))?
         }
+    } else if is_ffmpeg_backed_image_path(file_path) {
+        crate::t_video::get_video_thumbnail(file_path, 4096, None, None)
+            .await?
+            .ok_or_else(|| {
+                format!(
+                    "Failed to resolve FFmpeg-backed preview image: {}",
+                    file_path
+                )
+            })?
     } else if cfg!(target_os = "linux") && is_avif_path(file_path) {
         get_image_thumbnail(file_path, get_image_orientation(file_path), 4096)?
             .ok_or_else(|| format!("Failed to resolve AVIF preview image: {}", file_path))?

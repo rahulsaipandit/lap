@@ -31,6 +31,19 @@ html, body {
   @apply h-8 w-fit rounded-box focus:outline-none focus:rounded-box hover:bg-base-100 hover:text-base-content cursor-pointer transition-colors duration-200;
 }
 
+/* button */
+.t-button-default {
+  @apply btn btn-sm rounded-box min-w-20;
+}
+
+.t-button-primary {
+  @apply btn btn-sm rounded-box min-w-20 btn-primary;
+}
+
+.t-button-error {
+  @apply btn btn-sm rounded-box min-w-20 btn-error;
+}
+
 /* icon */
 .t-icon-size-xs {
   @apply w-4 h-4;
@@ -68,15 +81,11 @@ html, body {
 
 /* sidebar panel header */
 @utility sidebar-panel-header {
-  @apply px-2 h-10 mb-2 flex items-center justify-between gap-1 whitespace-nowrap shrink-0;
-  background-image: linear-gradient(to right, color-mix(in srgb, currentColor 6%, transparent), color-mix(in srgb, currentColor 6%, transparent));
-  background-repeat: no-repeat;
-  background-position: center bottom;
-  background-size: calc(100% - 1rem) 1px;
+  @apply px-2 h-10 flex items-center justify-between gap-1 whitespace-nowrap shrink-0 text-base-content/30;
 }
 
 @utility sidebar-panel-header-title {
-  @apply h-5 text-sm text-base-content/30;
+  @apply font-bold mr-auto uppercase text-xs tracking-wide leading-none;
 }
 
 @utility sidebar-panel-action {
@@ -108,6 +117,11 @@ html, body {
   @apply text-primary bg-base-100 hover:bg-base-100;
 }
 
+.sidebar-pane-inactive .sidebar-item-selected,
+.sidebar-pane-inactive .selected-item {
+  @apply text-base-content/70 bg-base-100/30 hover:bg-base-100/30;
+}
+
 @utility sidebar-item-compact {
   @apply h-8 mr-1;
 }
@@ -121,7 +135,7 @@ html, body {
 }
 
 @utility sidebar-item-count {
-  @apply ml-1 text-xs tabular-nums text-base-content/30;
+  @apply badge badge-xs tabular-nums border-0 bg-base-100/30 text-base-content/30;
 }
 
 /* sidebar empty state */

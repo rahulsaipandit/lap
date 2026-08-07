@@ -2,14 +2,12 @@
 
   <div class="sidebar-panel">
     <div class="sidebar-panel-header">
-      <div role="tablist" class="sidebar-header-tabs">
-        <button role="tab" class="sidebar-header-tab tab-active">
-          {{ localeMsg.sidebar.location }}
-        </button>
-      </div>
+      <span class="sidebar-panel-header-title flex-1">
+        {{ titlebar }}<template v-if="locations.length > 0"> ({{ locations.length.toLocaleString() }})</template>
+      </span>
     </div>
 
-    <!-- location -->
+    <!-- list view -->
     <div v-if="locations.length > 0" class="flex-1 overflow-x-hidden overflow-y-auto">
       <ul>
         <li v-for="location in sortedLocations">
@@ -34,13 +32,14 @@
             <li v-for="(name, index) in location.names" class="pl-4">
               <div
                 :class="[
-                  'sidebar-item sidebar-item-compact ml-3',
+                  'sidebar-item sidebar-item-compact ml-2',
                   libConfig.location.name === name ? 'sidebar-item-selected' : 'sidebar-item-hover',
                 ]"
                 @click="clickLocationName(location, name)"
               >
+                <IconLocation class="mx-1 w-4 h-4 shrink-0" />
                 <span class="sidebar-item-label">{{ name }}</span>
-                <span class="text-[10px] tabular-nums text-base-content/30 ml-1">({{ location.counts[index].toLocaleString() }})</span>
+                <span class="text-[10px] tabular-nums text-base-content/30 mr-2">{{ location.counts[index].toLocaleString() }}</span>
               </div>
             </li>
           </ul>
@@ -64,7 +63,7 @@ import { useI18n } from 'vue-i18n';
 import { config, libConfig } from '@/common/config';
 import { getLocationInfo } from '@/common/api';
 import { getCountryName } from '@/common/utils';
-import { IconRight } from '@/common/icons';
+import { IconLocation, IconRight } from '@/common/icons';
 
 const props = defineProps({
   titlebar: {
