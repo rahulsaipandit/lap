@@ -13,6 +13,7 @@ use crate::t_apple_sidecar::{
     delete_apple_aae_sidecars, preflight_rename_plan, resolve_group_primary_target,
     rollback_copied_transfers, rollback_rename_changes, rollback_renamed_sidecars,
 };
+use crate::t_blur;
 use crate::t_similar;
 use crate::t_sqlite::{
     ACamera, ACollection, ACollectionOrder, AFile, AFileCollection, AFolder, ALens, ALocation, ATag, ATagFileState,
@@ -2473,6 +2474,69 @@ pub fn similar_get_group(group_id: i64, scope_key: String) -> Result<serde_json:
 #[tauri::command]
 pub fn similar_has_scan(scope_key: String) -> Result<bool, String> {
     t_similar::has_scan(&scope_key)
+}
+
+#[tauri::command]
+pub fn blur_start_scan(
+    app_handle: tauri::AppHandle,
+    state: State<t_blur::BlurState>,
+    scope_key: String,
+    source_version: i64,
+    params: Option<QueryParams>,
+    collection_id: Option<i64>,
+    file_ids: Option<Vec<i64>>,
+) -> Result<(), String> {
+    t_blur::start_scan(
+        app_handle,
+        state,
+        scope_key,
+        source_version,
+        params,
+        collection_id,
+        file_ids,
+    )
+}
+
+#[tauri::command]
+pub fn blur_get_scan_status(state: State<t_blur::BlurState>) -> t_blur::BlurScanStatus {
+    t_blur::get_status(state)
+}
+
+#[tauri::command]
+pub fn blur_cancel_scan(state: State<t_blur::BlurState>) {
+    t_blur::cancel_scan(state)
+}
+
+#[tauri::command]
+pub fn blur_list_results(scope_key: String, limit: i64, offset: i64) -> Result<serde_json::Value, String> {
+    t_blur::list_results(&scope_key, limit, offset)
+}
+
+#[tauri::command]
+pub fn blur_has_scan(scope_key: String) -> Result<bool, String> {
+    t_blur::has_scan(&scope_key)
+}
+
+#[tauri::command]
+pub async fn blur_start_fix_batch(
+    app_handle: tauri::AppHandle,
+    state: State<'_, t_blur::BlurFixState>,
+    file_ids: Vec<i64>,
+    api_base_url: String,
+    task: Option<String>,
+    instruction: Option<String>,
+) -> Result<(), String> {
+    t_blur::start_fix_batch(app_handle, state, file_ids, api_base_url, task, instruction).await
+}
+
+#[tauri::command]
+pub fn blur_get_fix_status(state: State<t_blur::BlurFixState>) -> t_blur::BlurFixStatus {
+    t_blur::get_fix_status(state)
+}
+
+#[tauri::command]
+pub fn blur_cancel_fix_batch(state: State<t_blur::BlurFixState>) {
+    t_blur::cancel_fix_batch(state)
 }
 
 // face recognition

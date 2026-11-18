@@ -7603,33 +7603,36 @@ impl Person {
         Ok(())
     }
 
-    /// Rename a person
+    /// Rename a person. Renaming also **locks** the person: re-indexing keeps its faces fixed and
+    /// attaches new similar faces to it instead of re-clustering it.
     pub fn rename(person_id: i64, new_name: &str) -> Result<usize, String> {
         let conn = open_conn()?;
         let result = conn
             .execute(
-                "UPDATE persons SET name = ?1 WHERE id = ?2",
+                "UPDATE persons SET name = ?1, locked = 1 WHERE id = ?2",
                 params![new_name, person_id],
             )
             .map_err(|e| e.to_string())?;
         Ok(result)
     }
 
-    /// Delete a person (faces will have person_id set to NULL)
+    /// Delete a person. Its faces are marked `ignored` so re-indexing does not re-create the
+    /// person; they keep `has_faces` so the files are not rescanned. `reset_all` clears this.
     pub fn delete(person_id: i64) -> Result<usize, String> {
-        let conn = open_conn()?;
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        // First, unlink all faces from this person
-        conn.execute(
-            "UPDATE faces SET person_id = NULL WHERE person_id = ?1",
+        tx.execute(
+            "UPDATE faces SET ignored = 1, person_id = NULL WHERE person_id = ?1",
             params![person_id],
         )
         .map_err(|e| e.to_string())?;
 
-        // Then delete the person
-        let result = conn
+        let result = tx
             .execute("DELETE FROM persons WHERE id = ?1", params![person_id])
             .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
     }
 
@@ -7649,6 +7652,151 @@ impl Person {
 
         Ok(conn.last_insert_rowid())
     }
+
+    /// Apply a clustering result while preserving the people the user has named.
+    ///
+    /// * `clusters`: face ids of each new cluster of "free" faces (faces not attached to a locked
+    ///   person). Each cluster is matched to the automatic (unlocked) person it overlaps most
+    ///   (see `t_cluster::match_clusters_to_persons`) and keeps that person's row; unmatched
+    ///   clusters become new auto-named persons.
+    /// * `anchored`: `(face_id, person_id)` pairs of free faces that joined a locked person.
+    ///
+    /// Locked persons (renamed by the user) and their faces are never touched, except for
+    /// receiving `anchored` faces. Automatic persons that no cluster claims are removed.
+    ///
+    /// Everything runs in one transaction, so a failure leaves the previous state intact.
+    /// Returns the number of faces assigned to a person by this call.
+    pub fn apply_clusters(clusters: &[Vec<i64>], anchored: &[(i64, i64)]) -> Result<usize, String> {
+        let mut conn = open_conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        // 1. Previous assignments of AUTOMATIC persons only: face_id -> person_id and sizes.
+        let mut old_person_of: HashMap<i64, i64> = HashMap::new();
+        let mut old_size: HashMap<i64, usize> = HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT f.id, f.person_id FROM faces f
+                     JOIN persons p ON p.id = f.person_id
+                     WHERE p.locked = 0",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .map_err(|e| e.to_string())?;
+            for r in rows {
+                let (face_id, person_id) = r.map_err(|e| e.to_string())?;
+                old_person_of.insert(face_id, person_id);
+                *old_size.entry(person_id).or_insert(0) += 1;
+            }
+        }
+
+        // Names of persons and whether they are locked (for non-colliding default names).
+        let mut names: HashMap<i64, (Option<String>, bool)> = HashMap::new();
+        {
+            let mut stmt = tx
+                .prepare("SELECT id, name, locked FROM persons")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            for r in rows {
+                let (id, name, locked) = r.map_err(|e| e.to_string())?;
+                names.insert(id, (name, locked));
+            }
+        }
+
+        // 2. Match new clusters to previous automatic persons.
+        let mut cluster_person = crate::t_cluster::match_clusters_to_persons(
+            clusters,
+            &old_person_of,
+            &old_size,
+        );
+        let used_persons: HashSet<i64> = cluster_person.iter().flatten().cloned().collect();
+
+        // 3. Next default name number: above every "Person N" that survives (locked persons and
+        //    matched automatic persons).
+        let mut next_number = crate::t_cluster::next_person_number(
+            names
+                .iter()
+                .filter(|(id, (_, locked))| *locked || used_persons.contains(*id))
+                .filter_map(|(_, (name, _))| name.as_deref()),
+        );
+
+        // 4. Write: unassign faces of automatic persons, create persons for unmatched clusters
+        //    (largest first), assign faces, attach anchored faces, drop empty persons.
+        tx.execute(
+            "UPDATE faces SET person_id = NULL
+             WHERE person_id IN (SELECT id FROM persons WHERE locked = 0)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let mut unmatched: Vec<usize> = (0..clusters.len())
+            .filter(|ci| cluster_person[*ci].is_none())
+            .collect();
+        unmatched.sort_by(|a, b| clusters[*b].len().cmp(&clusters[*a].len()).then(a.cmp(b)));
+        for ci in unmatched {
+            let name = format!("Person {}", next_number);
+            next_number += 1;
+            tx.execute(
+                "INSERT INTO persons (name, created_at, locked) VALUES (?1, ?2, 0)",
+                params![name, now],
+            )
+            .map_err(|e| e.to_string())?;
+            cluster_person[ci] = Some(tx.last_insert_rowid());
+        }
+
+        let mut total_assigned = 0usize;
+        {
+            let mut stmt = tx
+                .prepare("UPDATE faces SET person_id = ?1 WHERE id = ?2")
+                .map_err(|e| e.to_string())?;
+            for (ci, faces) in clusters.iter().enumerate() {
+                if let Some(pid) = cluster_person[ci] {
+                    for fid in faces {
+                        total_assigned += stmt
+                            .execute(params![pid, fid])
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            for (fid, pid) in anchored {
+                total_assigned += stmt
+                    .execute(params![pid, fid])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        tx.execute(
+            "DELETE FROM persons WHERE id NOT IN (SELECT DISTINCT person_id FROM faces WHERE person_id IS NOT NULL)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(total_assigned)
+    }
+}
+
+/// Slim face record used by clustering.
+pub struct ClusterFace {
+    pub id: i64,
+    pub file_id: i64,
+    pub embedding: Option<Vec<u8>>,
+    /// Set only when the face belongs to a locked (user-named) person.
+    pub locked_person: Option<i64>,
 }
 
 /// Face struct for storing detected faces
@@ -7768,53 +7916,35 @@ impl Face {
         Ok(faces)
     }
 
-    /// Get slim face data for clustering: (face_id, file_id, embedding_bytes)
-    /// Avoids loading full Face structs (bbox JSON, person_id, created_at) to reduce memory
-    pub fn get_all_for_clustering() -> Result<Vec<(i64, i64, Option<Vec<u8>>)>, String> {
+    /// Get slim face data for clustering. Avoids loading full Face structs (bbox JSON,
+    /// created_at) to reduce memory. Faces ignored after their person was deleted are skipped.
+    /// `locked_person` is the person id only when that person is locked (named by the user).
+    pub fn get_for_clustering() -> Result<Vec<ClusterFace>, String> {
         let conn = open_conn()?;
         let mut stmt = conn
-            .prepare("SELECT id, file_id, embedding FROM faces")
+            .prepare(
+                "SELECT f.id, f.file_id, f.embedding,
+                        CASE WHEN p.locked = 1 THEN f.person_id END
+                 FROM faces f
+                 LEFT JOIN persons p ON p.id = f.person_id
+                 WHERE f.ignored = 0",
+            )
             .map_err(|e| e.to_string())?;
 
         let faces = stmt
             .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let file_id: i64 = row.get(1)?;
-                let embedding: Option<Vec<u8>> = row.get(2)?;
-                Ok((id, file_id, embedding))
+                Ok(ClusterFace {
+                    id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    embedding: row.get(2)?,
+                    locked_person: row.get(3)?,
+                })
             })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
         Ok(faces)
-    }
-
-    /// Reset all face assignments and delete all persons (for re-clustering)
-    pub fn reset_all_assignments() -> Result<(), String> {
-        let conn = open_conn()?;
-
-        // Clear all person_id from faces
-        conn.execute("UPDATE faces SET person_id = NULL", [])
-            .map_err(|e| e.to_string())?;
-
-        // Delete all persons
-        conn.execute("DELETE FROM persons", [])
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-
-    /// Assign a face to a person
-    pub fn assign_to_person(face_id: i64, person_id: i64) -> Result<usize, String> {
-        let conn = open_conn()?;
-        let result = conn
-            .execute(
-                "UPDATE faces SET person_id = ?1 WHERE id = ?2",
-                params![person_id, face_id],
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(result)
     }
 
     /// Get all image file IDs that haven't been processed for faces yet
@@ -8661,6 +8791,23 @@ fn create_db_internal() -> Result<(), String> {
 
     // Migration: add thumbnail column if not exists (for existing databases)
     let _ = conn.execute("ALTER TABLE persons ADD COLUMN thumbnail BLOB", []);
+
+    // Migration: `locked` marks persons the user has named; re-indexing keeps their faces fixed.
+    // The ALTER only succeeds once, so existing persons are classified at that moment: anything
+    // not carrying an auto-generated "Person N" name was named by the user and becomes locked.
+    if conn
+        .execute(
+            "ALTER TABLE persons ADD COLUMN locked INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .is_ok()
+    {
+        let _ = conn.execute(
+            "UPDATE persons SET locked = 1
+             WHERE name IS NOT NULL AND TRIM(name) <> '' AND name NOT GLOB 'Person [0-9]*'",
+            [],
+        );
+    }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_persons_name ON persons(name)",
         [],
@@ -8682,6 +8829,11 @@ fn create_db_internal() -> Result<(), String> {
         [],
     )
     .map_err(|e| e.to_string())?;
+    // Migration: `ignored` faces (from a deleted person) are skipped by clustering.
+    let _ = conn.execute(
+        "ALTER TABLE faces ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_faces_file_id ON faces(file_id)",
         [],

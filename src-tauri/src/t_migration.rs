@@ -132,6 +132,35 @@ fn get_migrations() -> Vec<Migration> {
             description: "Persist folder filesystem identity",
             sql: "",
         },
+        Migration {
+            version: 14,
+            description: "Create blur detection scan tables",
+            sql: "
+                CREATE TABLE IF NOT EXISTS blur_scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_key TEXT NOT NULL UNIQUE,
+                    source_version INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    blurry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    completed_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS blur_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL,
+                    blur_score REAL NOT NULL,
+                    is_blurry INTEGER NOT NULL DEFAULT 0,
+                    fixed_path TEXT,
+                    fixed_at INTEGER,
+                    FOREIGN KEY (scan_id) REFERENCES blur_scans(id) ON DELETE CASCADE,
+                    FOREIGN KEY (file_id) REFERENCES afiles(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_blur_results_scan ON blur_results(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_blur_results_file ON blur_results(file_id);
+            ",
+        },
     ]
 }
 

@@ -27,6 +27,7 @@ mod t_heif;
 mod t_http;
 mod t_image;
 mod t_jpeg;
+mod t_blur;
 mod t_jxl;
 mod t_lens;
 mod t_libraw;
@@ -91,6 +92,8 @@ async fn main() {
         )))
         .manage(t_dedup::DedupState::default())
         .manage(t_similar::SimilarState::default())
+        .manage(t_blur::BlurState::default())
+        .manage(t_blur::BlurFixState::default())
         .setup(|_app| {
             t_video::init_ffmpeg_path(&_app.handle());
             t_config::set_app_identifier(&_app.config().identifier);
@@ -396,6 +399,14 @@ async fn main() {
             t_cmds::similar_list_groups,
             t_cmds::similar_get_group,
             t_cmds::similar_has_scan,
+            t_cmds::blur_start_scan,
+            t_cmds::blur_get_scan_status,
+            t_cmds::blur_cancel_scan,
+            t_cmds::blur_list_results,
+            t_cmds::blur_has_scan,
+            t_cmds::blur_start_fix_batch,
+            t_cmds::blur_get_fix_status,
+            t_cmds::blur_cancel_fix_batch,
             // video
             t_video::prepare_video,
             t_video::cancel_video_prepare,

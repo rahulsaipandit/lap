@@ -28,6 +28,7 @@ import {
   IconBookmark,
   IconSplitOn,
   IconSplitOn4,
+  IconSparkles,
 } from '@/common/icons';
 
 // Label lookup table for "open in external app" command based on media type
@@ -97,6 +98,12 @@ export const useFileMenuItems = (
         icon: markRaw(selectionCount >= 3 ? IconSplitOn4 : IconSplitOn),
         disabled: kind !== 'image' || selectionCount < 2,
         action: createAction('compare-selected-images'),
+      },
+      {
+        label: String(localeMsg.value.menu.file.fix_with_ai || 'Fix with AI...'),
+        icon: markRaw(IconSparkles),
+        disabled: kind !== 'image' || selectionCount < 1,
+        action: createAction('ai-fix'),
       },
       {
         label: openInAppLabel(kind, selectionCount, true),
@@ -301,6 +308,12 @@ export const useFileMenuItems = (
         hidden: !config.settings.face.enabled,
         disabled: !isImage,
         action: createAction('find-person')
+      },
+      {
+        label: String(localeMsg.value.menu.file.fix_with_ai || 'Fix with AI...'),
+        icon: markRaw(IconSparkles),
+        disabled: !isImage,
+        action: createAction('ai-fix')
       },
       { label: "-", action: null },
       {

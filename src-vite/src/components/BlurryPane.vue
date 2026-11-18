@@ -1,0 +1,312 @@
+<template>
+  <div class="w-full h-full rounded-box bg-base-200 flex flex-col overflow-hidden">
+    <div class="shrink-0 px-3 pt-3 pb-2 border-b border-base-content/10 bg-base-100/45">
+      <div class="flex items-center gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="text-[11px] font-bold uppercase tracking-[0.22em] text-base-content/40">
+            Blurry Photos
+          </div>
+          <div class="mt-1 text-sm font-semibold text-base-content/80 truncate">
+            Blur detection for the current view
+          </div>
+        </div>
+        <TButton
+          :icon="IconRefresh"
+          tooltip="Rescan for blur"
+          :buttonSize="'small'"
+          :disabled="isScanning"
+          @click.stop="triggerScan(true)"
+        />
+        <TButton
+          :icon="IconClose"
+          :tooltip="$t('msgbox.close')"
+          :buttonSize="'small'"
+          @click.stop="$emit('close')"
+        />
+      </div>
+
+      <div class="mt-3 grid grid-cols-2 gap-2">
+        <div class="rounded-box bg-base-200/80 border border-base-content/8 px-2 py-2">
+          <div class="text-[10px] uppercase tracking-wide text-base-content/40">Blurry photos</div>
+          <div class="text-sm font-bold text-base-content/80">{{ items.length.toLocaleString() }}</div>
+        </div>
+        <div class="rounded-box bg-base-200/80 border border-base-content/8 px-2 py-2">
+          <div class="text-[10px] uppercase tracking-wide text-base-content/40">Selected</div>
+          <div class="text-sm font-bold text-base-content/80">{{ selectedIds.size.toLocaleString() }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="isScanning" class="flex-1 flex items-center justify-center p-5">
+      <div class="text-center text-base-content/45 space-y-3">
+        <span class="loading loading-spinner text-primary w-8 h-8"></span>
+        <div class="text-xs font-semibold">
+          Scanning for blur… {{ scanStatus.current }}/{{ scanStatus.total }}
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="flex-1 min-h-0 flex flex-col">
+      <div class="shrink-0 p-2 space-y-2 border-b border-base-content/10">
+        <div class="rounded-box border border-base-content/8 bg-base-100/45 p-3 space-y-2">
+          <div class="flex items-center gap-1.5">
+            <button class="btn btn-xs btn-ghost" :disabled="items.length === 0" @click="selectAll">
+              <component :is="isAllSelected ? IconCheckNone : IconCheckAll" class="w-3.5 h-3.5" />
+              {{ isAllSelected ? 'Clear' : 'Select all' }}
+            </button>
+            <button
+              class="btn btn-xs btn-primary ml-auto"
+              :disabled="selectedIds.size === 0 || isFixing"
+              @click="fixSelected"
+            >
+              <span v-if="isFixing" class="loading loading-spinner loading-xs"></span>
+              <IconSparkles v-else class="w-3.5 h-3.5" />
+              Fix {{ selectedIds.size > 0 ? selectedIds.size : '' }}
+            </button>
+          </div>
+
+          <div v-if="isFixing" class="text-[11px] text-base-content/50">
+            Fixing {{ fixStatus.current + 1 }}/{{ fixStatus.total }}: {{ fixStatus.currentFile }}
+          </div>
+          <div v-if="fixError" class="text-[11px] text-error leading-relaxed">
+            {{ fixError }}
+          </div>
+        </div>
+      </div>
+
+      <div v-if="items.length === 0" class="flex-1 flex items-center justify-center p-5">
+        <div class="text-center text-base-content/45 space-y-2 max-w-[280px]">
+          <IconFocus class="w-9 h-9 mx-auto text-base-content/25" />
+          <div class="text-sm font-bold">No blurry photos found</div>
+          <div class="text-xs leading-relaxed">
+            Run a scan to check the current view for blurry photos (Laplacian variance below threshold).
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="flex-1 min-h-0 overflow-y-auto divide-y divide-base-content/8">
+        <button
+          v-for="item in items"
+          :key="item.file_id"
+          class="w-full p-2.5 text-left transition-colors hover:bg-base-200/70"
+          @click="handleFileClick(item.file_id)"
+          @dblclick="$emit('preview-file', item.file_id)"
+        >
+          <div class="flex items-center gap-2">
+            <label class="shrink-0 flex items-center" @click.stop>
+              <input
+                type="checkbox"
+                class="checkbox checkbox-xs checkbox-primary"
+                :checked="selectedIds.has(item.file_id)"
+                @change="toggleSelected(item.file_id)"
+              />
+            </label>
+
+            <div class="w-12 h-12 rounded-box overflow-hidden border border-base-content/10 bg-base-content/5 shrink-0">
+              <img v-if="item.file?.thumbnail" :src="item.file.thumbnail" class="w-full h-full object-cover" />
+              <div v-else class="w-full h-full skeleton"></div>
+            </div>
+
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5 min-w-0">
+                <span class="text-xs font-bold text-base-content/75 truncate">{{ item.file?.name }}</span>
+                <span v-if="item.fixed_path" class="badge badge-xs badge-success">Fixed</span>
+              </div>
+              <div class="mt-0.5 text-[11px] text-base-content/50">
+                Blur score: {{ Math.round(item.blur_score) }}
+              </div>
+            </div>
+          </div>
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
+import { getThumbnailDataUrl } from '@/common/utils';
+import TButton from '@/components/TButton.vue';
+import { IconCheckAll, IconCheckNone, IconClose, IconFocus, IconRefresh, IconSparkles } from '@/common/icons';
+import {
+  blurStartScan,
+  blurGetScanStatus,
+  blurListResults,
+  listenBlurScanProgress,
+  blurStartFixBatch,
+  blurGetFixStatus,
+  listenBlurFixProgress,
+  getFileThumb,
+} from '@/common/api';
+import { config } from '@/common/config';
+
+const BLUR_RESULT_LIMIT = 500;
+const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
+
+const props = defineProps({
+  scanKey: {
+    type: String,
+    default: '',
+  },
+  queryParams: {
+    type: Object as () => Record<string, any> | null,
+    default: null,
+  },
+});
+
+const emit = defineEmits<{
+  close: [];
+  'select-file': [fileId: number];
+  'preview-file': [fileId: number];
+}>();
+
+const isScanning = ref(false);
+const isFixing = ref(false);
+const fixError = ref('');
+const items = ref<any[]>([]);
+const selectedIds = ref<Set<number>>(new Set());
+const scanStatus = ref<any>({ current: 0, total: 0 });
+const fixStatus = ref<any>({ current: 0, total: 0, currentFile: '' });
+const unlistenScanProgress = ref<null | (() => void)>(null);
+const unlistenFixProgress = ref<null | (() => void)>(null);
+
+const isAllSelected = computed(() => items.value.length > 0 && selectedIds.value.size === items.value.length);
+
+function toggleSelected(fileId: number) {
+  if (selectedIds.value.has(fileId)) selectedIds.value.delete(fileId);
+  else selectedIds.value.add(fileId);
+}
+
+function selectAll() {
+  if (isAllSelected.value) {
+    selectedIds.value = new Set();
+  } else {
+    selectedIds.value = new Set(items.value.map((item: any) => item.file_id));
+  }
+}
+
+function handleFileClick(fileId: number) {
+  emit('select-file', fileId);
+}
+
+async function hydrateThumbnails(list: any[]) {
+  const tasks = list.map(async (item: any) => {
+    const file = item?.file;
+    if (!file || file.thumbnail) return;
+    if (!file.file_path) {
+      file.thumbnail = thumbnailPlaceholder;
+      return;
+    }
+    const thumb = await getFileThumb(
+      file.id,
+      file.file_path,
+      file.file_type || 1,
+      file.e_orientation || 0,
+      config.settings.thumbnailSize,
+      false
+    );
+    file.thumbnail = getThumbnailDataUrl(thumb, thumbnailPlaceholder, false, config.settings.thumbnailSize, file.file_path);
+  });
+  await Promise.all(tasks);
+}
+
+async function fetchResults() {
+  try {
+    const result = await blurListResults(props.scanKey, BLUR_RESULT_LIMIT, 0);
+    const list = Array.isArray(result?.items) ? result.items : [];
+    await hydrateThumbnails(list);
+    items.value = list;
+    const available = new Set(list.map((item: any) => item.file_id));
+    for (const id of Array.from(selectedIds.value)) {
+      if (!available.has(id)) selectedIds.value.delete(id);
+    }
+  } catch (error) {
+    console.error('BlurryPane fetchResults error:', error);
+    items.value = [];
+  }
+}
+
+async function triggerScan(force = false) {
+  if (!props.scanKey) return;
+  if (!force) {
+    const hasScan = items.value.length > 0;
+    if (hasScan) return;
+  }
+
+  isScanning.value = true;
+  try {
+    await blurStartScan(props.scanKey, Date.now(), props.queryParams || null);
+    await pollScanUntilDone();
+  } catch (error) {
+    console.error('BlurryPane triggerScan error:', error);
+    isScanning.value = false;
+  }
+}
+
+async function pollScanUntilDone() {
+  while (true) {
+    const status = await blurGetScanStatus();
+    scanStatus.value = status;
+    if (!status?.isScanning) break;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  isScanning.value = false;
+  await fetchResults();
+}
+
+async function fixSelected() {
+  if (selectedIds.value.size === 0) return;
+  fixError.value = '';
+  isFixing.value = true;
+  try {
+    await blurStartFixBatch(Array.from(selectedIds.value), config.settings.blurFix.apiBaseUrl, 'deblur');
+    await pollFixUntilDone();
+  } catch (error: any) {
+    fixError.value = String(error?.message || error);
+    isFixing.value = false;
+  }
+}
+
+async function pollFixUntilDone() {
+  while (true) {
+    const status = await blurGetFixStatus();
+    fixStatus.value = status;
+    if (!status?.isFixing) {
+      if (status?.error) fixError.value = status.error;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  isFixing.value = false;
+  selectedIds.value = new Set();
+  await fetchResults();
+}
+
+watch(
+  () => props.scanKey,
+  async (newKey) => {
+    if (!newKey) {
+      items.value = [];
+      selectedIds.value = new Set();
+      return;
+    }
+    await triggerScan(false);
+    await fetchResults();
+  },
+  { immediate: true }
+);
+
+onMounted(async () => {
+  unlistenScanProgress.value = await listenBlurScanProgress((event: any) => {
+    scanStatus.value = event?.payload || scanStatus.value;
+  });
+  unlistenFixProgress.value = await listenBlurFixProgress((event: any) => {
+    fixStatus.value = event?.payload || fixStatus.value;
+  });
+});
+
+onUnmounted(() => {
+  if (unlistenScanProgress.value) unlistenScanProgress.value();
+  if (unlistenFixProgress.value) unlistenFixProgress.value();
+});
+</script>

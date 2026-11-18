@@ -157,6 +157,12 @@
             :selected="isDedup2PanelOpen"
             @click="toggleDedup2Panel"
           />
+          <TButton
+            :icon="IconFocus"
+            :tooltip="'Find blurry photos'"
+            :selected="isBlurryPanelOpen"
+            @click="toggleBlurryPanel"
+          />
 
           <!-- toggle info panel -->
           <TButton
@@ -437,6 +443,14 @@
             @compare-group="handleDedupCompareGroup"
             @trash-selected-duplicates="handleDedupTrashSelectedDuplicates"
           />
+          <BlurryPane
+            v-else-if="isBlurryPanelOpen"
+            :scan-key="dedupScanKey"
+            :query-params="dedupQueryParams"
+            @close="config.rightPanel.show = false"
+            @select-file="handleDedupSelectFile"
+            @preview-file="handleDedupPreviewFile"
+          />
           <SelectionPanel
             v-else-if="selectMode"
             :file-count="fileList.length"
@@ -597,6 +611,14 @@
     @cancel="showAddToCollectionDialog = false"
   />
 
+  <!-- fix with AI -->
+  <AiFixDialog
+    v-if="showAiFixDialog"
+    :fileIds="fileIdsToAiFix"
+    @applied="showAiFixDialog = false"
+    @cancel="showAiFixDialog = false"
+  />
+
   <!-- comment -->
   <MessageBox
     v-if="showCommentMsgbox"
@@ -725,10 +747,12 @@ import MoveTo from '@/components/MoveTo.vue';
 import TButton from '@/components/TButton.vue';
 import TaggingDialog from '@/components/TaggingDialog.vue';
 import AddToCollectionDialog from '@/components/AddToCollectionDialog.vue';
+import AiFixDialog from '@/components/AiFixDialog.vue';
 import FileInfo from '@/components/FileInfo.vue';
 import Breadcrumb from '@/components/Breadcrumb.vue';
 import DedupPane from '@/components/DedupPane.vue';
 import DedupPane2 from '@/components/DedupPane_2.vue';
+import BlurryPane from '@/components/BlurryPane.vue';
 import SelectionPanel from '@/components/SelectionPanel.vue';
 import FileConflictDialog from '@/components/FileConflictDialog.vue';
 import ScrollBar from '@/components/ScrollBar.vue';
@@ -780,6 +804,7 @@ import {
   IconSortingAsc,
   IconSortingDesc,
   IconFilter,
+  IconFocus,
 } from '@/common/icons';
 
 const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
@@ -1763,6 +1788,7 @@ const pendingAction = ref<(() => void) | null>(null);
 const fileInfoRef = ref<any>(null);
 const isDedupPanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'dedup');
 const isDedup2PanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'dedup2');
+const isBlurryPanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'blurry');
 const isInfoPanelOpen = computed(() => config.rightPanel.show && config.rightPanel.mode === 'info');
 const RIGHT_PANEL_MIN_WIDTH = 160; // Keep aligned with left panel minimum width.
 const RIGHT_PANEL_ANIMATION_MS = 200;
@@ -2044,6 +2070,8 @@ const showTaggingDialog = ref(false);
 const fileIdsToTag = ref<number[]>([]);
 const showAddToCollectionDialog = ref(false);
 const fileIdsToAddToCollection = ref<number[]>([]);
+const showAiFixDialog = ref(false);
+const fileIdsToAiFix = ref<number[]>([]);
 
 // grid view
 const gridScrollContainerRef = ref<HTMLElement | null>(null);
@@ -3414,6 +3442,7 @@ function handleItemAction(payload: { action: string, index: number }) {
       enterPersonSearchMode(fileList.value[selectedItemIndex.value]);
     },
     'set-album-cover': clickSetAlbumCover,
+    'ai-fix': clickAiFix,
   };
 
   if ((actionMap as any)[action]) {
@@ -8179,6 +8208,20 @@ const clickAddToCollection = async () => {
   showAddToCollectionDialog.value = fileIdsToAddToCollection.value.length > 0;
 };
 
+const clickAiFix = async () => {
+  if (selectMode.value) {
+    const items = await getActionableSelectedItemsForAction();
+    if (!items) return;
+    if (!await confirmLargeBatch(items.length)) return;
+    fileIdsToAiFix.value = items.map(file => Number(file.id)).filter(id => id > 0);
+  } else if (selectedItemIndex.value >= 0) {
+    fileIdsToAiFix.value = [Number(fileList.value[selectedItemIndex.value]?.id || 0)].filter(id => id > 0);
+  } else {
+    fileIdsToAiFix.value = [];
+  }
+  showAiFixDialog.value = fileIdsToAiFix.value.length > 0;
+};
+
 const onEditComment = async (newComment: any) => {
   if (selectMode.value && selectedCount.value > 0) {
     const items = await getActionableSelectedItemsForAction();
@@ -8520,6 +8563,19 @@ const toggleDedup2Panel = () => {
     handleSelectMode(false);
     disablePreviewModes();
     config.rightPanel.mode = 'dedup2';
+    config.rightPanel.show = true;
+  });
+};
+
+const toggleBlurryPanel = () => {
+  checkUnsavedChanges(() => {
+    if (isBlurryPanelOpen.value) {
+      config.rightPanel.show = false;
+      return;
+    }
+    handleSelectMode(false);
+    disablePreviewModes();
+    config.rightPanel.mode = 'blurry';
     config.rightPanel.show = true;
   });
 };

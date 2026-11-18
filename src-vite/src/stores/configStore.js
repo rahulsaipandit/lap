@@ -30,7 +30,7 @@ export const useConfigStore = defineStore('configStore', {
     rightPanel: {
       show: false,                // show right panel
       width: 360,                 // panel width in px
-      mode: 'info',               // right panel mode ('info' | 'dedup')
+      mode: 'info',               // right panel mode ('info' | 'dedup' | 'dedup2' | 'blurry')
     },
 
     dedup: {
@@ -159,6 +159,11 @@ export const useConfigStore = defineStore('configStore', {
         enabled: false, // enable face recognition in image search
         // Cluster threshold index: 0=Very High, 1=High, 2=Medium, 3=Low
         clusterThresholdIndex: 2, // Default: Medium
+      },
+
+      // blurry photo fix settings
+      blurFix: {
+        apiBaseUrl: 'http://127.0.0.1:8712', // promptfix_service base URL (must be started manually)
       },
     },
   }),

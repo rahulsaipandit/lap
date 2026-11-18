@@ -1,0 +1,10 @@
+# Install PromptFix's own requirements.txt FIRST (from its repo root), which pulls in
+# the diffusion stack this service depends on: torch (install separately, matched to
+# your GPU/CUDA), taming-transformers, k-diffusion, CLIP, kornia, deepspeed, omegaconf,
+# einops, pytorch-lightning, etc. See README.md.
+#
+# These are just the additional deps for the HTTP wrapper itself:
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+pillow>=10.0.0

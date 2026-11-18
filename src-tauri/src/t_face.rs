@@ -511,7 +511,6 @@ impl FaceEngine {
     }
 
     /// Calculate blur score using Variance of Laplacian
-    /// Optimized: Uses Welford's online algorithm to avoid allocating a large vector
     fn calculate_blur_score(&self, img: &DynamicImage, bbox: &FaceBox) -> f32 {
         let x = bbox.x.max(0.0) as u32;
         let y = bbox.y.max(0.0) as u32;
@@ -519,43 +518,7 @@ impl FaceEngine {
         let w = bbox.width.min(img.width() as f32 - bbox.x) as u32;
         let h = bbox.height.min(img.height() as f32 - bbox.y) as u32;
 
-        if w < 3 || h < 3 {
-            return 0.0;
-        }
-
-        let crop = img.crop_imm(x, y, w, h).to_luma8();
-        let (width, height) = crop.dimensions();
-
-        // Online variance calculation (Welford's algorithm)
-        let mut count = 0usize;
-        let mut m2 = 0.0;
-        let mut mean = 0.0;
-
-        for y in 1..height - 1 {
-            for x in 1..width - 1 {
-                let p = crop.get_pixel(x, y).0[0] as i16;
-                let top = crop.get_pixel(x, y - 1).0[0] as i16;
-                let bottom = crop.get_pixel(x, y + 1).0[0] as i16;
-                let left = crop.get_pixel(x - 1, y).0[0] as i16;
-                let right = crop.get_pixel(x + 1, y).0[0] as i16;
-
-                let sum = top + bottom + left + right - 4 * p;
-                let val = sum as f32;
-
-                count += 1;
-                let delta = val - mean;
-                mean += delta / count as f32;
-                let delta2 = val - mean;
-                m2 += delta * delta2;
-            }
-        }
-
-        if count < 2 {
-            return 0.0;
-        }
-
-        // Variance
-        m2 / (count as f32)
+        t_common::laplacian_variance(img, x, y, w, h)
     }
 
     /// Non-maximum suppression

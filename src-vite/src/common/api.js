@@ -1876,6 +1876,48 @@ export async function listenSimilarScanProgress(callback) {
   return await listen('similar-scan-progress', callback);
 }
 
+// blurry photo detection + fix
+
+export async function blurStartScan(scopeKey, sourceVersion, params = null, collectionId = null, fileIds = null) {
+  return await invoke('blur_start_scan', { scopeKey, sourceVersion, params, collectionId, fileIds });
+}
+
+export async function blurGetScanStatus() {
+  return await invoke('blur_get_scan_status');
+}
+
+export async function blurCancelScan() {
+  return await invoke('blur_cancel_scan');
+}
+
+export async function blurListResults(scopeKey, limit = 100, offset = 0) {
+  return await invoke('blur_list_results', { scopeKey, limit, offset });
+}
+
+export async function blurHasScan(scopeKey) {
+  return await invoke('blur_has_scan', { scopeKey });
+}
+
+export async function listenBlurScanProgress(callback) {
+  return await listen('blur-scan-progress', callback);
+}
+
+export async function blurStartFixBatch(fileIds, apiBaseUrl, task = null, instruction = null) {
+  return await invoke('blur_start_fix_batch', { fileIds, apiBaseUrl, task, instruction });
+}
+
+export async function blurGetFixStatus() {
+  return await invoke('blur_get_fix_status');
+}
+
+export async function blurCancelFixBatch() {
+  return await invoke('blur_cancel_fix_batch');
+}
+
+export async function listenBlurFixProgress(callback) {
+  return await listen('blur-fix-progress', callback);
+}
+
 // listen index finished
 export async function listenIndexFinished(callback) {
   return await listen('index_finished', callback);
