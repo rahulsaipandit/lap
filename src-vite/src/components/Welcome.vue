@@ -5,17 +5,17 @@
         <img :src="iconLogo" class="w-32 h-32 select-none" draggable="false" />
         <div>
           <h2 class="text-xl font-semibold text-base-content/70">
-            {{ $t('welcome.title') }}
+            {{ appName }}
           </h2>
           <p class="mt-2 text-sm text-base-content/30">
-            {{ $t('welcome.description') }}
+            {{ $t('settings.about.package.app_description') }}
           </p>
         </div>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-left">
         <div class="rounded-box border border-base-content/5 bg-base-100/60 p-4">
-          <IconFolder class="w-5 h-5 mb-3" />
+          <IconFolders class="w-5 h-5 mb-3" />
           <h3 class="text-sm font-medium text-base-content/70">{{ $t('welcome.add_album_title') }}</h3>
           <p class="mt-2 text-xs leading-5 text-base-content/30">{{ $t('welcome.add_album_description') }}</p>
           <button class="mt-4 btn btn-primary btn-sm rounded-box" @click="requestAddAlbum">
@@ -24,14 +24,14 @@
           </button>
         </div>
         <div class="rounded-box border border-base-content/5 bg-base-100/60 p-4">
-          <IconSearch class="w-5 h-5 mb-3" />
-          <h3 class="text-sm font-medium text-base-content/70">{{ $t('welcome.search_title') }}</h3>
-          <p class="mt-2 text-xs leading-5 text-base-content/30">{{ $t('welcome.search_description') }}</p>
+          <IconFolderCog class="w-5 h-5 mb-3" />
+          <h3 class="text-sm font-medium text-base-content/70">{{ $t('welcome.smart_album_title') }}</h3>
+          <p class="mt-2 text-xs leading-5 text-base-content/30">{{ $t('welcome.smart_album_description') }}</p>
         </div>
         <div class="rounded-box border border-base-content/5 bg-base-100/60 p-4">
-          <IconDragDrop class="w-5 h-5 mb-3" />
-          <h3 class="text-sm font-medium text-base-content/70">{{ $t('welcome.drag_title') }}</h3>
-          <p class="mt-2 text-xs leading-5 text-base-content/30">{{ $t('welcome.drag_description') }}</p>
+          <IconCollection class="w-5 h-5 mb-3" />
+          <h3 class="text-sm font-medium text-base-content/70">{{ $t('welcome.collection_title') }}</h3>
+          <p class="mt-2 text-xs leading-5 text-base-content/30">{{ $t('welcome.collection_description') }}</p>
         </div>
       </div>
     </div>
@@ -39,9 +39,21 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue';
 import { emit as tauriEmit } from '@tauri-apps/api/event';
-import { IconAdd, IconFolder, IconSearch, IconDragDrop } from '@/common/icons';
+import { getPackageInfo } from '@/common/api';
+import { IconAdd, IconCollection, IconFolderCog, IconFolders } from '@/common/icons';
 import iconLogo from '@/assets/images/icon.png';
+const appName = ref('');
+
+onMounted(async () => {
+  try {
+    const packageInfo = await getPackageInfo();
+    appName.value = packageInfo.name;
+  } catch (error) {
+    console.error('Failed to load app name:', error);
+  }
+});
 
 const requestAddAlbum = () => {
   tauriEmit('add-album-requested');

@@ -1,68 +1,92 @@
-import { provide, inject, computed, Ref } from 'vue';
+import { provide, inject, computed, reactive, Ref } from 'vue';
 import { libConfig } from '@/common/config';
+import { useUIStore } from '@/stores/uiStore';
 import { selectFolder as apiSelectFolder } from '@/common/api';
 import { Album, Folder, AlbumSelectionContext, ALBUM_SELECTION_KEY } from '@/common/types';
 
-export type SelectionSource = 'album' | 'destFolder';
+export type SelectionSource = 'album' | 'destFolder' | 'local';
+
+const folderFileCounts = reactive(new Map<string, number>());
+
+export const setFolderFileCount = (path: string, count: number) => {
+    folderFileCounts.set(path, count);
+};
+
+export const clearFolderFileCounts = () => {
+    folderFileCounts.clear();
+};
+
+export const getFolderFileCount = (path: string) => folderFileCounts.get(path) || 0;
+
+export const getCountedFolderPaths = () => Array.from(folderFileCounts.keys());
 
 /**
  * Creates and provides an album selection context.
  * Call this in the root component (AlbumList) to provide selection state to all descendants.
  * 
- * @param source - 'album' for main album view, 'destFolder' for MoveTo dialog
+ * @param source - 'album' for the main view, 'destFolder' for MoveTo, or 'local' for an independent picker
  * @param onExpandAndSelect - callback to expand album and select folder (implemented by AlbumList)
  */
 export function useAlbumSelectionProvider(
     source: SelectionSource,
     onExpandAndSelect?: (albumId: number, folderPath: string) => Promise<void>
 ) {
+    const uiStore = useUIStore();
     const markAlbumActivated = () => {
         if (source !== 'album') return;
         libConfig.activePane = 'main';
         libConfig.album.activateTick = Number(libConfig.album.activateTick || 0) + 1;
     };
 
-    // Create refs that stay in sync with libConfig
+    const localSelection = reactive({
+        albumId: 0,
+        folderId: null as number | null,
+        folderPath: '',
+        selected: false,
+    });
+    const folderSelection = computed(() => source === 'local' ? localSelection : libConfig.destFolder);
+
+    // Create refs for the selected source.
     const albumId = computed({
-        get: () => source === 'album' ? (libConfig.album.id ?? 0) : (libConfig.destFolder.albumId ?? 0),
+        get: () => source === 'album' ? (libConfig.album.id ?? 0) : (folderSelection.value.albumId ?? 0),
         set: (val: number) => {
             if (source === 'album') {
                 libConfig.album.id = val;
             } else {
-                libConfig.destFolder.albumId = val;
+                folderSelection.value.albumId = val;
             }
         }
     });
 
     const folderId = computed({
-        get: () => source === 'album' ? libConfig.album.folderId : libConfig.destFolder.folderId,
+        get: () => source === 'album' ? libConfig.album.folderId : folderSelection.value.folderId,
         set: (val: number | null) => {
             if (source === 'album') {
                 libConfig.album.folderId = val;
             } else {
-                libConfig.destFolder.folderId = val;
+                folderSelection.value.folderId = val;
             }
         }
     });
 
     const folderPath = computed({
-        get: () => source === 'album' ? (libConfig.album.folderPath ?? '') : (libConfig.destFolder.folderPath ?? ''),
+        get: () => source === 'album' ? (libConfig.album.folderPath ?? '') : (folderSelection.value.folderPath ?? ''),
         set: (val: string) => {
             if (source === 'album') {
                 libConfig.album.folderPath = val;
             } else {
-                libConfig.destFolder.folderPath = val;
+                folderSelection.value.folderPath = val;
             }
         }
     });
 
     const selected = computed({
-        get: () => source === 'album' ? (libConfig.album.selected ?? false) : (libConfig.destFolder.selected ?? false),
+        get: () => source === 'album' ? (libConfig.album.selected ?? false) : (folderSelection.value.selected ?? false),
         set: (val: boolean) => {
             if (source === 'album') {
                 libConfig.album.selected = val;
             } else {
-                libConfig.destFolder.selected = val;
+                folderSelection.value.selected = val;
             }
         }
     });
@@ -76,6 +100,18 @@ export function useAlbumSelectionProvider(
     });
     let confirmedSelection = currentSelection();
 
+    const updateFolderPath = (folder: Folder, oldPath: string, newPath: string) => {
+        if (folder.path === oldPath) {
+            folder.path = newPath;
+            folder.name = newPath.split(/[\\/]/).filter(Boolean).pop() || folder.name;
+        } else if (folder.path.startsWith(`${oldPath}${oldPath.includes('\\') ? '\\' : '/'}`)) {
+            folder.path = `${newPath}${folder.path.slice(oldPath.length)}`;
+        }
+        for (const child of folder.children || []) {
+            updateFolderPath(child, oldPath, newPath);
+        }
+    };
+
     /**
      * Select an album (shows all files in the album)
      */
@@ -85,6 +121,8 @@ export function useAlbumSelectionProvider(
         folderPath.value = album.path;
         selected.value = true;
         confirmedSelection = currentSelection();
+        if (source === 'local') return;
+        uiStore.requestCountUpdate({ source: 'album', id: Number(album.id || 0) });
         markAlbumActivated();
     };
 
@@ -109,6 +147,8 @@ export function useAlbumSelectionProvider(
         }
         folderPath.value = selectedPath;
         selected.value = false;
+        if (source === 'local') return;
+        uiStore.requestCountUpdate({ source: 'album-folder', path: selectedPath });
 
         await new Promise<void>(resolve => {
             requestAnimationFrame(() => setTimeout(resolve, 0));
@@ -118,6 +158,10 @@ export function useAlbumSelectionProvider(
 
         if (result && selectionIsCurrent) {
             folderId.value = result.id;
+            folderPath.value = result.path;
+            if (result.path !== selectedPath) {
+                updateFolderPath(folder, selectedPath, result.path);
+            }
             confirmedSelection = currentSelection();
         } else if (!result && selectionIsCurrent) {
             albumId.value = confirmedSelection.albumId;

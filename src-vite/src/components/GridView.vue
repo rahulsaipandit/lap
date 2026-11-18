@@ -13,16 +13,16 @@
       ref="scroller"
       class="w-full h-full no-scrollbar"
       :class="{
-        'pt-12': !config.settings.grid.showFilmStrip,
-        'pb-8': !config.settings.grid.showFilmStrip && config.settings.showStatusBar,
-        'pb-1': !config.settings.grid.showFilmStrip && !config.settings.showStatusBar,
+        'pt-12': !isFilmstripView,
+        'pb-8': !isFilmstripView && config.settings.showStatusBar,
+        'pb-1': !isFilmstripView && !config.settings.showStatusBar,
       }"
       :items="renderItems"
-      :direction="config.settings.grid.showFilmStrip && config.settings.grid.previewPosition < 2 ? 'horizontal' : 'vertical'"
-      :grid-items="config.settings.grid.showFilmStrip ? 1 : columnCount"
-      :item-size="config.settings.grid.showFilmStrip ? (config.settings.grid.previewPosition < 2 ? filmStripItemSize : itemHeight) : itemHeight"
-      :item-secondary-size="!config.settings.grid.showFilmStrip ? itemWidth : (config.settings.grid.previewPosition >= 2 ? itemWidth : undefined)"
-      :key="`${config.settings.grid.showFilmStrip}`"
+      :direction="isFilmstripView && config.settings.grid.previewPosition < 2 ? 'horizontal' : 'vertical'"
+      :grid-items="isFilmstripView ? 1 : columnCount"
+      :item-size="isFilmstripView ? (config.settings.grid.previewPosition < 2 ? filmStripItemSize : itemHeight) : itemHeight"
+      :item-secondary-size="!isFilmstripView ? itemWidth : (config.settings.grid.previewPosition >= 2 ? itemWidth : undefined)"
+      :key="`${isFilmstripView}`"
       :geometry="virtualScrollGeometry"
       :content-height="virtualScrollContentHeight"
       :transition="isLayoutTransitioning"
@@ -35,41 +35,44 @@
     >
       <div
         v-if="isGroupRow(item)"
-        class="w-full h-12 px-1 flex items-center text-base-content/70 select-none bg-base-100/5 rounded-box"
+        class="w-full h-full flex items-center"
       >
-        <div class="group flex items-center gap-1">
-          <div
-            class="flex shrink-0 items-center overflow-hidden transition-all duration-100 ease-out"
-            :class="selectMode
-              ? 'w-4 mr-1 opacity-100'
-              : 'w-0 mr-0 opacity-0 group-hover:w-4 group-hover:mr-1 group-hover:opacity-100'"
-          >
-            <span v-if="isGroupSelectionLoading(item)" class="loading loading-spinner loading-xs text-primary"></span>
-            <input
-              v-else
-              type="checkbox"
-              class="checkbox checkbox-xs border-base-content/30 hover:border-base-content/70"
-              :checked="getGroupSelectionState(item).checked"
-              :indeterminate.prop="getGroupSelectionState(item).indeterminate"
-              @change="(event) => $emit('group-select-toggled', item, (event.target as HTMLInputElement).checked)"
+        <div class="w-full h-8 px-1 flex items-center text-base-content/70 select-none bg-base-200/30 rounded-box">
+          <div class="group flex items-center gap-1">
+            <div
+              class="flex shrink-0 items-center overflow-hidden transition-all duration-100 ease-out"
+              :class="selectMode
+                ? 'w-4 mr-1 opacity-100'
+                : 'w-0 mr-0 opacity-0 group-hover:w-4 group-hover:mr-1 group-hover:opacity-100'"
+            >
+              <span v-if="isGroupSelectionLoading(item)" class="loading loading-spinner loading-xs text-primary"></span>
+              <input
+                v-else
+                type="checkbox"
+                class="checkbox checkbox-xs border-base-content/30 hover:border-base-content/70"
+                :checked="getGroupSelectionState(item).checked"
+                :indeterminate.prop="getGroupSelectionState(item).indeterminate"
+                @change="(event) => $emit('group-select-toggled', item, (event.target as HTMLInputElement).checked)"
+              />
+            </div>
+            <component :is="getGroupIcon(item)" class="w-4 h-4 shrink-0 text-base-content/70" />
+            <Breadcrumb
+              v-if="isFolderPathGroup()"
+              :items="getFolderGroupBreadcrumbItems(item)"
+              disabled
+              class="min-w-0 flex-1 overflow-hidden"
             />
+            <span v-else class="min-w-0 truncate text-sm text-base-content/70">{{ item.label }}</span>
           </div>
-          <component :is="getGroupIcon(item)" class="w-4 h-4 shrink-0 text-base-content/30" />
-          <Breadcrumb
-            v-if="isFolderPathGroup()"
-            :items="getFolderGroupBreadcrumbItems(item)"
-            disabled
-            class="min-w-0 flex-1 overflow-hidden"
-          />
-          <span v-else class="min-w-0 truncate text-sm text-base-content/30">{{ item.label }}</span>
+          <span class="ml-auto badge badge-xs shrink-0 text-xs text-base-content/30">
+            {{ item.countLabel || Number(item.count || 0).toLocaleString() }}
+          </span>
         </div>
-        <span class="ml-auto badge badge-xs shrink-0 text-xs text-base-content/30">
-          {{ item.countLabel || Number(item.count || 0).toLocaleString() }}
-        </span>
       </div>
       <div
         v-else
         class="w-full h-full flex items-center justify-center overflow-hidden"
+        :class="{ 'opacity-50': draggedFileIds.has(Number(getFileItem(item)?.id)) }"
         @pointerdown="onItemPointerDown($event, getFileIndex(item, index), getFileItem(item))"
       >
         <Thumbnail
@@ -82,13 +85,13 @@
           :select-mode="selectMode"
           :query-source="querySource"
           :dedup-status="dedupStatuses[Number(getFileItem(item).id)]"
+          :grid-size="gridSize"
           @clicked="(modifiers) => $emit('item-clicked', getFileIndex(item, index), modifiers)"
           @dblclicked="(modifiers) => $emit('item-dblclicked', getFileIndex(item, index), modifiers)"
           @select-toggled="(shiftKey) => $emit('item-select-toggled', getFileIndex(item, index), shiftKey)"
           @action="(actionName) => $emit('item-action', { action: actionName, index: getFileIndex(item, index) })"
-          @select-contextmenu="(pos) => $emit('item-select-contextmenu', { ...pos, index: getFileIndex(item, index) })"
+          @selection-context-menu="(event) => $emit('selection-context-menu', getFileIndex(item, index), event)"
         />
-        <div v-else class="w-full h-full bg-base-200/70"></div>
       </div>
     </VirtualScroll>
     <!-- Empty State / Loading -->
@@ -101,7 +104,7 @@
           </div>
         </Transition>
         <div v-if="contentReady" class="flex flex-col items-center gap-2">
-          <img src="@/assets/images/lazycat-300.png" class="w-32 object-contain opacity-30" alt="" />
+          <IconSearch class="w-8 h-8" />
           <span class="text-sm">{{ emptyMessage }}</span>
           <span class="text-xs">{{ emptyHint }}</span>
         </div>
@@ -114,13 +117,14 @@
 
 <script setup lang="ts">
 
-import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
+import { watch, ref, onMounted, onBeforeUnmount, computed, nextTick, toRaw } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
 import { config } from '@/common/config';
+import { thumbnailProfile } from '@/common/thumbnailProfiles';
 import Thumbnail from '@/components/Thumbnail.vue';
 import VirtualScroll from '@/components/VirtualScroll.vue';
-import { GROUP } from '@/common/constants';
+import { GROUP, GROUP_HEADER_HEIGHT } from '@/common/constants';
 import { calculateJustifiedLayout, calculateLinearRowLayout, calculateLinearColumnLayout, calculateMasonryLayout, type Geometry } from '@/common/layout';
 import { buildFolderBreadcrumbs, formatFolderBreadcrumb, isWithinRootPath } from '@/common/utils';
 import Breadcrumb from '@/components/Breadcrumb.vue';
@@ -137,6 +141,7 @@ import {
   IconFolder,
   IconLocation,
   IconPhoto,
+  IconSearch,
   IconStarFilled,
   IconVideo,
 } from '@/common/icons';
@@ -157,6 +162,9 @@ const props = withDefaults(defineProps<{
   folderGroupRoots?: Array<{ path: string; name?: string }>;
   querySource?: string;
   dedupStatuses?: Record<number, 'keep' | 'dup'>;
+  draggedFileIds?: Set<number>;
+  gridSize: number;
+  selectionScrollSuppressed?: boolean;
 }>(), {
   selectedItemIndex: -1,
   timelineData: () => [],
@@ -172,6 +180,9 @@ const props = withDefaults(defineProps<{
   folderGroupRoots: () => [],
   querySource: '',
   dedupStatuses: () => ({}),
+  draggedFileIds: () => new Set<number>(),
+  gridSize: 120,
+  selectionScrollSuppressed: false,
 });
 
 const emit = defineEmits([
@@ -179,13 +190,14 @@ const emit = defineEmits([
   'item-dblclicked',
   'item-select-toggled',
   'item-action',
-  'item-select-contextmenu',
+  'selection-context-menu',
   'date-group-select',
   'group-select-toggled',
   'request-scroll',
   'visible-range-update',
   'scroll',
   'layout-update',
+  'grid-size-change',
   'item-drag-start',
   'item-drag',
   'item-drag-end',
@@ -198,7 +210,8 @@ const containerRef = ref<HTMLElement | null>(null);
 const scroller = ref<any>(null);
 const columnCount = ref(4);
 const containerWidth = ref(0);
-const groupHeaderHeight = computed(() => 48 * Number(config.settings.scale || 1));
+
+const groupHeaderHeight = computed(() => GROUP_HEADER_HEIGHT * Number(config.settings.scale || 1));
 let pendingPointerDrag: {
   pointerId: number;
   index: number;
@@ -264,6 +277,13 @@ function onDocumentPointerMove(event: PointerEvent) {
   emit('item-drag', event);
 }
 
+function cancelPointerDrag() {
+  pendingPointerDrag = null;
+  document.documentElement.style.userSelect = '';
+  document.documentElement.style.webkitUserSelect = '';
+  clearPointerDragListeners();
+}
+
 function onDocumentPointerUp(event: PointerEvent) {
   const drag = pendingPointerDrag;
   if (!drag || event.pointerId !== drag.pointerId) return;
@@ -282,15 +302,25 @@ function isGeometryGridStyle(style: number) {
   return style === 2 || style === 3;
 }
 
+const isFilmstripView = computed(() => config.settings.grid.viewMode === 'filmstrip');
 const renderItems = computed(() => props.fileList);
 const hasGroupRows = computed(() =>
-  !config.settings.grid.showFilmStrip &&
+  !isFilmstripView.value &&
   (Number(props.groupBy || 0) > 0 || isGroupRow(renderItems.value[0]))
 );
+
+function getLayoutItems(): any[] {
+  const items = renderItems.value;
+  void props.layoutVersion;
+  // Creating the iterator tracks item replacements without reading the array.
+  void items[Symbol.iterator]();
+  return toRaw(items);
+}
+
 const fileIndexToRowIndex = computed(() => {
   const map = new Map<number, number>();
   if (!hasGroupRows.value) return map;
-  renderItems.value.forEach((item, rowIndex) => {
+  getLayoutItems().forEach((item, rowIndex) => {
     if (!isGroupRow(item)) {
       const fileIndex = getFileIndex(item, rowIndex);
       if (fileIndex >= 0) map.set(fileIndex, rowIndex);
@@ -301,7 +331,7 @@ const fileIndexToRowIndex = computed(() => {
 const rowIndexToFileIndex = computed(() => {
   const map = new Map<number, number>();
   if (!hasGroupRows.value) return map;
-  renderItems.value.forEach((item, rowIndex) => {
+  getLayoutItems().forEach((item, rowIndex) => {
     if (!isGroupRow(item)) {
       const fileIndex = getFileIndex(item, rowIndex);
       if (fileIndex >= 0) map.set(rowIndex, fileIndex);
@@ -315,14 +345,16 @@ const groupedLayoutGeometryResult = computed(() => {
     return { boxes: [], contentSize: 0 };
   }
 
-  const { style, size } = config.settings.grid;
-  const boxes: Geometry[] = new Array(renderItems.value.length);
+  const { style } = config.settings.grid;
+  const size = props.gridSize;
+  const items = getLayoutItems();
+  const boxes: Geometry[] = new Array(items.length);
 
   if (!isGeometryGridStyle(style)) {
     let y = 0;
     let col = 0;
 
-    renderItems.value.forEach((item, rowIndex) => {
+    items.forEach((item, rowIndex) => {
       if (isGroupRow(item)) {
         if (col > 0) {
           y += itemHeight.value;
@@ -370,7 +402,7 @@ const groupedLayoutGeometryResult = computed(() => {
     groupRowIndices = [];
   };
 
-  renderItems.value.forEach((item, rowIndex) => {
+  items.forEach((item, rowIndex) => {
     if (isGroupRow(item)) {
       flushGroup();
       boxes[rowIndex] = { x: 0, y, width: containerWidth.value, height: groupHeaderHeight.value };
@@ -390,30 +422,31 @@ const layoutGeometryResult = computed(() => {
     return { boxes: [], contentSize: 0 };
   }
 
-  const { style, size, showFilmStrip } = config.settings.grid;
+  const { style } = config.settings.grid;
+  const size = props.gridSize;
 
   if (hasGroupRows.value) {
     return groupedLayoutGeometryResult.value;
   }
 
-  if (showFilmStrip) {
+  if (isFilmstripView.value) {
     if (isGeometryGridStyle(style)) {
       const isVertical = config.settings.grid.previewPosition >= 2;
       if (isVertical) {
         if (containerWidth.value <= 0) return { boxes: [], contentSize: 0 };
-        const result = calculateLinearColumnLayout(props.fileList, containerWidth.value, 0);
+        const result = calculateLinearColumnLayout(getLayoutItems(), containerWidth.value, 0);
         return { boxes: result.boxes, contentSize: result.containerHeight };
       }
-      const result = calculateLinearRowLayout(props.fileList, size, 0);
+      const result = calculateLinearRowLayout(getLayoutItems(), size, 0);
       return { boxes: result.boxes, contentSize: result.containerWidth };
     }
   } else {
     if (style === 2 && containerWidth.value > 0) {
-      const result = calculateJustifiedLayout(props.fileList, containerWidth.value, size, 0);
+      const result = calculateJustifiedLayout(getLayoutItems(), containerWidth.value, size, 0);
       return { boxes: result.boxes, contentSize: result.containerHeight };
     }
     else if (style === 3 && containerWidth.value > 0) {
-      const result = calculateMasonryLayout(props.fileList, containerWidth.value, size, 0);
+      const result = calculateMasonryLayout(getLayoutItems(), containerWidth.value, size, 0);
       return { boxes: result.boxes, contentSize: result.containerHeight };
     }
   }
@@ -439,11 +472,12 @@ let layoutAnchorVersion = 0;
 let isInitialLayout = true;
 
 const gap = 8; // Gap between items
-const isVerticalFilmstrip = computed(() => config.settings.grid.showFilmStrip && config.settings.grid.previewPosition >= 2);
+const isVerticalFilmstrip = computed(() => isFilmstripView.value && config.settings.grid.previewPosition >= 2);
 
 // item width and height(including gap)
 const itemWidth = computed(() => {
-  const { style, size } = config.settings.grid;
+  const { style } = config.settings.grid;
+  const size = props.gridSize;
   if (isVerticalFilmstrip.value && containerWidth.value > 0) {
     return containerWidth.value;
   }
@@ -452,7 +486,8 @@ const itemWidth = computed(() => {
 });
 
 const itemHeight = computed(() => {
-  const { style, size } = config.settings.grid;
+  const { style } = config.settings.grid;
+  const size = props.gridSize;
   
   if (style === 0) {
     let labelHeight = 0;
@@ -494,7 +529,7 @@ function updateLayout() {
   emit('layout-update', { height: layoutContentHeight.value });
 }
 
-watch(() => [config.settings.grid.size, config.settings.grid.style, config.settings.grid.showFilmStrip], async () => {
+watch(() => [props.gridSize, config.settings.grid.style, isFilmstripView.value], async () => {
   if (isInitialLayout) {
     isInitialLayout = false;
     updateColumnCount();
@@ -557,7 +592,12 @@ watch(layoutContentHeight, (newHeight) => {
   emit('layout-update', { height: newHeight });
 });
 
+// While a drag-move reconciliation updates the list, the selection moves to
+// the first moved item's slot — which may sit outside the viewport. That focus
+// change must never drag the viewport along (issue #483: keep the scroll
+// position after moving files).
 watch(() => props.selectedItemIndex, (newValue) => {
+  if (props.selectionScrollSuppressed) return;
   if (newValue !== -1) {
     scrollToItem(newValue);
   }
@@ -568,9 +608,6 @@ onMounted(() => {
     resizeObserver = new ResizeObserver(() => {
       // updateColumnCount(); // merged into updateLayout
       updateLayout();
-      if (props.selectedItemIndex !== -1) {
-        scrollToItem(props.selectedItemIndex);
-      }
     });
     resizeObserver.observe(containerRef.value);
     updateLayout();
@@ -607,16 +644,16 @@ onBeforeUnmount(() => {
 
 function onGestureStart(e: any) {
   e.preventDefault();
-  startGridSize.value = config.settings.grid.size;
+  startGridSize.value = props.gridSize;
 }
 
 function onGestureChange(e: any) {
   e.preventDefault();
   if (startGridSize.value > 0) {
     let newSize = Math.round(startGridSize.value * e.scale);
-    // Clamp between 120 and 360
-    newSize = Math.max(120, Math.min(360, newSize));
-    config.settings.grid.size = newSize;
+    const profile = thumbnailProfile(config.settings.thumbnailSize);
+    newSize = Math.max(profile.minGridSize, Math.min(profile.maxGridSize, newSize));
+    emit('grid-size-change', newSize);
   }
 }
 
@@ -629,7 +666,7 @@ function onScroll(e: Event) {
 }
 
 function onWheel(e: WheelEvent) {
-  if (config.settings.grid.showFilmStrip && scroller.value) {
+  if (isFilmstripView.value && scroller.value) {
     const isHorizontal = config.settings.grid.previewPosition < 2;
     if (isHorizontal) {
       // If it's a vertical scroll (deltaY) and no horizontal scroll (deltaX),
@@ -670,7 +707,7 @@ function scrollToItem(index: number, center = false) {
     return;
   }
   
-  if (!config.settings.grid.showFilmStrip) {
+  if (!isFilmstripView.value) {
     let itemTop = 0;
     let itemBottom = 0;
 
@@ -750,7 +787,7 @@ function scrollToItem(index: number, center = false) {
 }
 
 function scrollToPosition(scrollTop: number) {
-  if (scroller.value && !config.settings.grid.showFilmStrip) {
+  if (scroller.value && !isFilmstripView.value) {
     scroller.value.$el.scrollTop = scrollTop;
   }
 }
@@ -761,7 +798,7 @@ function scrollToRowIndex(rowIndex: number) {
     scrollToPosition(box.y);
     return;
   }
-  if (!scroller.value || config.settings.grid.showFilmStrip) return;
+  if (!scroller.value || isFilmstripView.value) return;
   const nextScrollTop = Math.max(0, rowIndex) * itemHeight.value;
   scroller.value.$el.scrollTop = nextScrollTop;
 }
@@ -778,10 +815,18 @@ function centerItem(index: number) {
   if (index >= 0) scrollToItem(index, true);
 }
 
-function getNextItemIndex(currentIndex: number, direction: 'up' | 'down'): number {
+function getNextItemIndex(currentIndex: number, direction: 'up' | 'down', page = false): number {
+  const pageHeight = Math.max(1, (scroller.value?.$el.clientHeight ?? 0)
+    - 48 * Number(config.settings.scale || 1) - (config.settings.showStatusBar ? 32 : 4));
   const style = config.settings.grid.style;
-  const supportsGeometryNavigation = style === 2 || (!config.settings.grid.showFilmStrip && isGeometryGridStyle(style));
+  const supportsGeometryNavigation = hasGroupRows.value
+    || style === 2
+    || (!isFilmstripView.value && isGeometryGridStyle(style));
   if (!supportsGeometryNavigation || layoutGeometry.value.length === 0) {
+    if (page && !hasGroupRows.value) {
+      const step = Math.max(1, Math.floor(pageHeight / itemHeight.value)) * columnCount.value;
+      return Math.max(0, Math.min(props.fileList.length - 1, currentIndex + (direction === 'down' ? step : -step)));
+    }
     return -1;
   }
 
@@ -816,11 +861,12 @@ function getNextItemIndex(currentIndex: number, direction: 'up' | 'down'): numbe
 
   if (candidates.length === 0) return currentIndex;
 
-  // Find the closest row (smallest diffY)
-  const minDiffY = Math.min(...candidates.map(c => c.diffY));
+  // Arrow keys move one row; page keys target one viewport away.
+  const targetDistance = page ? pageHeight : 0;
+  const minDiffY = Math.min(...candidates.map(c => Math.abs(c.diffY - targetDistance)));
   
   // Filter candidates to only those in the closest row
-  const rowCandidates = candidates.filter(c => Math.abs(c.diffY - minDiffY) < 5); // 5px tolerance
+  const rowCandidates = candidates.filter(c => Math.abs(Math.abs(c.diffY - targetDistance) - minDiffY) < 5); // 5px tolerance
 
   // Find item with closest centerX
   let closestIndex = -1;
@@ -957,7 +1003,9 @@ function getFolderGroupLabel(item: any) {
 }
 
 defineExpose({
+  cancelPointerDrag,
   getColumnCount,
+  scrollToItem,
   scrollToPosition,
   scrollToRowIndex,
   getScrollTop,

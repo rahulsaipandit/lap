@@ -3,7 +3,7 @@ use crate::t_sqlite::{AFile, QueryParams};
 use hnsw_rs::prelude::*;
 use rusqlite::{params, params_from_iter, Connection};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +13,6 @@ use tauri::Emitter;
 const MAX_GROUP_SIZE: usize = 64;
 const TOP_K: usize = MAX_GROUP_SIZE - 1;
 const SEARCH_EF: usize = 200;
-const MIN_SCORE: f32 = 0.93;
 const SQL_BATCH_SIZE: usize = 900;
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,33 +54,41 @@ struct VectorFile {
     vector: Vec<f32>,
 }
 
-fn get_db_conn() -> Result<Connection, String> {
-    let path = crate::t_storage::get_current_db_path().map_err(|e| e.to_string())?;
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    conn.execute("PRAGMA foreign_keys = ON", [])
-        .map_err(|e| e.to_string())?;
-    Ok(conn)
+fn get_db_conn() -> Result<crate::t_sqlite::PooledConn, String> {
+    crate::t_sqlite::open_conn()
 }
 
 fn resolve_scope(
     params: Option<QueryParams>,
     collection_id: Option<i64>,
     file_ids: Option<Vec<i64>>,
+    group_raw_pairs: bool,
 ) -> Result<Vec<AFile>, String> {
     if file_ids.is_some() && (params.is_some() || collection_id.is_some()) {
         return Err("File ID scope cannot be combined with query or collection scope.".into());
     }
-    if let Some(ids) = file_ids {
+    let mut files = if let Some(ids) = file_ids {
         AFile::get_files_by_ids(&ids)
     } else if let Some(id) = collection_id {
         t_dedup::get_files_by_collection(id, params.as_ref())
     } else {
         t_dedup::get_files_by_query(params.as_ref().ok_or("Query required")?)
-    }
+    }?;
+    let companions = files.iter().filter_map(|file| {
+        let subtype = file.media_subtype.as_deref();
+        (subtype == Some("live_photo") || (group_raw_pairs && subtype == Some("raw_jpeg_pair")))
+            .then_some(file.live_photo_video_id).flatten()
+    }).collect::<HashSet<_>>();
+    files.retain(|file| file.id.is_none_or(|id| !companions.contains(&id)));
+    Ok(files)
 }
 
 fn load_vectors(conn: &Connection, files: Vec<AFile>) -> Result<Vec<VectorFile>, String> {
-    let dates = eligible_dates(files);
+    let duplicate_ids = exact_duplicate_file_ids(conn)?;
+    let dates = eligible_dates(files)
+        .into_iter()
+        .filter(|(id, _)| !duplicate_ids.contains(id))
+        .collect::<HashMap<_, _>>();
     let mut vectors = Vec::new();
     let ids: Vec<i64> = dates.keys().copied().collect();
     for chunk in ids.chunks(SQL_BATCH_SIZE) {
@@ -114,6 +121,20 @@ fn load_vectors(conn: &Connection, files: Vec<AFile>) -> Result<Vec<VectorFile>,
         }
     }
     Ok(filter_dominant_dimension(vectors))
+}
+
+fn exact_duplicate_file_ids(conn: &Connection) -> Result<HashSet<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT i.file_id
+             FROM duplicate_group_items i
+             WHERE (SELECT COUNT(*) FROM duplicate_group_items WHERE group_id = i.group_id) > 1",
+        )
+        .map_err(|e| e.to_string())?;
+    stmt.query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn filter_dominant_dimension(vectors: Vec<VectorFile>) -> Vec<VectorFile> {
@@ -172,9 +193,15 @@ pub fn eligible_count(
     params: Option<QueryParams>,
     collection_id: Option<i64>,
     file_ids: Option<Vec<i64>>,
+    group_raw_pairs: bool,
 ) -> Result<u64, String> {
     let conn = get_db_conn()?;
-    count_vectors(&conn, resolve_scope(params, collection_id, file_ids)?)
+    let duplicate_ids = exact_duplicate_file_ids(&conn)?;
+    let files = resolve_scope(params, collection_id, file_ids, group_raw_pairs)?
+        .into_iter()
+        .filter(|file| file.id.is_none_or(|id| !duplicate_ids.contains(&id)))
+        .collect();
+    count_vectors(&conn, files)
 }
 
 pub fn start_scan(
@@ -182,9 +209,12 @@ pub fn start_scan(
     state: tauri::State<'_, SimilarState>,
     scope_key: String,
     source_version: i64,
+    similarity_threshold: f32,
     params: Option<QueryParams>,
     collection_id: Option<i64>,
     file_ids: Option<Vec<i64>>,
+    group_raw_pairs: bool,
+    keep_rules: Option<t_dedup::KeepRules>,
 ) -> Result<(), String> {
     if state
         .is_scanning
@@ -213,9 +243,12 @@ pub fn start_scan(
             &cancel,
             &scope_key,
             source_version,
+            similarity_threshold.clamp(0.0, 1.0),
             params,
             collection_id,
             file_ids,
+            group_raw_pairs,
+            keep_rules,
         );
         let mut current = status.lock().unwrap();
         current.state = if result.is_ok() && !cancel.load(Ordering::SeqCst) {
@@ -259,12 +292,15 @@ fn scan(
     cancel: &Arc<AtomicBool>,
     scope_key: &str,
     source_version: i64,
+    similarity_threshold: f32,
     params: Option<QueryParams>,
     collection_id: Option<i64>,
     file_ids: Option<Vec<i64>>,
+    group_raw_pairs: bool,
+    keep_rules: Option<t_dedup::KeepRules>,
 ) -> Result<(), String> {
     let mut conn = get_db_conn()?;
-    let vectors = load_vectors(&conn, resolve_scope(params, collection_id, file_ids)?)?;
+    let vectors = load_vectors(&conn, resolve_scope(params, collection_id, file_ids, group_raw_pairs)?)?;
     {
         let mut s = status.lock().unwrap();
         s.total = vectors.len() as u64;
@@ -294,7 +330,7 @@ fn scan(
                     continue;
                 }
                 let score = cosine(&file.vector, &vectors[j].vector);
-                if score >= MIN_SCORE {
+                if score >= similarity_threshold {
                     pair_scores.insert((i.min(j), i.max(j)), score);
                 }
             }
@@ -330,7 +366,7 @@ fn scan(
                     .get(&(x.min(y), x.max(y)))
                     .copied()
                     .unwrap_or(0.0)
-                    >= MIN_SCORE
+                    >= similarity_threshold
             })
         }) {
             let (target, source) = if clusters[ai].len() >= clusters[bi].len() {
@@ -357,23 +393,9 @@ fn scan(
         .into_iter()
         .filter(|group| group.len() > 1)
         .collect();
-    let scope_prefix = scope_key
-        .rsplit_once("|version:")
-        .map(|(prefix, _)| format!("{prefix}|version:"));
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    if let Some(prefix) = scope_prefix {
-        tx.execute(
-            "DELETE FROM similarity_scans WHERE substr(scope_key, 1, length(?1)) = ?1",
-            params![prefix],
-        )
+    tx.execute("DELETE FROM similarity_scans", [])
         .map_err(|e| e.to_string())?;
-    } else {
-        tx.execute(
-            "DELETE FROM similarity_scans WHERE scope_key=?1",
-            params![scope_key],
-        )
-        .map_err(|e| e.to_string())?;
-    }
     tx.execute(
         "INSERT INTO similarity_scans(scope_key,source_version,status,file_count,group_count,created_at,completed_at) VALUES(?1,?2,'finished',?3,?4,?5,?5)",
         params![scope_key, source_version, vectors.len() as i64, groups.len() as i64, now],
@@ -422,11 +444,14 @@ fn scan(
         let group_id = tx.last_insert_rowid();
         for (index, score) in member_scores {
             tx.execute(
-                "INSERT INTO similarity_group_items(group_id,file_id,score) VALUES(?1,?2,?3)",
-                params![group_id, vectors[index].id, score],
+                "INSERT INTO similarity_group_items(group_id,file_id,score,is_keep) VALUES(?1,?2,?3,?4)",
+                params![group_id, vectors[index].id, score, i64::from(index == representative)],
             )
             .map_err(|e| e.to_string())?;
         }
+    }
+    if let Some(rules) = keep_rules {
+        t_dedup::apply_keep_rules(&tx, Some(scope_key), rules, group_raw_pairs)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     let mut s = status.lock().unwrap();
@@ -440,14 +465,29 @@ pub fn list_groups(scope_key: &str, limit: i64, offset: i64) -> Result<serde_jso
     let conn = get_db_conn()?;
     let total = conn
         .query_row(
-            "SELECT COUNT(*) FROM similarity_groups g JOIN similarity_scans s ON s.id=g.scan_id WHERE s.scope_key=?1",
+            "SELECT COUNT(*) FROM (
+                SELECT g.id
+                FROM similarity_groups g
+                JOIN similarity_scans s ON s.id = g.scan_id
+                JOIN similarity_group_items i ON i.group_id = g.id
+                WHERE s.scope_key = ?1
+                GROUP BY g.id
+                HAVING COUNT(i.file_id) > 1
+            )",
             params![scope_key],
             |row| row.get::<_, i64>(0),
         )
         .map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
-            "SELECT g.id,g.file_count,g.representative_file_id FROM similarity_groups g JOIN similarity_scans s ON s.id=g.scan_id WHERE s.scope_key=?1 ORDER BY g.latest_taken_date DESC, g.id DESC LIMIT ?2 OFFSET ?3",
+            "SELECT g.id,COUNT(i.file_id),g.representative_file_id
+             FROM similarity_groups g
+             JOIN similarity_scans s ON s.id = g.scan_id
+             JOIN similarity_group_items i ON i.group_id = g.id
+             WHERE s.scope_key = ?1
+             GROUP BY g.id
+             HAVING COUNT(i.file_id) > 1
+             ORDER BY g.latest_taken_date DESC, g.id DESC LIMIT ?2 OFFSET ?3",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -467,7 +507,32 @@ pub fn list_groups(scope_key: &str, limit: i64, offset: i64) -> Result<serde_jso
     Ok(serde_json::json!({"items": out, "total": total}))
 }
 
-pub fn get_group(group_id: i64, scope_key: &str) -> Result<serde_json::Value, String> {
+pub fn get_overview(scope_key: &str, group_raw_pairs: bool) -> Result<serde_json::Value, String> {
+    let conn = get_db_conn()?;
+    let (total_files, total_size) = conn
+        .query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(a.size + COALESCE(companion.size, 0)), 0)
+             FROM similarity_group_items i
+             JOIN similarity_groups g ON g.id = i.group_id
+             JOIN similarity_scans s ON s.id = g.scan_id
+             JOIN afiles a ON a.id = i.file_id
+             LEFT JOIN afiles companion ON companion.id = a.live_photo_video_id
+               AND (a.media_subtype = 'live_photo' OR (?2 AND a.media_subtype = 'raw_jpeg_pair'))
+             WHERE s.scope_key = ?1
+               AND (SELECT COUNT(*) FROM similarity_group_items WHERE group_id = i.group_id) > 1",
+            params![scope_key, group_raw_pairs],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "total_files": total_files,
+        "total_size": total_size,
+    }))
+}
+
+pub fn get_group(group_id: i64, scope_key: &str, group_raw_pairs: bool) -> Result<serde_json::Value, String> {
     let conn = get_db_conn()?;
     let exists: bool = conn
         .query_row(
@@ -481,12 +546,60 @@ pub fn get_group(group_id: i64, scope_key: &str) -> Result<serde_json::Value, St
     }
     let mut stmt = conn
         .prepare(
-            "SELECT file_id, score FROM similarity_group_items WHERE group_id=?1 ORDER BY score DESC, file_id ASC",
+            "SELECT file_id, score, is_keep,
+                    EXISTS (SELECT 1 FROM afiles still WHERE still.media_subtype = 'live_photo'
+                            AND still.live_photo_video_id = item.file_id)
+             FROM similarity_group_items item WHERE group_id=?1
+             ORDER BY is_keep DESC, score DESC, file_id ASC",
         )
         .map_err(|e| e.to_string())?;
-    let items = stmt.query_map(params![group_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))).map_err(|e| e.to_string())?
-        .map(|item| { let (file_id, score) = item.map_err(|e| e.to_string())?; Ok(serde_json::json!({"file_id": file_id, "score": score, "file": AFile::get_file_info(file_id)?})) }).collect::<Result<Vec<_>, String>>()?;
+    let rows = stmt.query_map(params![group_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?, row.get::<_, i64>(2)?, row.get::<_, bool>(3)?))
+    }).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let ids = rows.iter().filter(|row| row.2 == 0).map(|row| row.0).collect::<Vec<_>>();
+    let candidates = t_dedup::similar_delete_candidates(&conn, group_id, &ids, group_raw_pairs)?;
+    let deletable = t_dedup::safe_dedup_delete_candidates(&conn, candidates, group_raw_pairs, true)?
+        .into_iter().map(|file| file.file_id).collect::<HashSet<_>>();
+    let items = rows.into_iter().map(|(file_id, score, is_keep, is_live_photo_companion)| {
+        Ok(serde_json::json!({
+            "file_id": file_id, "score": score, "is_keep": is_keep,
+            "can_delete": deletable.contains(&file_id), "is_live_photo_companion": is_live_photo_companion,
+            "file": AFile::get_file_info(file_id)?
+        }))
+    }).collect::<Result<Vec<_>, String>>()?;
     Ok(serde_json::json!({"id": group_id, "items": items}))
+}
+
+pub fn set_keep(group_id: i64, file_id: i64, scope_key: &str) -> Result<(), String> {
+    let mut conn = get_db_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM similarity_group_items i JOIN similarity_groups g ON g.id=i.group_id JOIN similarity_scans s ON s.id=g.scan_id WHERE i.group_id=?1 AND i.file_id=?2 AND s.scope_key=?3)",
+            params![group_id, file_id, scope_key],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("Similar item is not available in this scope.".into());
+    }
+    tx.execute(
+        "UPDATE similarity_group_items SET is_keep=0 WHERE group_id=?1",
+        params![group_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE similarity_group_items SET is_keep=1 WHERE group_id=?1 AND file_id=?2",
+        params![group_id, file_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE similarity_groups SET representative_file_id=?2 WHERE id=?1",
+        params![group_id, file_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 pub fn has_scan(scope_key: &str) -> Result<bool, String> {

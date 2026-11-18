@@ -1,8 +1,10 @@
 <template>
-  <ModalDialog :title="title" :width="400" @cancel="clickCancel">
+  <ModalDialog :title="title" :width="400" :position-key="positionKey" @cancel="clickCancel">
     <div v-if="message" class="text-sm whitespace-pre-line wrap-break-word select-none">
       {{ message }}
     </div>
+
+    <slot />
 
     <label
       v-if="checkboxText"
@@ -42,31 +44,33 @@
       @input="validateInput"
     ></textarea>
 
-    <p class="h-4 text-error text-xs">{{ inputErrorMessage }}</p>
+    <p class="p-1 text-error text-xs">{{ inputErrorMessage }}</p>
 
     <!-- buttons -->
     <div class="mt-2 flex justify-end space-x-4">
       <button v-if="thirdText.length > 0"
-        :class="['px-4 py-1 rounded-box cursor-pointer', warningThird ? 'hover:bg-error hover:text-base-100' : 'hover:bg-base-100 hover:text-base-content']" 
+        :class="['px-4 py-1 rounded-box cursor-pointer', warningThird ? 'hover:bg-error hover:text-error-content' : 'hover:bg-base-100 hover:text-base-content']" 
         @click="clickThird"
       >{{ thirdText }}</button>
 
       <button v-if="cancelText.length > 0"
-        class="t-button-default" 
+        ref="cancelButton"
+        class="t-button-default"
+        :disabled="isLoading"
         @click="clickCancel"
       >{{ cancelText }}</button>
       
       <button 
-        :class="warningOk ? 't-button-error' : 't-button-primary'" 
-        :disabled="showInput && !isInputValid"
+        :class="warningOk ? 't-button-error' : 't-button-primary'"
+        :disabled="isLoading || (showInput && !isInputValid)"
         @click="clickOk"
-      >{{ OkText }}</button>
+      ><span v-if="isLoading" class="loading loading-spinner loading-xs mr-2"></span>{{ OkText }}</button>
     </div>
   </ModalDialog>
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { isValidFileName } from '@/common/utils';
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
@@ -136,6 +140,20 @@ const props = defineProps({
   checkboxChecked: {
     type: Boolean,
     default: false
+  },
+  isLoading: {
+    type: Boolean,
+    default: false
+  },
+  focusCancel: {
+    type: Boolean,
+    default: false
+  },
+  // Optional key for persisting dialog position across sessions.
+  // When empty, dialog always centers on mount (backward compatible).
+  positionKey: {
+    type: String,
+    default: ''
   }
 });
 
@@ -148,6 +166,7 @@ const emit = defineEmits(['ok', 'cancel', 'reset', 'third', 'checkbox-change']);
 
 // input 
 const inputRef = ref<HTMLInputElement | null>(null);
+const cancelButton = ref<HTMLButtonElement | null>(null);
 const inputValue = ref(props.inputText);
 const needValidateInput = ref(props.needValidateInput);
 const inputErrorMessage = ref('');
@@ -160,6 +179,7 @@ const isInputValid = computed(() =>
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
   uiStore.pushInputHandler('MessageBox');
+  if (props.focusCancel) void nextTick(() => cancelButton.value?.focus({ preventScroll: true }));
 
   if(props.showInput) { 
     setTimeout(() => {
@@ -193,7 +213,7 @@ const validateInput = () => {
 };
 
 function handleKeyDown(event: KeyboardEvent) {
-  if (!uiStore.isInputActive('MessageBox')) return;
+  if (event.defaultPrevented || !uiStore.isInputActive('MessageBox') || props.isLoading) return;
 
   const { key } = event;
   const activeElement = document.activeElement;
@@ -201,8 +221,7 @@ function handleKeyDown(event: KeyboardEvent) {
 
   switch (key) {
     case 'Enter':
-      // Don't trigger OK if user is in an input or textarea
-      if (!isInputOrTextarea) {
+      if (!props.focusCancel && !isInputOrTextarea) {
         event.preventDefault();
         clickOk();
       }
@@ -216,6 +235,7 @@ function handleKeyDown(event: KeyboardEvent) {
 }
 
 const clickOk = () => {
+  if (props.isLoading) return;
   if(props.showInput) {
     if ( !props.needValidateInput || inputValue.value.trim().length > 0 && !inputErrorMessage.value) {
       emit('ok', inputValue.value);
@@ -226,6 +246,7 @@ const clickOk = () => {
 };
 
 const clickCancel = () => {
+  if (props.isLoading) return;
   emit('cancel');
 };
 

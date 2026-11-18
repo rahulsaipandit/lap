@@ -32,6 +32,7 @@ const PROBE_TIMEOUT_SECS: u64 = 5;
 const INDEX_PROBE_TIMEOUT_SECS: u64 = 20;
 const PROBE_SIZE_BYTES: &str = "5000000";
 const ANALYZE_DURATION_MICROSECONDS: &str = "5000000";
+#[cfg(debug_assertions)]
 const FFMPEG_DEBUG_STDERR_LIMIT_BYTES: u64 = 64 * 1024;
 const EXTERNAL_PLAYER_REQUIRED_ERROR: &str = "video_requires_external_player";
 
@@ -70,6 +71,13 @@ fn platform_video_url(file_path: &str) -> Result<String, String> {
     {
         Ok(file_path.to_string())
     }
+}
+
+/// Resolve the original video's platform transport without compatibility processing.
+#[tauri::command]
+pub fn get_video_stream_url(file_path: String) -> Result<String, String> {
+    crate::t_utils::require_local_content(std::path::Path::new(&file_path)).map_err(|e| e.to_string())?;
+    platform_video_url(&file_path)
 }
 
 /// Manages active FFmpeg/FFprobe processes, allowing per-player cancellation.
@@ -220,6 +228,9 @@ async fn probe_json_with_timeout(file_path: &str, timeout_secs: u64) -> Result<V
     let mut cmd = ffprobe_command();
 
     cmd.args(["-v", "quiet"]);
+    if crate::t_image::is_heic_path(file_path) && find_sidecar(ffprobe_sidecar_name()).is_some() {
+        cmd.arg("-show_stream_groups");
+    }
     if should_skip_duration_probe(file_path) {
         cmd.args(["-skip_estimate_duration_from_pts", "1"]);
     }
@@ -409,10 +420,42 @@ fn should_retry_thumbnail_with_slow_seek(
     info.fmt.contains("mov") || info.v_codec == "hevc"
 }
 
+// FFmpeg exposes the HEIF primary item as default, either on a stream or a
+// Tile Grid group. Never treat a dependent tile as a complete image.
+fn heif_primary_image(probe: &Value) -> Result<(String, &Value), String> {
+    let groups = probe["stream_groups"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let streams = probe["streams"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let candidates: Vec<_> = groups.iter()
+        .filter(|g| g["type"] == "Tile Grid")
+        .chain(streams.iter().filter(|s| s["codec_type"] == "video"
+            && s["disposition"]["dependent"] != 1))
+        .collect();
+    let primary = candidates.iter().copied()
+        .find(|item| item["disposition"]["default"] == 1)
+        .or_else(|| (candidates.len() == 1).then(|| candidates[0]))
+        .ok_or("Cannot identify HEIF primary image")?;
+    let index = primary["index"].as_u64().ok_or("Missing HEIF item index")?;
+    if primary["type"] == "Tile Grid" {
+        let grid = &primary["components"][0];
+        let map = if grid["nb_tiles"].as_u64().unwrap_or(0) > 1 {
+            // Select FFmpeg's internally assembled/cropped/rotated grid output.
+            format!("[0:g:{index}]")
+        } else {
+            let stream = grid["subcomponents"][0]["stream_index"].as_u64()
+                .ok_or("Missing HEIF grid tile")?;
+            format!("0:{stream}")
+        };
+        Ok((map, grid))
+    } else {
+        Ok((format!("0:{index}"), primary))
+    }
+}
+
 async fn run_thumbnail_command(
     file_path: &str,
     ffmpeg_threads: &str,
     filter: &str,
+    stream_map: &str,
     strategy: ThumbnailStrategy,
     timeout_secs: u64,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -427,15 +470,17 @@ async fn run_thumbnail_command(
     if let ThumbnailStrategy::SlowSeek(t) = strategy {
         cmd.args(["-ss", &t.to_string()]);
     }
+    if stream_map.starts_with('[') {
+        // Grid outputs are complex filters; append scaling to that graph.
+        cmd.args(["-filter_complex", &format!("{stream_map}{filter}[thumb]"), "-map", "[thumb]"]);
+    } else {
+        cmd.args(["-map", stream_map, "-vf", filter]);
+    }
     cmd.args([
-        "-map",
-        "0:v:0",
         "-vframes",
         "1",
         "-an",
         "-sn",
-        "-vf",
-        filter,
         "-c:v",
         "mjpeg",
         "-f",
@@ -489,7 +534,14 @@ pub async fn get_video_thumbnail(
     known_duration: Option<u64>,
     seek_percent: Option<u8>,
 ) -> Result<Option<Vec<u8>>, String> {
+    crate::t_utils::require_local_content(std::path::Path::new(file_path))
+        .map_err(|error| error.to_string())?;
     let probe = probe_json_async(file_path).await.ok();
+    let stream_map = if crate::t_image::is_heic_path(file_path) {
+        heif_primary_image(probe.as_ref().ok_or("Cannot probe HEIF primary image")?)?.0
+    } else {
+        "0:v:0".to_string()
+    };
     let probe_info = probe.as_ref().map(ThumbnailProbeInfo::from_probe);
     let duration = if let Some(d) = known_duration {
         d
@@ -523,7 +575,7 @@ pub async fn get_video_thumbnail(
             }
         });
 
-    match run_thumbnail_command(file_path, &ffmpeg_threads, &filter, primary_strategy, 20).await {
+    match run_thumbnail_command(file_path, &ffmpeg_threads, &filter, &stream_map, primary_strategy, 20).await {
         Ok(result) => return Ok(result),
         Err(err) => {
             if should_retry_thumbnail_with_slow_seek(
@@ -536,6 +588,7 @@ pub async fn get_video_thumbnail(
                     file_path,
                     &ffmpeg_threads,
                     &filter,
+                    &stream_map,
                     ThumbnailStrategy::SlowSeek(seek_time),
                     20,
                 )
@@ -551,6 +604,7 @@ pub async fn get_video_thumbnail(
         file_path,
         &ffmpeg_threads,
         &filter,
+        &stream_map,
         ThumbnailStrategy::FirstFrame,
         15,
     )
@@ -599,18 +653,7 @@ pub struct VideoMetadata {
     pub content_identifier: Option<String>,
 }
 
-pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, String> {
-    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
-
-    // Extract stream info
-    let streams = json["streams"]
-        .as_array()
-        .ok_or("No streams found in video")?;
-    let video = streams
-        .iter()
-        .find(|s| s["codec_type"] == "video")
-        .ok_or("No video stream found")?;
-
+fn video_dimensions(video: &Value) -> (u32, u32) {
     let mut w = video["width"].as_u64().unwrap_or(0) as u32;
     let mut h = video["height"].as_u64().unwrap_or(0) as u32;
 
@@ -640,6 +683,33 @@ pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, 
     if rotation == 90 || rotation == 270 {
         std::mem::swap(&mut w, &mut h);
     }
+
+    (w, h)
+}
+
+pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, String> {
+    crate::t_utils::require_local_content(std::path::Path::new(file_path)).map_err(|e| e.to_string())?;
+    let json = probe_json_with_timeout(file_path, INDEX_PROBE_TIMEOUT_SECS).await?;
+
+    if crate::t_image::is_heic_path(file_path) {
+        let (_, primary) = heif_primary_image(&json)?;
+        let (width, height) = video_dimensions(primary);
+        if width == 0 || height == 0 {
+            return Err("Missing HEIF primary image dimensions".to_string());
+        }
+        return Ok(VideoMetadata { width, height, ..Default::default() });
+    }
+
+    // Extract stream info
+    let streams = json["streams"]
+        .as_array()
+        .ok_or("No streams found in video")?;
+    let video = streams
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .ok_or("No video stream found")?;
+
+    let (w, h) = video_dimensions(video);
 
     // Extract duration
     let duration = json["format"]["duration"]
@@ -673,40 +743,41 @@ pub async fn get_video_metadata_async(file_path: &str) -> Result<VideoMetadata, 
 
     let content_identifier = first_exist(
         &meta,
-        &[
-            "com.apple.quicktime.content.identifier",
-            "content.identifier",
-            "live-photo-info",
-        ],
+        crate::metadata::schema::APPLE_VIDEO_CONTENT_IDENTIFIER_KEYS,
     )
     .or_else(|| {
         stream_meta.as_ref().and_then(|meta| {
             first_exist(
                 meta,
-                &[
-                    "com.apple.quicktime.content.identifier",
-                    "content.identifier",
-                    "live-photo-info",
-                ],
+                crate::metadata::schema::APPLE_VIDEO_CONTENT_IDENTIFIER_KEYS,
             )
         })
     });
 
-    let e_date_time = first_parseable_date(&meta, &["com.apple.quicktime.creationdate"])
-        .or_else(|| {
-            stream_meta.as_ref().and_then(|meta| {
-                first_parseable_date(meta, &["com.apple.quicktime.creationdate"])
-            })
-        })
-        .or_else(|| first_exist(&meta, &["creation_time"]));
+    let e_date_time = video_capture_date(&meta, stream_meta.as_ref());
 
     Ok(VideoMetadata {
         width: w,
         height: h,
         duration,
-        e_make: first_exist(&meta, &["make", "camera_make"]),
-        e_model: first_exist(&meta, &["model", "camera_model"]),
-        e_software: first_exist(&meta, &["software", "encoder"]),
+        e_make: first_camera_tag(
+            &meta,
+            stream_meta.as_ref(),
+            "com.apple.quicktime.make",
+            &["make", "camera_make"],
+        ),
+        e_model: first_camera_tag(
+            &meta,
+            stream_meta.as_ref(),
+            "com.apple.quicktime.model",
+            &["model", "camera_model"],
+        ),
+        e_software: first_camera_tag(
+            &meta,
+            stream_meta.as_ref(),
+            "com.apple.quicktime.software",
+            &["software", "encoder"],
+        ),
         e_date_time,
         gps_latitude,
         gps_longitude,
@@ -935,11 +1006,45 @@ pub fn get_video_metadata(file_path: &str) -> Result<VideoMetadata, String> {
 
 fn first_exist(meta: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
     for k in keys {
-        if let Some(v) = meta.get(*k) {
+        if let Some(v) = meta.get(*k).filter(|value| !value.trim().is_empty()) {
             return Some(v.clone());
         }
     }
     None
+}
+
+/// Prefer Apple QuickTime camera metadata, then retain the generic metadata
+/// fallback used by videos from other devices.
+fn first_camera_tag(
+    meta: &HashMap<String, String>,
+    stream_meta: Option<&HashMap<String, String>>,
+    apple_key: &str,
+    generic_keys: &[&str],
+) -> Option<String> {
+    first_exist(meta, &[apple_key])
+        .or_else(|| stream_meta.and_then(|tags| first_exist(tags, &[apple_key])))
+        .or_else(|| first_exist(meta, generic_keys))
+        .or_else(|| stream_meta.and_then(|tags| first_exist(tags, generic_keys)))
+}
+
+fn video_capture_date(
+    meta: &HashMap<String, String>,
+    stream_meta: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    first_parseable_date(meta, &["com.apple.quicktime.creationdate"])
+        .or_else(|| stream_meta.and_then(|tags| {
+            first_parseable_date(tags, &["com.apple.quicktime.creationdate"])
+        }))
+        .map(|date| t_utils::metadata_wallclock_date(&date).unwrap_or(date))
+        // UTC-only timestamps have no shoot-site timezone. Convert to system
+        // local time before storing the same naive date format as photos.
+        .or_else(|| first_exist(meta, &["creation_time"]).map(|date| {
+            chrono::DateTime::parse_from_rfc3339(&date).ok().and_then(|dt| {
+                let local = dt.with_timezone(&chrono::Local).format("%Y:%m:%d %H:%M:%S").to_string();
+                // Keep the absolute timestamp during ambiguous DST hours.
+                (t_utils::meta_date_to_timestamp(&local) == Some(dt.timestamp())).then_some(local)
+            }).unwrap_or(date)
+        }))
 }
 
 fn first_parseable_date(meta: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
@@ -1050,6 +1155,7 @@ pub async fn prepare_video(
     force: Option<String>,
     request_id: Option<u64>,
 ) -> Result<VideoPrepareResult, String> {
+    crate::t_utils::require_local_content(std::path::Path::new(&file_path)).map_err(|e| e.to_string())?;
     if is_mpeg_program_stream(&file_path) {
         return Err(EXTERNAL_PLAYER_REQUIRED_ERROR.to_string());
     }
@@ -1412,4 +1518,22 @@ fn hash_id(value: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+#[cfg(test)]
+mod capture_date_tests {
+    use super::*;
+
+    #[test]
+    fn quicktime_z_preserves_wallclock_but_creation_time_converts_utc() {
+        let date = "2019-05-27T11:10:03.000000Z";
+        let quicktime = HashMap::from([("com.apple.quicktime.creationdate".into(), date.into())]);
+        assert_eq!(video_capture_date(&quicktime, None).as_deref(), Some("2019:05:27 11:10:03"));
+        assert_eq!(video_capture_date(&HashMap::new(), Some(&quicktime)), video_capture_date(&quicktime, None));
+
+        let utc = HashMap::from([("creation_time".into(), date.into())]);
+        let expected = chrono::DateTime::parse_from_rfc3339(date).unwrap()
+            .with_timezone(&chrono::Local).format("%Y:%m:%d %H:%M:%S").to_string();
+        assert_eq!(video_capture_date(&utc, None), Some(expected));
+    }
 }

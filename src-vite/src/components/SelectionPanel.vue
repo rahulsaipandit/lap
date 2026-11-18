@@ -1,12 +1,15 @@
 <template>
   <div class="w-full h-full rounded-box bg-base-200 flex flex-col overflow-hidden">
     <div class="my-2 px-2 flex items-center w-full shrink-0">
-      <div class="flex-1 pl-1">
+      <div class="min-w-0 pl-1">
         <span class="text-sm font-semibold text-primary/70">
-          {{ $t('toolbar.filter.select_mode') }}
+          {{ $t('info_panel.select_title') }}
         </span>
       </div>
-      <div class="flex items-center gap-1">
+      <span class="ml-auto min-w-0 truncate pl-2 text-xs text-base-content/70" :title="selectionSummaryText" aria-live="polite">
+        {{ selectionSummaryText }}
+      </span>
+      <div class="ml-1 flex shrink-0 items-center gap-1">
         <TButton
           :icon="IconClose"
           :tooltip="$t('msgbox.close')"
@@ -18,26 +21,16 @@
 
     <div class="mb-2 px-2 flex-1 overflow-y-auto overflow-x-hidden flex flex-col">
       <div class="border-t border-base-content/5 px-1 py-3 space-y-3">
-        <div class="flex items-center gap-2">
-          <span class="text-[10px] uppercase tracking-widest font-bold text-base-content/30">
-            {{ $t('info_panel.select_title') }}
-          </span>
-          <span
-            class="ml-auto min-w-0 truncate text-right text-[11px] font-semibold text-base-content/70"
-          >
-            {{ selectionSummaryText }}
-          </span>
-        </div>
         <div class="flex flex-wrap items-center gap-1">
           <PanelActionButton
-            :icon="IconCheckAll"
+            :icon="IconSelectAll"
             :disabled="fileCount === 0"
             @click="$emit('selectAll')"
           >
             {{ $t('menu.select.all') }}
           </PanelActionButton>
           <PanelActionButton
-            :icon="IconCheckNone"
+            :icon="IconDeselect"
             :disabled="selectedCount === 0"
             @click="$emit('selectNone')"
           >
@@ -117,25 +110,11 @@
             {{ $t('menu.meta.tag') }}
           </PanelActionButton>
           <PanelActionButton
-            :icon="IconBookmark"
+            :icon="IconCollection"
             :disabled="selectedCount === 0"
             @click="$emit('addToCollection')"
           >
             {{ $t('menu.meta.collection') }}
-          </PanelActionButton>
-          <PanelActionButton
-            :icon="IconComment"
-            :disabled="selectedCount === 0"
-            @click="$emit('commentAll')"
-          >
-            {{ $t('menu.meta.comment') }}
-          </PanelActionButton>
-          <PanelActionButton
-            :icon="IconRotate"
-            :disabled="selectedCount === 0"
-            @click="$emit('rotateAll')"
-          >
-            {{ rotateDisplayLabel }}
           </PanelActionButton>
         </div>
       </div>
@@ -147,31 +126,45 @@
         </div>
         <div class="flex flex-wrap items-center gap-1">
           <PanelActionButton
-            :icon="IconMove"
-            :disabled="selectedCount === 0"
+            :icon="IconRename"
+            :disabled="selectedCount === 0 || originalsUnavailable"
+            @click="$emit('rename')"
+          >
+            {{ $t('menu.file.rename') }}
+          </PanelActionButton>
+          <PanelActionButton
+            :icon="IconCopy"
+            :disabled="selectedCount === 0 || clipboardUnavailable"
+            @click="$emit('copyToClipboard')"
+          >
+            {{ $t('menu.file.copy') }}
+          </PanelActionButton>
+          <PanelActionButton
+            :icon="IconFileArrowRight"
+            :disabled="selectedCount === 0 || originalsUnavailable"
             @click="$emit('moveWithinLibrary')"
           >
             {{ $t('menu.file.move_within_library') }}
           </PanelActionButton>
           <PanelActionButton
-            :disabled="selectedCount === 0"
+            :disabled="selectedCount === 0 || originalsUnavailable"
             @click="$emit('moveToFolder')"
           >
             {{ $t('menu.file.move_to_folder') }}
           </PanelActionButton>
           <PanelActionButton
-            :disabled="selectedCount === 0"
+            :disabled="selectedCount === 0 || originalsUnavailable"
             @click="$emit('copyToFolder')"
           >
             {{ $t('menu.file.copy_to_folder') }}
           </PanelActionButton>
           <PanelActionButton
             :icon="IconTrash"
-            :disabled="selectedCount === 0"
+            :disabled="selectedCount === 0 || originalsUnavailable"
             danger
             @click="$emit('trash')"
           >
-            {{ $t('menu.file.move_to_trash') }}
+            {{ $t(config.settings.fileDeleteBehavior === 'permanent' ? 'menu.file.delete' : 'msgbox.move_to_trash.title') }}
           </PanelActionButton>
         </div>
 
@@ -187,14 +180,14 @@
             v-for="item in visibleMoreActions"
             :key="item.label"
             :icon="item.icon"
-            :disabled="Boolean(item.disabled)"
-            @click="$emit('moreAction', item.action)"
+            :disabled="selectedCount === 0 || Boolean(item.disabled)"
+            @click="onMoreActionClick(item, $event)"
           >
             {{ item.label }}
           </PanelActionButton>
           <PanelActionButton
             v-if="querySource === 'collection'"
-            :icon="IconBookmarkOff"
+            :icon="IconCollection"
             :disabled="selectedCount === 0"
             @click="$emit('removeFromCollection')"
           >
@@ -207,20 +200,21 @@
 </template>
 
 <script setup lang="ts">
+import { config } from '@/common/config';
+import { SELECTED_THUMBNAIL_LIMIT } from '@/common/constants';
 import { computed, type CSSProperties } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatFileSize, formatTimestamp, isMac } from '@/common/utils';
 import {
-  IconCheckAll,
-  IconCheckNone,
+  IconSelectAll,
+  IconDeselect,
   IconClose,
-  IconComment,
-  IconMove,
-  IconRotate,
+  IconCopy,
+  IconFileArrowRight,
   IconTag,
   IconTrash,
-  IconBookmarkOff,
-  IconBookmark,
+  IconRename,
+  IconCollection,
 } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';
@@ -235,6 +229,8 @@ const props = defineProps({
     type: Number,
     default: 0,
   },
+  clipboardUnavailable: { type: Boolean, default: false },
+  originalsUnavailable: { type: Boolean, default: false },
   selectedCount: {
     type: Number,
     default: 0,
@@ -253,7 +249,7 @@ const props = defineProps({
   },
 });
 
-defineEmits([
+const emit = defineEmits([
   'close',
   'selectAll',
   'selectNone',
@@ -262,29 +258,29 @@ defineEmits([
   'moveToFolder',
   'copyToFolder',
   'trash',
+  'rename',
   'favoriteAll',
   'unfavoriteAll',
   'setRatingAll',
   'setCullingAll',
   'tagAll',
   'addToCollection',
-  'commentAll',
-  'rotateAll',
+  'copyToClipboard',
   'removeFromCollection',
   'unselectFile',
   'moreAction',
+  'moreActionMenu',
 ]);
 
 const { locale, messages, t } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
-const SELECTED_THUMBNAIL_LIMIT = 19;
 
 const visibleSelectedFiles = computed(() => props.selectedFiles.slice(0, SELECTED_THUMBNAIL_LIMIT));
 const hiddenSelectedCount = computed(() => Math.max(0, props.selectedCount - visibleSelectedFiles.value.length));
 const selectionSummaryText = computed(() => {
   if (props.selectedCount <= 0) return '';
   const countText = t('toolbar.filter.select_count', { count: props.selectedCount.toLocaleString() });
-  return `${countText} (${formatFileSize(props.selectedSize)})`;
+  return `${countText} · ${formatFileSize(props.selectedSize)}`;
 });
 
 function getSelectedThumbnailStyle(file: any): CSSProperties {
@@ -298,8 +294,8 @@ const multiSelectDateRange = computed(() => {
     .filter(Boolean)
     .sort();
   if (dates.length === 0) return '';
-  const first = formatTimestamp(dates[0], localeMsg.value.format.date);
-  const last = formatTimestamp(dates[dates.length - 1], localeMsg.value.format.date);
+  const first = formatTimestamp(dates[0], 'date');
+  const last = formatTimestamp(dates[dates.length - 1], 'date');
   return first === last ? first : `${first} - ${last}`;
 });
 
@@ -333,27 +329,16 @@ const multiSelectCulling = computed(() => {
   return cullingFlags.every((cullingFlag: number) => cullingFlag === first) ? first : null;
 });
 
-const multiSelectRotate = computed(() => {
-  if (!props.selectedFiles.length) return 0;
-  const normalizeRotate = (rotate: number) => {
-    const normalized = rotate % 360;
-    return normalized < 0 ? normalized + 360 : normalized;
-  };
-  const rotates = props.selectedFiles.map((f: any) => normalizeRotate(Number(f.rotate || 0)));
-  const first = rotates[0];
-  return rotates.every((rotate: number) => rotate === first) ? first : null;
-});
-
-const rotateDisplayLabel = computed(() => {
-  const rotateText = localeMsg.value.menu.meta.rotate;
-  if (multiSelectRotate.value === null || multiSelectRotate.value === 0) {
-    return rotateText;
-  }
-  return `${rotateText} (${multiSelectRotate.value}°)`;
-});
-
 const visibleMoreActions = computed(() =>
-  props.moreActions.filter((item: any) => item?.label && item?.action && !item.hidden)
+  props.moreActions.filter((item: any) => item?.label && !item.hidden && !item.hideInSelectionPanel && (item.action || item.children?.length))
 );
+
+// Items with a direct action fire immediately; submenu parents (e.g. "Open in
+// external app...") hand the click to the parent so it can pop the same
+// ContextMenu submenu the right-click menu uses.
+function onMoreActionClick(item: any, event: MouseEvent) {
+  if (item?.children?.length) emit('moreActionMenu', item, event);
+  else emit('moreAction', item.action);
+}
 
 </script>

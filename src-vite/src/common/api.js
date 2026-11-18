@@ -1,7 +1,21 @@
-import { invoke } from '@tauri-apps/api/core';
+import { setAlbumAccessibility } from '@/common/availability';
+import { invoke, Channel } from '@tauri-apps/api/core';
+import { locale } from '@tauri-apps/plugin-os';
 import { listen } from '@tauri-apps/api/event';
-import { config } from '@/common/config';
-import { separator, localeComp } from '@/common/utils';
+import { config, libConfig } from '@/common/config';
+import { separator, localeComp, formatTimestamp } from '@/common/utils';
+import { getRawDisplayOptions } from './rawDisplay';
+
+export async function getSystemRegionLocale() {
+  // plugin-os reports language preferences, which can differ from date/time region.
+  try {
+    const region = await invoke('get_system_region_locale');
+    if (region) return region;
+  } catch (error) {
+    console.warn('Could not read system regional locale', error);
+  }
+  return locale();
+}
 
 // library
 
@@ -25,6 +39,15 @@ export async function getSupportedFormatExtensions() {
     console.error('Failed to get supported format extensions:', error);
   }
   return { image: [], raw: [], video: [], options: [] };
+}
+
+export async function getFfmpegBackedImageExtensions() {
+  try {
+    return await invoke('get_ffmpeg_backed_image_extensions');
+  } catch (error) {
+    console.error('Failed to get FFmpeg-backed image extensions:', error);
+  }
+  return [];
 }
 
 // set last selected item index
@@ -72,6 +95,24 @@ export async function resetDbStorageDir() {
     console.error('Failed to reset DB storage dir:', error);
     throw error;
   }
+}
+
+export function getThumbnailCacheLocation() {
+  return invoke('get_thumbnail_cache_location');
+}
+
+export function getThumbnailCacheMigrationCount() {
+  return invoke('get_thumbnail_cache_migration_count');
+}
+
+export function changeThumbnailCacheLocation(newDir, onProgress, allowMissingSource = false, operationId) {
+  const channel = new Channel();
+  channel.onmessage = onProgress;
+  return invoke('change_thumbnail_cache_location', { newDir, onProgress: channel, allowMissingSource, operationId });
+}
+
+export function cancelThumbnailCacheMigration(operationId) {
+  return invoke('cancel_thumbnail_cache_migration', { operationId });
 }
 
 // backup / restore
@@ -297,10 +338,13 @@ export async function getSmartQueryFilePosition(params, fileId) {
 // albums
 
 // get all albums
-export async function getAllAlbums() {
+export async function getAllAlbums(refreshAccessibility = false) {
+  const libraryId = libConfig._libraryId;
   try {
     let albums = [];
-    const fetchedAlbums = await invoke('get_all_albums');
+    const fetchedAlbums = await invoke('get_all_albums', { refreshAccessibility });
+    if (libraryId !== libConfig._libraryId) return null;
+    for (const album of fetchedAlbums || []) setAlbumAccessibility(album.id, album.is_accessible);
     console.log('get_all_albums', fetchedAlbums);
     if (fetchedAlbums) {
       albums = fetchedAlbums.map(album => ({
@@ -324,9 +368,22 @@ export async function getAllAlbums() {
   return null;
 };
 
+export async function getAllAlbumFolders() {
+  try {
+    return await invoke('get_all_album_folders');
+  } catch (error) {
+    console.error('Failed to get album folders:', error);
+  }
+  return [];
+}
+
+export async function getAllAlbumFoldersIncludingExcluded() {
+  return await invoke('get_all_album_folders', { includeExcluded: true });
+}
+
 export async function listAlbums() {
   try {
-    return await invoke('get_all_albums');
+    return await invoke('get_all_albums', { refreshAccessibility: false });
   } catch (error) {
     console.error('Failed to list albums:', error);
   }
@@ -350,6 +407,18 @@ export async function getAlbum(albumId) {
   return null;
 }
 
+export async function checkAlbumAccessibility(albumId) {
+  const libraryId = libConfig._libraryId;
+  try {
+    const available = Boolean(await invoke('check_album_accessibility', { albumId }));
+    if (libraryId === libConfig._libraryId) setAlbumAccessibility(albumId, available);
+    return available;
+  } catch (error) {
+    console.error('checkAlbumAccessibility error:', error);
+    return false;
+  }
+}
+
 // recount files for an album and return updated album
 export async function recountAlbum(albumId) {
   if(!albumId) {
@@ -363,13 +432,23 @@ export async function recountAlbum(albumId) {
   return null;
 }
 
+export async function getAlbumVisibleCounts() {
+  try {
+    return await invoke('get_album_visible_counts');
+  } catch (error) {
+    console.error('getAlbumVisibleCounts:', error);
+  }
+  return null;
+}
+
 // add an album to db
-export async function addAlbum(folderPath) {
+export async function addAlbum(folderPath, name, description, filters) {
   if(!folderPath) {
     return null;
   }
   try {
-    const newAlbum = await invoke('add_album', { folderPath });
+    const { fileTypes, smallImageFilter, excludedFolders } = filters;
+    const newAlbum = await invoke('add_album', { folderPath, name, description, fileTypes, smallImageFilter, excludedFolders });
     console.log('add_album', newAlbum);
     if(newAlbum) {
       return {
@@ -385,9 +464,10 @@ export async function addAlbum(folderPath) {
 }
 
 // edit an album's profile
-export async function editAlbum(albumId, newName, newDespription) {
+export async function editAlbum(albumId, newName, newDescription, filters) {
   try {
-    const album = await invoke('edit_album', { id: albumId, name: newName, description: newDespription });
+    const { fileTypes, smallImageFilter, excludedFolders } = filters;
+    const album = await invoke('edit_album', { id: albumId, name: newName, description: newDescription, fileTypes, smallImageFilter, excludedFolders });
     console.log('edit_album', album);
     if (album) {
       return album;
@@ -421,6 +501,10 @@ export async function openExternalUrl(url) {
     console.error('Failed to open external URL:', error);
     throw error;
   }
+}
+
+export async function setDesktopWallpaper(filePath, companionPath = null) {
+  return invoke('set_desktop_wallpaper', { filePath, companionPath });
 }
 
 // open a file with a specific external app
@@ -576,9 +660,10 @@ export async function expandFinalFolder(rootFolder, finalPath) {
 }
 
 // recurse all files under the path(include all sub-folders), and count the number of files
-export async function countFolder(path) {
+export async function countFolder(path, filters = {}) {
   try {
-    const result = await invoke('count_folder', { path });
+    const { fileTypes, smallImageFilter, excludedFolders } = filters;
+    const result = await invoke('count_folder', { path, fileTypes, smallImageFilter, excludedFolders });
     if(result) {
       return result;
     };
@@ -650,9 +735,13 @@ export async function copyFolder(folderPath, newFolderPath, newAlbumId = 0, conf
 }
 
 // delete a folder (move to trash)
-export async function deleteFolder(folderPath) {
+export function prepareFolderDelete(folderPath, libraryId) {
+  return invoke('prepare_folder_delete', { folderPath, libraryId });
+}
+
+export async function deleteFolder(folderPath, libraryId, expectedIdentity) {
   try {
-    const result = await invoke('delete_folder', { folderPath });
+    const result = await invoke('delete_folder', { folderPath, libraryId, expectedIdentity });
     return result;
   } catch (error) {
     console.log('Failed to delete folder:', error);
@@ -661,9 +750,9 @@ export async function deleteFolder(folderPath) {
 };
 
 // permanently delete a folder (skip trash)
-export async function deleteFolderPermanently(folderPath) {
+export async function deleteFolderPermanently(folderPath, libraryId, expectedIdentity) {
   try {
-    return await invoke('delete_folder_permanently', { folderPath });
+    return await invoke('delete_folder_permanently', { folderPath, libraryId, expectedIdentity });
   } catch (error) {
     console.error('Failed to permanently delete folder:', error);
     throw error;
@@ -685,19 +774,6 @@ export async function revealPath(path) {
 
 // files
 
-// get total files count and sum
-export async function getTotalCountAndSum() {
-  try {
-    const result = await invoke('get_total_count_and_sum');
-    if(result) {
-      return result;
-    };
-  } catch (error) {
-    console.error('getTotalCountAndSum error:', error);
-  }
-  return null;
-}
-
 /// get query files count and sum
 export async function getQueryCountAndSum(params) {
   try {
@@ -708,6 +784,12 @@ export async function getQueryCountAndSum(params) {
   } catch (error) {
     console.error('getQueryCountAndSum error:', error);
   }
+  return null;
+}
+
+export async function getLibraryVisibleCounts(id) {
+  try { return await invoke('get_library_visible_counts', { id }); }
+  catch (error) { console.error('getLibraryVisibleCounts:', error); }
   return null;
 }
 
@@ -741,6 +823,15 @@ export async function getQueryFiles(params, offset, limit) {
   return null;
 }
 
+export async function getFilesByIds(fileIds) {
+  try {
+    return await invoke('get_files_by_ids', { fileIds });
+  } catch (error) {
+    console.error('getFilesByIds error:', error);
+    return null;
+  }
+}
+
 /// get grouped query rows from db (row-based pagination: group headers + files)
 export async function getGroupedQueryRows(params, offset, limit) {
   try {
@@ -756,6 +847,15 @@ export async function getGroupedQueryRows(params, offset, limit) {
     console.error('getGroupedQueryRows error:', error);
   }
   return null;
+}
+
+export async function getGroupedFilePosition(params, fileId) {
+  try {
+    return await invoke('get_grouped_file_position', { params, fileId });
+  } catch (error) {
+    console.error('getGroupedFilePosition error:', error);
+    return undefined;
+  }
 }
 
 /// get all file ids in a grouped query group
@@ -814,6 +914,15 @@ export async function listCollections() {
   return null;
 }
 
+export async function getCollectionCounts() {
+  try {
+    return await invoke('get_collection_counts');
+  } catch (error) {
+    console.error('Failed to get collection counts:', error);
+  }
+  return null;
+}
+
 export async function createCollection(name) {
   try {
     return await invoke('create_collection', { name });
@@ -865,6 +974,15 @@ export async function removeFilesFromCollection(collectionId, fileIds) {
   } catch (error) {
     console.error('Failed to remove files from collection:', error);
     throw error;
+  }
+}
+
+export async function getCollectionSelectionCounts(fileIds) {
+  try {
+    return await invoke('get_collection_selection_counts', { fileIds });
+  } catch (error) {
+    console.error('Failed to get collection selection counts:', error);
+    return null;
   }
 }
 
@@ -984,11 +1102,24 @@ export async function syncAlbumFolderMtimes(albumId, folderId, folderPath) {
   return null;
 };
 
+export async function refreshAlbumFolders(albumId, folderPath, libraryId) {
+  return await invoke('refresh_album_folders', {
+    albumId,
+    folderPath,
+    libraryId,
+    groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
+}
+
+export async function reconcileRawJpegPairs(libraryId, enabled) {
+  return await invoke('reconcile_raw_jpeg_pairs', { libraryId, enabled });
+}
+
 // get the thumbnail count of the folder
 export async function getFolderThumbCount(folderId) {
   try {
     let count = await invoke('get_folder_thumb_count', { 
-      fileType: config.search.fileType,
+      fileType: 0,
       folderId, 
     });
     if(count) {
@@ -1011,6 +1142,11 @@ export async function editImage(params) {
   }
 }
 
+// render a photo montage and save it (throws the backend error message)
+export async function renderMontage(params) {
+  return await invoke('render_montage', { params: { ...params, rawDisplayOptions: getRawDisplayOptions() } });
+}
+
 // copy an edited image to clipboard
 export async function copyEditedImage(params) {
   try {
@@ -1022,32 +1158,54 @@ export async function copyEditedImage(params) {
 }
 
 // copy up to 10 content items to clipboard (pairs contain two files)
-export async function copyImages(filePaths) {
+export async function copyImages(filePaths, filesOnly = false) {
   try {
-    return await invoke('copy_images', { filePaths });
+    return await invoke('copy_images', { filePaths, filesOnly });
   } catch (error) {
     console.error('Failed to copy files to clipboard:', error);
     return 0;
   }
 }
 
-// rename a file
-export async function renameFile(fileId, filePath, newName) {
+// Preview and apply a batch rename in the captured library.
+export function previewBatchRename(libraryId, fileIds, options) {
+  return invoke('preview_batch_rename', { libraryId, fileIds, options });
+}
+
+export function batchRenameFiles(libraryId, fileIds, options, expected) {
+  return invoke('batch_rename_files', { libraryId, fileIds, options, expected });
+}
+
+// Rename a single file.
+export function renameFile(fileId, filePath, newName) {
+  return invoke('rename_file', { fileId, filePath, newName });
+}
+
+// One explicit action owns the backend directory index, including early failures.
+export async function withFileTransferBatch(action) {
+  let batchId = null;
   try {
-    const result = await invoke('rename_file', { fileId, filePath, newName });
-    if (result) {
-      return result;
-    }
+    batchId = await invoke('begin_file_transfer_batch');
   } catch (error) {
-    console.log('Failed to rename file:', error);
+    console.error('Failed to begin file transfer batch:', error);
   }
-  return null;
+  try {
+    return await action(batchId);
+  } finally {
+    if (batchId !== null) {
+      try {
+        await invoke('end_file_transfer_batch', { batchId });
+      } catch (error) {
+        console.error('Failed to end file transfer batch:', error);
+      }
+    }
+  }
 }
 
 // move a file
-export async function moveFile(fileId, filePath, newFolderId, newFolderPath, conflictPolicy = 'keep_both') {
+export async function moveFile(fileId, filePath, newFolderId, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    const result = await invoke('move_file', { fileId, filePath, newFolderId, newFolderPath, conflictPolicy });
+    const result = await invoke('move_file', { fileId, filePath, newFolderId, newFolderPath, conflictPolicy, batchId, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
     if(result) {
       return result;
     };
@@ -1057,9 +1215,9 @@ export async function moveFile(fileId, filePath, newFolderId, newFolderPath, con
   return null;
 }
 
-export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, conflictPolicy = 'keep_both') {
+export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy });
+    return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy, batchId, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
   } catch (error) {
     console.log('Failed to move file outside library:', error);
   }
@@ -1067,9 +1225,9 @@ export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, co
 }
 
 // copy a file
-export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_both') {
+export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    const result = await invoke('copy_file', { filePath, newFolderPath, conflictPolicy });
+    const result = await invoke('copy_file', { filePath, newFolderPath, conflictPolicy, batchId, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
     if(result) {
       return result;
     };
@@ -1082,7 +1240,7 @@ export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_b
 // delete a file
 export async function deleteFile(fileId, filePath) {
   try {
-    return await invoke('delete_file', { fileId, filePath });
+    return await invoke('delete_file', { fileId, filePath, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
   } catch (error) {
     console.error('deleteFile error:', error);
     throw error;
@@ -1092,7 +1250,7 @@ export async function deleteFile(fileId, filePath) {
 // delete a file permanently
 export async function deleteFilePermanently(fileId, filePath) {
   try {
-    return await invoke('delete_file_permanently', { fileId, filePath });
+    return await invoke('delete_file_permanently', { fileId, filePath, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
   } catch (error) {
     console.error('deleteFilePermanently error:', error);
     throw error;
@@ -1108,32 +1266,23 @@ export async function deleteDbFile(fileId) {
   }
 }
 
-export async function batchDeleteFiles(files, permanently = false) {
+export async function batchDeleteFiles(files, permanently = false, selection = null) {
   try {
-    return await invoke('batch_delete_files', { files, permanently });
+    return await invoke('batch_delete_files', { files, permanently, groupRawPairs: Boolean(config.settings.groupRawJpegPairs), selection });
   } catch (error) {
     console.error('batchDeleteFiles error:', error);
     throw error;
   }
 }
 
-// edit file comment
-export async function editFileComment(fileId, comment) {
-  try {
-    const result = await invoke('edit_file_comment', { fileId, comment });
-    if(result) {
-      return result;
-    };
-  } catch (error) {
-    console.log('Failed to edit file comment:', error);
-  }
-  return null;
+export function editFileMetadata(libraryId, fileIds, changes) {
+  return invoke('edit_file_metadata', { libraryId, fileIds, changes });
 }
 
 // get file thumb
-export async function getFileThumb(fileId, filePath, fileType, orientation, thumbnailSize, forceRegenerate, thumbnailSeekPercent = null) {
+export async function getFileThumb(fileId, filePath, fileType, orientation, thumbnailSize, forceRegenerate, thumbnailSeekPercent = null, albumId = 0) {
   try {
-    const result = await invoke('get_file_thumb', { fileId, filePath, fileType, orientation, thumbnailSize, forceRegenerate, thumbnailSeekPercent });
+    const result = await invoke('get_file_thumb', { fileId, filePath, fileType, orientation, thumbnailSize, rawDisplayOptions: getRawDisplayOptions(), forceRegenerate, thumbnailSeekPercent, albumId });
     if(result) {
       return result;
     };
@@ -1143,9 +1292,19 @@ export async function getFileThumb(fileId, filePath, fileType, orientation, thum
   return null;
 }
 
+export async function cleanUnusedThumbnailCache(libraryId = null) {
+  try {
+    return await invoke('clean_unused_thumbnail_cache', { libraryId });
+  } catch (error) {
+    console.error('Failed to clean unused thumbnail cache:', error);
+    throw error;
+  }
+}
+
+
 export async function getFileThumbById(fileId, thumbnailSize, forceRegenerate = false) {
   try {
-    const result = await invoke('get_file_thumb_by_id', { fileId, thumbnailSize, forceRegenerate });
+    const result = await invoke('get_file_thumb_by_id', { fileId, thumbnailSize, rawDisplayOptions: getRawDisplayOptions(), forceRegenerate });
     if (result) {
       return result;
     }
@@ -1156,12 +1315,11 @@ export async function getFileThumbById(fileId, thumbnailSize, forceRegenerate = 
 }
 
 export async function getFileThumbs(files, thumbnailSize, forceRegenerate = false) {
-  try {
-    return await invoke('get_file_thumbs', { files, thumbnailSize, forceRegenerate });
-  } catch (error) {
-    console.log('Failed to get file thumbs:', error);
+  const thumbs = await invoke('get_file_thumbs', { files, thumbnailSize, rawDisplayOptions: getRawDisplayOptions(), forceRegenerate });
+  if (!Array.isArray(thumbs) || thumbs.length !== files.length) {
+    throw new Error(`Invalid thumbnail batch response: expected ${files.length} results, received ${Array.isArray(thumbs) ? thumbs.length : 'a non-array response'}`);
   }
-  return [];
+  return thumbs;
 }
 
 // get file info
@@ -1177,6 +1335,11 @@ export async function getFileInfo(fileId) {
   return null;
 }
 
+// extract the embedded MP4 of an Android Motion Photo and return its cache path
+export async function getMotionPhotoVideoPath(fileId) {
+  return invoke('prepare_motion_photo_video', { fileId });
+}
+
 // update file info
 export async function updateFileInfo(fileId, filePath) {
   try {
@@ -1190,14 +1353,57 @@ export async function updateFileInfo(fileId, filePath) {
   return null;
 }
 
-export async function importFile(filePath, folderId, folderPath) {
+// Regenerate a video thumbnail without refreshing metadata.
+export async function changeVideoThumbnail(libraryId, fileId, seekPercent) {
+  return invoke('change_video_thumbnail', { libraryId, fileId, seekPercent, thumbnailSize: config.settings.thumbnailSize });
+}
+
+// refresh a file's info from disk; returns { file, size_delta, skipped }
+export async function refreshFileInfo(libraryId, fileId) {
   try {
-    const result = await invoke('import_file', { filePath, folderId, folderPath });
+    return await invoke('refresh_selected_file_info', { libraryId, fileId, thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions() });
+  } catch (error) {
+    console.log('Failed to refresh file info:', error);
+  }
+  return null;
+}
+
+export function importFiles(filePaths, folderId, folderPath, libraryId, onProgress) {
+  const channel = new Channel(typeof onProgress === 'function' ? onProgress : () => {});
+  return invoke('import_files', {
+    filePaths, folderId, folderPath, libraryId, onProgress: channel,
+    groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
+}
+
+export async function importFile(filePath, folderId, folderPath, throwOnError = false, libraryId = libConfig._libraryId) {
+  try {
+    const result = await invoke('import_file', { filePath, folderId, folderPath, libraryId });
     return result;
   } catch (error) {
     console.error('importFile error:', error);
+    if (throwOnError) throw error;
     return null;
   }
+}
+
+export async function importAndOrganize(albumId, sourcePath, destinationPath, layout, completedPaths = []) {
+  return await invoke('import_and_organize', {
+    albumId, sourcePath, destinationPath, layout, completedPaths,
+    groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
+}
+
+export async function cancelImportAndOrganize() {
+  return await invoke('cancel_import_and_organize');
+}
+
+export async function listenImportOrganizeProgress(callback) {
+  return await listen('import-organize-progress', callback);
+}
+
+export async function listenImportOrganizeFinished(callback) {
+  return await listen('import-organize-finished', callback);
 }
 
 export async function importUrl(url, folderId, folderPath) {
@@ -1230,7 +1436,11 @@ export async function hasImportableClipboard() {
 }
 
 export async function importClipboard(folderId, folderPath) {
-  return await invoke('import_clipboard', { folderId, folderPath });
+  return await invoke('import_clipboard', {
+    folderId,
+    folderPath,
+    groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
 }
 
 export async function importFromDrag(folderId, folderPath) {
@@ -1274,10 +1484,19 @@ export async function checkFileExists(filePath) {
   return false;
 }
 
+export async function checkFileAccessibility(filePath) {
+  return invoke('check_file_accessibility', { filePath });
+}
+
+// Live check: reading an online-only file would make the cloud provider download it.
+export async function isCloudOnlyFile(filePath) {
+  return invoke('is_cloud_only_file', { filePath }).catch(() => true);
+}
+
 // set file rotate
 export async function setFileRotate(fileId, fileRotate) {
   try {
-    const result = await invoke('set_file_rotate', { fileId, rotate: fileRotate % 360 });
+    const result = await invoke('set_file_rotate', { fileId, rotate: ((fileRotate % 360) + 360) % 360 });
     if(result) {
       return result;
     };
@@ -1419,6 +1638,14 @@ export async function batchUpdateFileMetadata(params) {
 
 // tags
 
+export async function getTagSubtreeInfo(tagId) {
+  return invoke('get_tag_subtree_info', { tagId });
+}
+
+export async function moveTag(tagId, parentId = null) {
+  return invoke('move_tag', { tagId, parentId });
+}
+
 // get all tags
 export async function getAllTags(sort = 0) {
   try {
@@ -1429,6 +1656,15 @@ export async function getAllTags(sort = 0) {
     }
   } catch (error) {
     console.error('Failed to get all tags:', error);
+  }
+  return null;
+}
+
+export async function getTagCounts() {
+  try {
+    return await invoke('get_tag_counts');
+  } catch (error) {
+    console.error('Failed to get tag counts:', error);
   }
   return null;
 }
@@ -1447,9 +1683,9 @@ export async function getTagName(tagId) {
 }
 
 // create a new tag
-export async function createTag(name) {
+export async function createTag(name, parentId = null) {
   try {
-    const result = await invoke('create_tag', { name });
+    const result = await invoke('create_tag', { name, parentId });
     return result;
   } catch (error) {
     console.error('Failed to create tag:', error);
@@ -1590,15 +1826,12 @@ export async function getLocationInfo(sort = 0) {
   return null;
 }
 
-// get GPS coordinates aggregated into grid cells for heatmap rendering
-export async function getGpsHeatmapPoints() {
+// get GPS coordinates and representative thumbnails for the current media query
+export async function getGpsMapPoints(params) {
   try {
-    const points = await invoke('get_gps_heatmap_points');
-    if (points) {
-      return points;
-    }
+    return await invoke('get_gps_map_points', { params });
   } catch (error) {
-    console.error('Failed to get GPS heatmap points:', error);
+    console.error('Failed to get GPS map points:', error);
   }
   return [];
 }
@@ -1622,9 +1855,8 @@ export async function getPackageInfo() {
 export async function getBuildTime() {
   try {
     const unixTime = await invoke('get_build_time');
-    console.log('get_build_time', unixTime);
     if (unixTime) {
-      return new Date(unixTime * 1000).toLocaleString();;
+      return formatTimestamp(unixTime, 'date_time');
     }
   } catch (error) {
     console.error('Failed to get build time:', error);
@@ -1700,7 +1932,7 @@ export async function listenImageSearchModelDownloadProgress(callback) {
 // generate embedding
 export async function generateEmbedding(fileId) {
   try {
-    const result = await invoke('generate_embedding', { fileId });
+    const result = await invoke('generate_embedding', { fileId, libraryId: libConfig._libraryId });
     return result;
   } catch (error) {
     console.error('generateEmbedding error:', error);
@@ -1710,27 +1942,17 @@ export async function generateEmbedding(fileId) {
 
 // search similar images
 export async function searchSimilarImages(params) {
+  const libraryId = libConfig._libraryId;
   try {
     if (params?.searchText) {
-      try {
-        await setImageSearchModel(config.settings.imageSearch?.model || 0);
-      } catch (error) {
-        if (Number(config.settings.imageSearch?.model || 0) !== 1) {
-          throw error;
-        }
-        console.warn('Falling back to default image search model:', error);
-        config.settings.imageSearch.model = 0;
-        await setImageSearchModel(0);
-      }
+      await setImageSearchModel(config.settings.imageSearch?.model || 0);
     }
-    const results = await invoke('search_similar_images', { params });
-    if (results) {
-      return results;
-    }
+    const results = await invoke('search_similar_images', { params, libraryId });
+    return results || [];
   } catch (error) {
     console.error('searchSimilarImages error:', error);
+    throw error;
   }
-  return [];
 }
 
 // indexing
@@ -1741,6 +1963,7 @@ export async function indexAlbum(albumId, skipFilePath = null) {
     await invoke('index_album', {
       albumId,
       thumbnailSize: config.settings.thumbnailSize || 512,
+      rawDisplayOptions: getRawDisplayOptions(),
       skipFilePath,
       groupRawJpegPairs: Boolean(config.settings.groupRawJpegPairs),
     });
@@ -1785,8 +2008,8 @@ export async function listenIndexProgress(callback) {
 // deduplication
 
 // start deduplication scan
-export async function dedupStartScan(params = null, collectionId = null, fileIds = null) {
-  return await invoke('dedup_start_scan', { params, collectionId, fileIds });
+export async function dedupStartScan(params = null, collectionId = null, fileIds = null, keepRules = null) {
+  return await invoke('dedup_start_scan', { params, collectionId, fileIds, keepRules, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
 }
 
 // get deduplication scan status
@@ -1812,7 +2035,7 @@ export async function dedupCancelScan() {
 // list deduplication groups
 export async function dedupListGroups(page = 1, pageSize = 0, sortBy = 'size_desc', filter = 'all') {
   try {
-    const groups = await invoke('dedup_list_groups', { page, pageSize, sortBy, filter });
+    const groups = await invoke('dedup_list_groups', { page, pageSize, sortBy, filter, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
     return groups;
   } catch (error) {
     console.error('dedupListGroups error:', error);
@@ -1822,7 +2045,7 @@ export async function dedupListGroups(page = 1, pageSize = 0, sortBy = 'size_des
 // get deduplication overview
 export async function dedupGetOverview() {
   try {
-    const overview = await invoke('dedup_get_overview');
+    const overview = await invoke('dedup_get_overview', { libraryId: libConfig._libraryId, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
     return overview;
   } catch (error) {
     console.error('dedupGetOverview error:', error);
@@ -1831,16 +2054,35 @@ export async function dedupGetOverview() {
 
 // set keep file in duplicate group
 export async function dedupSetKeep(groupId, fileId) {
-  return await invoke('dedup_set_keep', { groupId, fileId });
+  return await invoke('dedup_set_keep', { groupId, fileId, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
 }
 
-// delete selected duplicates
-export async function dedupDeleteSelected(groupIds = null, fileIds = null) {
+export async function dedupGetGroupItems(groupId) {
+  return await invoke('dedup_get_group_items', {
+    groupId,
+    groupRawPairs: Boolean(config.settings.groupRawJpegPairs),
+  });
+}
+
+// Delete explicitly selected duplicates or every removable duplicate.
+export async function dedupDelete({
+  groupIds = null,
+  fileIds = null,
+  similarGroupId = null,
+  deleteAll = false,
+  permanently = false,
+  preview = false,
+  planToken = null,
+} = {}) {
   try {
-    const result = await invoke('dedup_delete_selected', { groupIds, fileIds });
-    return result;
+    return await invoke('dedup_delete', {
+      request: {
+        groupIds, fileIds, similarGroupId, deleteAll, permanently, preview, planToken,
+        groupRawPairs: Boolean(config.settings.groupRawJpegPairs),
+      },
+    });
   } catch (error) {
-    console.error('dedupDeleteSelected error:', error);
+    console.error('dedupDelete error:', error);
     throw error;
   }
 }
@@ -1850,8 +2092,8 @@ export async function listenDedupScanProgress(callback) {
   return await listen('dedup-scan-progress', callback);
 }
 
-export async function similarStartScan(scopeKey, sourceVersion, params = null, collectionId = null, fileIds = null) {
-  return await invoke('similar_start_scan', { scopeKey, sourceVersion, params, collectionId, fileIds });
+export async function similarStartScan(scopeKey, sourceVersion, similarityThreshold, params = null, collectionId = null, fileIds = null, keepRules = null) {
+  return await invoke('similar_start_scan', { scopeKey, sourceVersion, similarityThreshold, params, collectionId, fileIds, keepRules, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
 }
 
 export async function similarGetScanStatus() {
@@ -1863,13 +2105,15 @@ export async function similarCancelScan() {
 }
 
 export async function similarGetEligibleCount(params = null, collectionId = null, fileIds = null) {
-  return await invoke('similar_get_eligible_count', { params, collectionId, fileIds });
+  return await invoke('similar_get_eligible_count', { params, collectionId, fileIds, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) });
 }
 
 export async function similarListGroups(scopeKey, limit = 100, offset = 0) {
   return await invoke('similar_list_groups', { scopeKey, limit, offset });
 }
-export async function similarGetGroup(groupId, scopeKey) { return await invoke('similar_get_group', { groupId, scopeKey }); }
+export async function similarGetOverview(scopeKey) { return await invoke('similar_get_overview', { scopeKey, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) }); }
+export async function similarGetGroup(groupId, scopeKey) { return await invoke('similar_get_group', { groupId, scopeKey, groupRawPairs: Boolean(config.settings.groupRawJpegPairs) }); }
+export async function similarSetKeep(groupId, fileId, scopeKey) { return await invoke('similar_set_keep', { groupId, fileId, scopeKey }); }
 export async function similarHasScan(scopeKey) { return await invoke('similar_has_scan', { scopeKey }); }
 
 export async function listenSimilarScanProgress(callback) {
@@ -2004,9 +2248,9 @@ export async function getPersons(sort = 0) {
   return null;
 }
 
-export async function getPersonsPage(sort = 0, offset = 0, limit = 100) {
+export async function getPersonsPage(request) {
   try {
-    return await invoke('get_persons_page', { sort, offset, limit });
+    return await invoke('get_persons_page', { request });
   } catch (error) {
     console.error('Failed to get persons page:', error);
   }
@@ -2047,3 +2291,45 @@ export async function getFacesForFile(fileId) {
   }
   return null;
 }
+
+// get a single person's face thumbnail (Base64)
+export async function getPersonThumbnail(personId) {
+  try {
+    return await invoke('get_person_thumbnail', { personId });
+  } catch (error) {
+    console.error('Failed to get person thumbnail:', error);
+  }
+  return null;
+}
+
+export async function listAlbumSubfolders(path) {
+  return invoke('list_album_subfolders', { path });
+}
+
+// xmp sidecars
+export async function getXmpImportSettings() {
+  try {
+    return await invoke('get_xmp_import_settings');
+  } catch (error) {
+    console.error('Failed to get XMP import settings:', error);
+    return null;
+  }
+}
+
+export async function setXmpImportSettings(importXmpSidecars) {
+  try {
+    await invoke('set_xmp_import_settings', { importXmpSidecars });
+  } catch (error) {
+    console.error('Failed to set XMP import settings:', error);
+  }
+}
+
+export async function saveXmpMetadata(fileIds, libraryId) {
+  try {
+    return await invoke('save_xmp_metadata', { fileIds, libraryId });
+  } catch (error) {
+    console.error('Failed to save XMP metadata:', error);
+    throw error;
+  }
+}
+

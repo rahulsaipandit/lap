@@ -3,146 +3,149 @@
     :title="$t('msgbox.manage_libraries.title')" 
     :width="600"
     :height="400"
+    position-key="manage-libraries"
     @cancel="clickCancel"
   >
+    <template #title-actions>
+      <button
+        type="button"
+        class="t-button-default btn-outline gap-1.5"
+        :disabled="isMaxLibraryReached || showAddInput || isRenaming || isAddingLibrary"
+        @click="startAddLibrary"
+      >
+        <IconAdd class="w-4 h-4" aria-hidden="true" />
+        {{ $t('msgbox.manage_libraries.add_new') }}
+      </button>
+    </template>
     <div class="flex flex-col flex-1 min-h-0 border border-base-content/5 bg-base-300/30 shadow-sm rounded-box overflow-hidden relative">
-      <div class="flex items-center px-3 py-2 shrink-0">
-        <span class="flex-1 sidebar-panel-header-title text-base-content/30">{{ $t('msgbox.manage_libraries.libraries') }}</span>
-        <PanelActionButton
-          :icon="IconAdd"
-          :disabled="isMaxLibraryReached || showAddInput || isRenaming || isAddingLibrary"
-          @click="startAddLibrary"
-        >
-          {{ $t('msgbox.manage_libraries.add_new') }}
-        </PanelActionButton>
+      <div class="flex items-center px-2 py-2 shrink-0 select-none">
+        <span class="flex-1 sidebar-panel-header-title text-base-content/30">{{ $t('msgbox.manage_libraries.libraries') }} ({{ libraries.length }})</span>
       </div>
 
-      <div class="flex-1 min-h-0 overflow-x-hidden overflow-y-auto select-none">
-        <VueDraggable 
-          v-model="libraries" 
-          class="p-1"
-          :animation="200"
-          handle=".drag-handle"
-          :disabled="showAddInput || isRenaming"
-          @end="onDragEnd"
-        >
-        <div 
-          v-for="lib in libraries" 
-          :key="lib.id"
-          :ref="(el) => setLibraryItemRef(el, lib.id)"
-          class="flex items-center px-1 h-12 rounded-box group transition-all duration-200 ease-in-out"
-          :class="[
-            selectedLibraryId === lib.id
-              ? 'text-base-content bg-base-100 hover:bg-base-100 selected-item'
-              : 'text-base-content/70 hover:bg-base-100/30',
-            showAddInput || (isRenaming && editingId !== lib.id) ? 'opacity-50' : 'cursor-pointer',
-          ]"
-          @click="selectLibrary(lib)"
-        >
-          <div
-            class="drag-handle invisible shrink-0 cursor-move"
-            :class="[
-              { 'visible!': selectedLibraryId === lib.id },
-              { 'cursor-not-allowed opacity-30': showAddInput || isRenaming },
-            ]"
-            :title="$t('msgbox.manage_libraries.reorder')"
+      <!-- Anchor the fallback drag preview to the viewport, independently of the scroll offset. -->
+      <div class="flex flex-1 min-h-0 transform-gpu overflow-hidden">
+        <div class="flex-1 min-h-0 overflow-x-hidden overflow-y-auto select-none">
+          <VueDraggable
+            v-model="libraries"
+            class="p-1"
+            :class="{ 'min-h-full': !showAddInput }"
+            :animation="150"
+            handle=".drag-handle"
+            direction="vertical"
+            :group="{ name: 'manage-libraries', pull: false, put: false }"
+            :force-fallback="true"
+            ghost-class="library-reorder-placeholder"
+            :revertOnSpill="true"
+            :bubble-scroll="false"
+            :disabled="showAddInput || isRenaming"
+            @end="onDragEnd"
           >
-            <IconDragHandle class="w-4 h-4 text-base-content/70 hover:text-base-content" />
-          </div>
-
-          <!-- Name & Info -->
-          <div class="h-full p-1 min-w-0 flex-1 flex flex-col justify-center">
-            <div class="flex items-center gap-2">
-              <input
-                v-if="editingId === lib.id"
-                :ref="(el) => setEditInputRef(el, lib.id)"
-                v-model="inputNameValue"
-                type="text"
-                class="input input-sm w-full min-w-0"
-                maxlength="64"
-                @blur="saveRename(lib)"
-                @keydown.enter.prevent="saveRename(lib)"
-                @keydown.esc.stop="cancelRename"
-                @click.stop
+          <div
+            v-for="lib in libraries"
+            :key="lib.id"
+            :ref="(el) => setLibraryItemRef(el, lib.id)"
+            class="flex items-center px-1 h-12 rounded-box group transition-[background-color,color,opacity] duration-200 ease-in-out"
+            :class="[
+              selectedLibraryId === lib.id
+                ? 'text-base-content bg-base-100 hover:bg-base-100 selected-item'
+                : 'text-base-content/70 hover:bg-base-100/30',
+              showAddInput || (isRenaming && editingId !== lib.id) ? 'opacity-50' : 'cursor-pointer',
+            ]"
+            @click="selectLibrary(lib)"
+          >
+            <div class="flex w-4 shrink-0 items-center">
+              <IconDragHandle
+                v-if="!showAddInput && !isRenaming"
+                class="drag-handle size-4 cursor-grab text-base-content/30"
+                :class="selectedLibraryId !== lib.id && 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto'"
+                aria-hidden="true"
               />
-              <div v-else class="min-w-0 flex items-center">
-                <IconPhotoAll
-                  class="w-4 h-4 mr-2 shrink-0"
-                  :class="lib.id === currentLibraryId ? 'text-primary' : lib.hidden ? 'text-base-content/30' : 'text-base-content/70'"
+            </div>
+
+            <!-- Name & Info -->
+            <div class="h-full p-1 min-w-0 flex-1 flex flex-col justify-center">
+              <div class="flex items-center gap-2">
+                <input
+                  v-if="editingId === lib.id"
+                  :ref="(el) => setEditInputRef(el, lib.id)"
+                  v-model="inputNameValue"
+                  type="text"
+                  class="input input-sm w-full min-w-0"
+                  maxlength="64"
+                  @blur="saveRename(lib)"
+                  @keydown.enter.prevent="saveRename(lib)"
+                  @keydown.esc.stop="cancelRename"
+                  @click.stop
                 />
-                <span class="truncate" 
-                  :class="{ 
-                    'text-primary': lib.id === currentLibraryId,
-                    'text-base-content/30': lib.hidden,
-                  }"
-                >
-                  {{ lib.name }}
-                </span>
-                <span v-if="lib.id === 'default'" class="ml-2 shrink-0 rounded-box border border-base-content/5 px-1.5 text-[10px] font-bold uppercase tracking-wide text-base-content/30">{{ $t('msgbox.manage_libraries.default') }}</span>
-                <span v-if="lib.hidden" class="ml-2 shrink-0 rounded-box border border-base-content/5 px-1.5 text-[10px] font-bold uppercase tracking-wide text-base-content/30">{{ $t('msgbox.manage_libraries.hidden') }}</span>
+                <div v-else class="min-w-0 flex items-center">
+                  <IconPhotoAll
+                    class="w-4 h-4 mr-2 shrink-0"
+                    :class="lib.id === currentLibraryId ? 'text-primary' : lib.hidden ? 'text-base-content/30' : 'text-base-content/70'"
+                  />
+                  <span class="truncate"
+                    :class="{
+                      'text-primary': lib.id === currentLibraryId,
+                      'text-base-content/30': lib.hidden,
+                    }"
+                  >
+                    {{ lib.name }}
+                  </span>
+                  <span v-if="lib.id === 'default'" class="ml-2 shrink-0 rounded-box border border-base-content/5 px-1.5 text-[10px] font-bold uppercase tracking-wide text-base-content/30">{{ $t('msgbox.manage_libraries.default') }}</span>
+                  <span v-if="lib.hidden" class="ml-2 shrink-0 rounded-box border border-base-content/5 px-1.5 text-[10px] font-bold uppercase tracking-wide text-base-content/30">{{ $t('msgbox.manage_libraries.hidden') }}</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div
-            class="w-40 shrink-0 text-right text-xs text-base-content/30 truncate group-hover:hidden"
-            :class="{ hidden: selectedLibraryId === lib.id }"
-          >
-            <span v-if="libraryStats[lib.id]">
-              {{ $t('statusbar.files_summary', { count: libraryStats[lib.id].fileCount.toLocaleString(), size: formatFileSize(libraryStats[lib.id].totalSize) }) }}
-            </span>
-            <span v-else-if="libraryStatsLoading[lib.id]">
-              {{ $t('msgbox.manage_libraries.calculating_stats') }}
-            </span>
-            <span v-else-if="libraryStatsError[lib.id]">
-              {{ $t('msgbox.manage_libraries.unable_to_load') }}
-            </span>
-          </div>
+            <!-- Right side: stats (always visible) + context menu (on hover/select) -->
+            <div class="ml-auto flex flex-row items-center gap-1 shrink-0 text-base-content/30">
+              <div class="text-right text-xs flex flex-col justify-center gap-0.5 max-w-48">
+                <template v-if="libraryStats[lib.id]">
+                  <span class="truncate leading-4">
+                    {{ $t('statusbar.files_summary', { count: libraryStats[lib.id].fileCount.toLocaleString(), size: formatFileSize(libraryStats[lib.id].totalSize) }) }}
+                  </span>
+                  <span v-if="libraryStats[lib.id].thumbCacheSize > 0" class="truncate leading-4">
+                    {{ $t('msgbox.manage_libraries.cache_size', { size: formatFileSize(libraryStats[lib.id].thumbCacheSize) }) }}
+                  </span>
+                </template>
+                <span v-else-if="libraryStatsLoading[lib.id]" class="truncate leading-4">
+                  {{ $t('msgbox.manage_libraries.calculating_stats') }}
+                </span>
+                <span v-else-if="libraryStatsError[lib.id]" class="truncate leading-4">
+                  {{ $t('msgbox.manage_libraries.unable_to_load') }}
+                </span>
+              </div>
+              <div
+                :class="selectedLibraryId === lib.id
+                  ? 'w-6 shrink-0 opacity-100'
+                  : 'w-6 shrink-0 opacity-0 translate-x-2 transition-all duration-200 delay-200 group-hover:opacity-100 group-hover:translate-x-0'"
+                @click.stop
+              >
+                <ContextMenu
+                  :iconMenu="IconMore"
+                  :menuItems="libraryMenuItems(lib)"
+                  :smallIcon="true"
+                  :disabled="showAddInput || isRenaming"
+                />
+              </div>
+            </div>
+            </div>
+          </VueDraggable>
 
-          <!-- Actions -->
-          <div
-            class="hidden w-40 shrink-0 justify-end text-base-content/70 group-hover:flex!"
-            :class="{ 'flex!': selectedLibraryId === lib.id }"
-          >
-            <TButton
-              :icon="IconEdit"
-              :buttonSize="'small'"
-              :disabled="showAddInput || isRenaming"
-              :tooltip="$t('msgbox.manage_libraries.rename')"
-              @click.stop="startRename(lib)"
-            />
-            <TButton
-              :icon="lib.hidden ? IconHide : IconUnhide"
-              :buttonSize="'small'"
-              :disabled="lib.id === 'default' || showAddInput || isRenaming"
-              :tooltip="lib.hidden ? $t('msgbox.manage_libraries.show') : $t('msgbox.manage_libraries.hide')"
-              @click.stop="toggleVisibility(lib)"
-            />
-            <TButton
-              :icon="IconTrash"
-              :buttonSize="'small'"
-              :disabled="lib.id === 'default' || showAddInput || isRenaming"
-              :tooltip="$t('msgbox.manage_libraries.delete')"
-              @click.stop="confirmDelete(lib)"
+          <div v-if="showAddInput" class="flex items-center h-12 px-2 gap-2">
+            <div class="w-4 shrink-0"></div>
+            <input
+              ref="addInputRef"
+              v-model="newLibraryName"
+              type="text"
+              class="input input-sm flex-1 min-w-0"
+              maxlength="64"
+              :placeholder="$t('msgbox.manage_libraries.placeholder')"
+              :disabled="isAddingLibrary"
+              @blur="onAddInputBlur"
+              @keydown.enter.prevent="doAddLibrary"
+              @keydown.esc.stop="cancelAddLibrary"
             />
           </div>
-          </div>
-        </VueDraggable>
-
-        <div v-if="showAddInput" class="flex items-center h-12 px-2 gap-2">
-          <div class="w-4 shrink-0"></div>
-          <input
-            ref="addInputRef"
-            v-model="newLibraryName"
-            type="text"
-            class="input input-sm flex-1 min-w-0"
-            maxlength="64"
-            :placeholder="$t('msgbox.manage_libraries.placeholder')"
-            :disabled="isAddingLibrary"
-            @blur="onAddInputBlur"
-            @keydown.enter.prevent="doAddLibrary"
-            @keydown.esc.stop="cancelAddLibrary"
-          />
         </div>
       </div>
     </div>
@@ -151,7 +154,14 @@
       {{ inputErrorMessage }}
     </div>
 
-    <div class="flex justify-end items-center shrink-0 pt-2 min-h-[56px]">
+    <div class="flex justify-end items-center gap-2 shrink-0 pt-2 min-h-[56px]">
+      <button
+        type="button"
+        class="t-button-default"
+        @click="clickCancel"
+      >
+        {{ $t('msgbox.close') }}
+      </button>
       <button
         class="t-button-primary"
         :disabled="showAddInput || isRenaming"
@@ -176,10 +186,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import { VueDraggable } from 'vue-draggable-plus';
+import { VueDraggable, type DraggableEvent } from 'vue-draggable-plus';
 
 import { useI18n } from 'vue-i18n';
 import { useUIStore } from '@/stores/uiStore';
+import { useToast } from '@/common/toast';
 import { config } from '@/common/config';
 import { 
   getAppConfig, 
@@ -193,17 +204,17 @@ import {
 } from '@/common/api';
 import { isValidFileName, formatFileSize } from '@/common/utils';
 import ModalDialog from '@/components/ModalDialog.vue';
-import TButton from '@/components/TButton.vue';
-import PanelActionButton from '@/components/PanelActionButton.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import ContextMenu from '@/components/ContextMenu.vue';
 import {
   IconDragHandle,
-  IconEdit,
+  IconRename,
   IconTrash,
   IconHide,
   IconUnhide,
   IconAdd,
   IconPhotoAll,
+  IconMore,
 } from '@/common/icons';
 
 const props = defineProps({
@@ -212,6 +223,7 @@ const props = defineProps({
 
 const emit = defineEmits(['ok', 'cancel', 'updated']);
 const uiStore = useUIStore();
+const toast = useToast();
 const { t, locale, messages } = useI18n();
 const localeMsg = computed(() => messages.value[locale.value] as any);
 
@@ -299,7 +311,7 @@ const onKeyDown = (e: KeyboardEvent) => {
       tagName === 'select' ||
       target.isContentEditable;
 
-    if (isEditable) return;
+    if (isEditable || target.closest('button')) return;
 
     e.preventDefault();
     clickOk();
@@ -565,9 +577,40 @@ const clickCancel = () => {
   emit('cancel');
 };
 
+// Context menu items for a library row. Mirrors the CollectionTray / Tag
+// panel pattern: rename + maintenance actions on top, destructive at bottom
+// behind a separator. `disabled` per-item handles the "default" library
+// (cannot hide/remove).
+const libraryMenuItems = (lib: any) => {
+  const isDefault = lib.id === 'default';
+  return [
+    {
+      label: t('msgbox.manage_libraries.rename'),
+      icon: IconRename,
+      action: () => startRename(lib),
+    },
+    {
+      label: lib.hidden
+        ? t('msgbox.manage_libraries.show')
+        : t('msgbox.manage_libraries.hide'),
+      icon: lib.hidden ? IconUnhide : IconHide,
+      disabled: isDefault,
+      action: () => toggleVisibility(lib),
+    },
+    { label: '-', action: null },
+    {
+      label: t('msgbox.manage_libraries.remove'),
+      icon: IconTrash,
+      disabled: isDefault,
+      action: () => confirmDelete(lib),
+    },
+  ];
+};
+
 // --- Drag and Drop ---
 
-const onDragEnd = async () => {
+const onDragEnd = async ({ oldIndex, newIndex }: DraggableEvent) => {
+  if (oldIndex === newIndex) return;
   // Persist order
   const ids = libraries.value.map(l => l.id);
   try {
@@ -581,8 +624,7 @@ const onDragEnd = async () => {
 </script>
 
 <style scoped>
-.ghost {
-  opacity: 0.5;
-  background: var(--base-200);
+.library-reorder-placeholder {
+  visibility: hidden;
 }
 </style>

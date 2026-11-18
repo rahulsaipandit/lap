@@ -4,12 +4,13 @@ import { defineStore } from 'pinia';
 export const useUIStore = defineStore('ui', {
   state: () => ({
     activePane: 'content',
+    startupReady: false,
     inputStack: [],
     fileVersions: {},
-    smartAlbumCountRequestedFor: null,
-    smartAlbumCountRequestTick: 0,
-    searchCountRequestedFor: null,
-    searchCountRequestTick: 0,
+    // A count is written only in response to an explicit sidebar item activation.
+    // Content consumes this after its matching query has completed.
+    countUpdateRequest: null,
+    countUpdateTick: 0,
     mapActive: false,
     activeAdjustments: {
       filePath: null,
@@ -51,6 +52,13 @@ export const useUIStore = defineStore('ui', {
     }
   },
   actions: {
+    requestCountUpdate(request) {
+      this.countUpdateRequest = request;
+      this.countUpdateTick++;
+    },
+    clearCountUpdateRequest() {
+      this.countUpdateRequest = null;
+    },
     setActivePane(pane) {
       this.activePane = pane;
     },

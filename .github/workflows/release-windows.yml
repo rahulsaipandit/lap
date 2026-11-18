@@ -20,6 +20,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Pin the Tauri CLI so bundled toolchain changes in a floating
+  # `@tauri-apps/cli@v2` cannot silently break packaging. Bump deliberately.
+  TAURI_CLI_VERSION: '2.12.0'
+
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -31,8 +36,8 @@ jobs:
         run: |
           set -euo pipefail
           ALL='[
-            {"arch":"x64","runner":"windows-2022","target":"x86_64-pc-windows-msvc","msvc_arch":"x64","platform_key":"windows-x86_64","artifact_name":"windows-x86_64","msi_glob":"*_x64_*.msi"},
-            {"arch":"arm64","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","msvc_arch":"arm64","platform_key":"windows-aarch64","artifact_name":"windows-aarch64","msi_glob":"*_arm64_*.msi"}
+            {"arch":"x64","runner":"windows-2022","target":"x86_64-pc-windows-msvc","msvc_arch":"x64","msvc_vsversion":"2022","platform_key":"windows-x86_64","artifact_name":"windows-x86_64","msi_glob":"*_x64_*.msi"},
+            {"arch":"arm64","runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","msvc_arch":"arm64","msvc_vsversion":"","platform_key":"windows-aarch64","artifact_name":"windows-aarch64","msi_glob":"*_arm64_*.msi"}
           ]'
 
           INPUT="${{ github.event.inputs.build_target }}"
@@ -115,7 +120,6 @@ jobs:
           key: ${{ runner.os }}-models-${{ hashFiles('scripts/download_models.sh', 'scripts/download_models.ps1') }}
 
       - name: Download AI Models (Windows)
-        if: steps.cache-ai-models.outputs.cache-hit != 'true'
         shell: pwsh
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -133,7 +137,16 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
-          vsversion: "2022"
+          vsversion: ${{ matrix.msvc_vsversion }}
+
+      - name: Set MSI runtime prerequisite version
+        shell: pwsh
+        run: |
+          if (-not $env:VCToolsVersion) { throw "MSVC toolset version is missing." }
+          $toolset = [version]$env:VCToolsVersion.Trim()
+          $minimum = [version]::new($toolset.Major, $toolset.Minor, [Math]::Max(0, $toolset.Build), [Math]::Max(0, $toolset.Revision))
+          "TAURI_LAP_VC_RUNTIME_MIN_VERSION=$minimum" >> $env:GITHUB_ENV
+          Write-Host "MSI runtime minimum: $minimum"
 
       - name: Remove ranlib from PATH
         shell: pwsh
@@ -156,16 +169,29 @@ jobs:
         shell: pwsh
         run: .\scripts\download_ffmpeg_sidecar.ps1 -Arch ${{ matrix.arch }}
 
+      - name: Install pinned Tauri CLI
+        run: npm install -g @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }}
+
       - name: Build and Sign (Windows ${{ matrix.arch }})
         uses: tauri-apps/tauri-action@v0.5
         env:
+          # Work around ort-sys 2.0.0-rc.10 copy-dylibs breaking with Cargo's build-dir layout v2.
+          __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: "1"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APTABASE_KEY: ${{ secrets.APTABASE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
+          tauriScript: tauri
           args: --verbose --target ${{ matrix.target }} --bundles msi
+
+      - name: Verify MSI runtime prerequisite
+        shell: pwsh
+        run: |
+          $msis = @(Get-ChildItem -Path "src-tauri/target/${{ matrix.target }}/release/bundle/msi" -Filter "*.msi" -File)
+          if ($msis.Count -ne 1) { throw "Expected exactly one Windows MSI." }
+          .\scripts\test_windows_msi_runtime.ps1 -MsiPath $msis[0].FullName
 
       - name: Upload Build Artifact (Windows ${{ matrix.arch }})
         uses: actions/upload-artifact@v4

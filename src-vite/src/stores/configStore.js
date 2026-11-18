@@ -1,8 +1,12 @@
 /**
  * Config Store - Global application configuration
- */
+*/
 import { defineStore } from 'pinia';
-import { SIDEBAR } from '@/common/constants';
+import { i18n, loadLanguage } from '@/common/i18n';
+let languageRequest = 0;
+let pendingUserLanguageRequest = 0;
+import { SIDEBAR, MAP_MARKER_SIZES } from '@/common/constants';
+import { defaultFileInfoFields } from '@/common/fileInfoFields';
 
 export const useConfigStore = defineStore('configStore', {
   state: () => ({
@@ -18,7 +22,7 @@ export const useConfigStore = defineStore('configStore', {
     },
 
     leftPanel: {
-      show: true,                 // show left pane
+      show: false,                // left content panel expanded
       width: 320,                 // left pane width
     },
 
@@ -30,19 +34,24 @@ export const useConfigStore = defineStore('configStore', {
     rightPanel: {
       show: false,                // show right panel
       width: 360,                 // panel width in px
-      mode: 'info',               // right panel mode ('info' | 'dedup' | 'dedup2' | 'blurry')
+      mode: 'info',               // right panel mode ('info' | 'dedup' | 'blurry')
     },
 
     dedup: {
+      keepRules: { preferFormat: 'raw', preferredDate: 'modifiedEarliest', preferredSize: 'largestDimensions' },
       activeTab: 'duplicates',   // active dedup tab ('duplicates' | 'similar')
       duplicateSetsHeight: 50,   // duplicate sets section height as a percentage
     },
 
     infoPanel: {
+      fields: [...defaultFileInfoFields],
+      hideEmptyFields: false,
       showPreview: true,         // show preview thumbnail
       previewMode: 'thumbnail',  // preview section mode ('thumbnail' | 'histogram')
       previewScale: 1,           // preview thumbnail scale (1, 0.5, 0.25)
       histogramChannels: 15,     // histogram channel mask (L=1, R=2, G=4, B=8; 0=none, 15=all)
+      showOrganization: true,   // show catalog organization
+      showSourceMetadata: false, // show original file metadata
       showBasicInfo: true,       // show basic info
       showMetadata: true,        // show metadata
       showMap: true,             // show map
@@ -51,6 +60,7 @@ export const useConfigStore = defineStore('configStore', {
 
     search: {
       maxSearchHistory: 20,     // max search history
+      favoritesOnly: false,    // limit the current view to favorite files
       fileType: 0,              // filter file type bitmask (0: all, 1: image, 2: video, 4: raw)
       sortType: 0,              // sort type (default to time)
       sortOrder: 0,             // sort order(0: ascending, 1: descending)
@@ -58,7 +68,7 @@ export const useConfigStore = defineStore('configStore', {
     },
 
     calendar: {
-      isMonthly: true,    // display monthly or daily calendar
+      view: 'years',      // years | months | days
     },
 
     camera: {
@@ -66,8 +76,11 @@ export const useConfigStore = defineStore('configStore', {
     },
 
     mediaViewer: {
+      showAfAreas: false,   // remember AF overlay visibility across viewer sessions
+      isFullScreen: false,  // remember preview fullscreen independently of ImageViewer
       isZoomFit: true,      // true: zoom to fit container; false: original size(scale = 1)
       isPinned: true,       // pinned mode
+      pinnedPosition: 'top', // 'top' | 'bottom'
     },
 
     video: {
@@ -91,6 +104,24 @@ export const useConfigStore = defineStore('configStore', {
       quality: 0,               // jpeg quality (0: High, 1: Medium, 2: Low), [90, 80, 60]
     },
 
+    montage: {
+      mode: 'grid',             // card | grid | mosaic | masonry | pile; default: grid
+      pageKey: 'a4',            // a4 | photo (10 × 15 cm) | screen | square; default: a4
+      landscape: true,          // true: landscape, false: portrait (ignored for square); default: true
+      background: '#ffffff',   // background color in #RRGGBB; default: #ffffff (white)
+      lastCustomBackground: '#7c2d12', // last custom swatch in #RRGGBB; default: #7c2d12
+      spacing: 1,              // non-pile spacing: 0–5% of page width, step: 0.25%; default: 1%
+      borderOn: true,          // border enabled: true | false; default: true
+      border: 1.5,             // border width: 0–4% of page width, step: 0.25%; default: 1.5%
+      scaling: 1,              // card/grid: 0: Fit, 1: Crop to fill, 2: Stretch; default: 1
+      captionField: 1,         // card caption: 0: None, 1: Name, 2: Size, 3: Dimension, 4: Time,
+                              // 5: Location, 6: Camera, 7: Lens, 8: Capture settings; default: 1
+      maxRotation: 12,         // pile random rotation: ±0–30 degrees, step: 1; default: ±12 degrees
+      shadow: true,            // shadow enabled: true | false; default: true
+      format: 0,               // export format: 0: JPEG, 1: PNG, 2: WEBP; default: 0
+      quality: 0,              // JPEG quality: 0: High (90), 1: Medium (80), 2: Low (60); default: 0
+    },
+
     imageViewer: {
       isSyncViewport: false,    // sync viewport
       isFullScreen: false,      // native fullscreen in image viewer window
@@ -98,38 +129,60 @@ export const useConfigStore = defineStore('configStore', {
 
     libraryChangedVersion: 0,
 
+    // Regional locale (BCP-47, e.g. "en-GB"), fetched once at startup.
+    // Used when dateTimeFormat follows the system region.
+    systemLocale: '',
+
     settings: {
-      tabIndex: 0,               // settings tab index (0: general, 1: library, 2: browse, 3: viewer, 4: search, 5: shortcuts, 6: advanced, 7: about)
+      tabIndex: 0,               // settings tab index (0: general, 2: grid, 3: viewer, 4: RAW, 5: search, 6: advanced, 7: shortcuts, 8: about, 9: metadata; 1 reserved)
 
       // general settings
       language: 'en',             // default language
-      appearance: 1,              // appearance (0: light; 1: dark)
+      languageInitialized: false, // match system language once, then preserve the saved choice
+      dateTimeFormat: 0,          // date/time locale source (0: follow system region, 1: follow app language)
+      appearance: 1,              // appearance (0: light; 1: dark; 2: follow system)
       lightTheme: 0,              // light theme color index
       darkTheme: 0,               // dark theme color index
       scale: 1,                   // root font-size scale
       showToolTip: true,          // show button tooltip
+      statusBarFields: null,
       showStatusBar: true,        // show status bar
       autoCheckUpdates: true,      // automatically check for updates
+      fileDeleteBehavior: 'trash',
       debugMode: false,           // debug mode
 
       // navigation settings
       folderSort: 0,              // folder_sort_options: 0=name asc, 1=name desc, 2=date asc(oldest first), 3=date desc(newest first)
       calendarSort: 0,            // 0=taken asc, 1=taken desc, 2=created asc, 3=created desc, 4=modified asc, 5=modified desc
-      categorySort: 0,            // category_sort_options: 0=name asc, 1=name desc, 2=count asc, 3=count desc
+      // Per-view category sort (category_sort_options: 0=name asc, 1=name desc, 2=count asc, 3=count desc).
+      // Lens shares cameraSort (the lens list is a tab of the Camera view).
+      tagSort: 0,
+      locationSort: 0,
+      personSort: 0,
+      cameraSort: 0,
       showSubfolderFiles: false,  // show subfolder files (in album folder view)
+
+      // RAW display settings
       groupRawJpegPairs: false,   // group matching RAW and JPEG/HEIC files
+      rawPairDisplaySource: 'jpeg', // jpeg | raw (used when pairs are grouped)
+      rawPreviewSource: 'embedded', // embedded | rendered | brightened
       
       // grid view settings
-      thumbnailSize: 512,         // thumbnail image size (small: 128, medium: 256, large: 512, extra large: 1024)
+      thumbnailSize: 512,         // gallery thumbnail quality: 256, 512, or 1024
+      mapProvider: 'global',      // global | tianditu
+      tiandituToken: '',
+      mapMarkerSize: 64,          // map photo marker size in px
+      mapTheme: 0,                // full Map view theme (0: standard, 1: satellite); independent of infoPanel.mapTheme
       grid: {
-        size: 160,               // grid size, range 120-360
+        sizePosition: 0,         // grid size slider position (0-1)
         style: 0,                // 0: card view, 1: tile view, 2: justified view, 3: masonry view
-        showFilmStrip: false,    // show filmstrip view
+        viewMode: 'grid',        // grid | filmstrip | map
         scaling: 1,              // 0: Fit Entire Image, 1: Crop to Fill, 2: Stretch to Fill
+        thumbnailCorners: 0,     // 0: Follow theme, 1: Square
         labelPrimary: 1,         // card view: primary label (1: Name)
         labelSecondary: 3,       // card view: secondary label (3: Dimension)
         thumbnailBadge: 0,       // thumbnail badge (0: empty, 1: file format, 2: ISO, 3: shutter, 4: aperture, 5: focal length, 6: exposure)
-        previewPosition: 0,      // filmstrip view: preview position (0: top, 1: bottom, 2: left, 3: right)
+        previewPosition: 1,      // filmstrip view: preview position (0: top, 1: bottom, 2: left, 3: right)
       },
       
       // image view settings
@@ -138,20 +191,25 @@ export const useConfigStore = defineStore('configStore', {
       slideShowTransition: 0,    // 0: Slide, 1: Fade, 2: None
       navigatorViewMode: 0,      // 0: Auto, 1: Always show, 2: Always hide
       navigatorViewSize: 240,    // navigator view size (160, 240, 320, 400)
+      navigatorSharpnessGrid: false,
       viewBackground: 0,         // 0: default, 1: black, 2: dark gray, 3: medium gray, 4: light gray, 5: white
       autoPlayVideo: true,       // auto play video
       loopVideo: false,          // loop video (only effective when autoPlayVideo is off)
       // showComment: false,        // show comment
-      externalImageAppPath: '',    // external image app path
-      externalImageAppName: '',    // external image app display name
-      externalVideoAppPath: '',    // external video app path
-      externalVideoAppName: '',    // external video app display name
+      externalApps: {
+        image: { defaultId: null, apps: [] },
+        video: { defaultId: null, apps: [] },
+      },
 
       // image search settings
       imageSearch: {
         model: 0,                  // 0: default English-only model, 1: multilingual model
-        thresholdIndex: 3,         // image search threshold index (default is Low)
-        limit: 1000,               // image search limit
+        thresholdIndex: 2,         // image search threshold index (default is Standard)
+      },
+
+      // similar photos settings
+      similarPhotos: {
+        groupingThresholdIndex: 1, // default: Strict
       },
       
       // face recognition settings
@@ -165,17 +223,33 @@ export const useConfigStore = defineStore('configStore', {
       blurFix: {
         apiBaseUrl: 'http://127.0.0.1:8712', // promptfix_service base URL (must be started manually)
       },
+      importXmpSidecars: true,
     },
   }),
 
   getters: {
-    // Image search threshold values
-    // [Very High, High, Medium, Low]
-    imageSearchThresholds: () => [0.8, 0.6, 0.4, 0.25],
+    externalAppsFor: (state) => (kind) => state.settings.externalApps?.[kind]?.apps || [],
+    defaultExternalApp: (state) => (kind) => {
+      const group = state.settings.externalApps?.[kind];
+      return group?.apps?.find((app) => app.id === group.defaultId) || group?.apps?.[0] || null;
+    },
+    // Image search threshold values: [Strict, Focused, Standard, Broad]
+    imageSearchThresholds: () => [0.32, 0.29, 0.26, 0.255],
+
+    // Fixed threshold for image-to-image "Find related photos" search.
+    similarImageSearchThreshold: () => 0.7,
+
+    // Fixed default threshold for Smart Tags.
+    smartTagSearchThreshold: () => 0.25,
+
+    // Similar photo grouping thresholds
+    // [Very strict, Strict, Moderate, Relaxed]
+    similarPhotoGroupingThresholds: () => [0.97, 0.93, 0.9, 0.85],
     
     // Cluster threshold values: cosine distance (lower = stricter, higher = looser)
     // [Very High, High, Medium, Low]
     faceClusterThresholds: () => [0.35, 0.45, 0.55, 0.65],
+
   },
 
   actions: {
@@ -192,20 +266,57 @@ export const useConfigStore = defineStore('configStore', {
     setScale(scale) {
       this.settings.scale = scale;
     },
-    setExternalImageAppPath(externalImageAppPath) {
-      this.settings.externalImageAppPath = externalImageAppPath;
+    setExternalApps(externalApps) {
+      const normalizeGroup = (kind) => {
+        const paths = new Set();
+        const apps = [];
+        for (const app of externalApps?.[kind]?.apps || []) {
+          const path = String(app?.path || '').trim();
+          if (!path || paths.has(path) || apps.length >= 5) continue;
+          paths.add(path);
+          apps.push({
+            id: `${kind}:${path}`,
+            name: String(app?.name || ''),
+            path,
+          });
+        }
+        const requestedDefaultId = String(externalApps?.[kind]?.defaultId || '');
+        return {
+          apps,
+          defaultId: apps.some((app) => app.id === requestedDefaultId)
+            ? requestedDefaultId
+            : apps[0]?.id || null,
+        };
+      };
+      this.settings.externalApps = {
+        image: normalizeGroup('image'),
+        video: normalizeGroup('video'),
+      };
     },
-    setExternalImageAppName(externalImageAppName) {
-      this.settings.externalImageAppName = externalImageAppName;
+    async setLanguage(language, { fromUser = false } = {}) {
+      if (!fromUser && pendingUserLanguageRequest) return;
+      const request = ++languageRequest;
+      if (fromUser) {
+        // Protect user intent before loading, including while startup probes the OS.
+        this.settings.languageInitialized = true;
+        pendingUserLanguageRequest = request;
+      }
+      try {
+        await loadLanguage(language);
+        if (request !== languageRequest) return;
+        this.settings.language = language;
+        i18n.global.locale.value = language;
+      } catch (error) {
+        console.error('Failed to switch language:', error);
+      } finally {
+        if (pendingUserLanguageRequest === request) pendingUserLanguageRequest = 0;
+      }
     },
-    setExternalVideoAppPath(externalVideoAppPath) {
-      this.settings.externalVideoAppPath = externalVideoAppPath;
+    setDateTimeFormat(dateTimeFormat) {
+      this.settings.dateTimeFormat = dateTimeFormat;
     },
-    setExternalVideoAppName(externalVideoAppName) {
-      this.settings.externalVideoAppName = externalVideoAppName;
-    },
-    setLanguage(language) {
-      this.settings.language = language;
+    setSystemLocale(systemLocale) {
+      this.systemLocale = systemLocale || '';
     },
     setShowToolTip(showToolTip) {
       this.settings.showToolTip = showToolTip;
@@ -225,12 +336,6 @@ export const useConfigStore = defineStore('configStore', {
     setFolderSort(folderSort) {
       this.settings.folderSort = folderSort;
     },
-    setCalendarSort(calendarSort) {
-      this.settings.calendarSort = calendarSort;
-    },
-    setCategorySort(categorySort) {
-      this.settings.categorySort = categorySort;
-    },
     setShowSubfolderFiles(showSubfolderFiles) {
       this.settings.showSubfolderFiles = showSubfolderFiles;
     },
@@ -244,14 +349,33 @@ export const useConfigStore = defineStore('configStore', {
     },
 
     // grid view settings
-    setGridSize(gridSize) {
-      this.settings.grid.size = gridSize;
+    setThumbnailSize(thumbnailSize) {
+      this.settings.thumbnailSize = thumbnailSize;
+    },
+    setRawPairDisplaySource(source) {
+      this.settings.rawPairDisplaySource = source === 'raw' ? 'raw' : 'jpeg';
+    },
+    setRawPreviewSource(source) {
+      this.settings.rawPreviewSource = source === 'rendered' || source === 'brightened' ? source : 'embedded';
+    },
+    setMapProvider(mapProvider) {
+      this.settings.mapProvider = mapProvider === 'tianditu' ? 'tianditu' : 'global';
+    },
+    setTiandituToken(tiandituToken) {
+      this.settings.tiandituToken = String(tiandituToken || '').trim();
+    },
+    setMapMarkerSize(mapMarkerSize) {
+      const size = Number(mapMarkerSize);
+      this.settings.mapMarkerSize = MAP_MARKER_SIZES.includes(size) ? size : 64;
     },
     setGridStyle(gridStyle) {
       this.settings.grid.style = gridStyle;
     },
     setGridScaling(gridScaling) {
       this.settings.grid.scaling = gridScaling;
+    },
+    setGridThumbnailCorners(thumbnailCorners) {
+      this.settings.grid.thumbnailCorners = thumbnailCorners;
     },
     setGridLabelPrimary(gridLabelPrimary) {
       this.settings.grid.labelPrimary = gridLabelPrimary;
@@ -261,9 +385,6 @@ export const useConfigStore = defineStore('configStore', {
     },
     setGridThumbnailBadge(thumbnailBadge) {
       this.settings.grid.thumbnailBadge = thumbnailBadge;
-    },
-    setShowFilmStrip(showFilmStrip) {
-      this.settings.grid.showFilmStrip = showFilmStrip;
     },
 
     // image view settings
@@ -298,11 +419,15 @@ export const useConfigStore = defineStore('configStore', {
     //   this.settings.showComment = showComment;
     // },
     // image search settings
+    setImageSearchModel(imageSearchModel) {
+      this.settings.imageSearch.model = imageSearchModel;
+    },
     setImageSearchThresholdIndex(imageSearchThresholdIndex) {
       this.settings.imageSearch.thresholdIndex = imageSearchThresholdIndex;
     },
-    setImageSearchLimit(imageSearchLimit) {
-      this.settings.imageSearch.limit = imageSearchLimit;
+    setSimilarPhotoGroupingThresholdIndex(index) {
+      if (!this.settings.similarPhotos) this.settings.similarPhotos = { groupingThresholdIndex: 1 };
+      this.settings.similarPhotos.groupingThresholdIndex = index;
     },
 
     // face recognition settings
@@ -326,5 +451,27 @@ export const useConfigStore = defineStore('configStore', {
     },
 
   },
-  persist: true
+  persist: {
+    serializer: {
+      serialize: JSON.stringify,
+      deserialize: (value) => {
+        const state = JSON.parse(value);
+        const settings = state?.settings;
+        if (settings) {
+          // Existing installations already have a language choice; do not replace it.
+          if (typeof settings.languageInitialized !== 'boolean' && typeof settings.language === 'string' && settings.language) {
+            settings.languageInitialized = true;
+          }
+          settings.rawPreviewSource = ['rendered', 'brightened'].includes(settings.rawPreviewSource) ? settings.rawPreviewSource : 'embedded';
+          settings.rawPairDisplaySource = settings.rawPairDisplaySource === 'raw' ? 'raw' : 'jpeg';
+          delete settings.rawPairClipboardMode;
+          if (settings.fileDeleteBehavior !== 'trash' && settings.fileDeleteBehavior !== 'permanent') {
+            settings.fileDeleteBehavior = settings.deletePermanently === true ? 'permanent' : 'trash';
+          }
+          delete settings.deletePermanently;
+        }
+        return state;
+      },
+    },
+  }
 });

@@ -16,10 +16,20 @@ It works directly with your existing folders, keeps your library on your own dev
 - **Fast Browsing**: Built with Rust and Tauri, with a rebuilt scanner and optimized local database for large libraries.
 - **AI Search on Device**: Search with natural language, similar-image search, face clustering, and smart tags, all processed locally.
 - **Multilingual Search**: Search in 50+ languages with optional multilingual models, available as an additional download when needed.
-- **Practical Organization**: Use favorites, ratings, tags, comments, camera and lens grouping, and duplicate detection to keep collections organized.
+- **Interactive Map View**: Explore geotagged photos and videos in clusters that follow your current filters.
+- **Live and Motion Photos**: Play Apple Live Photos and supported Google Motion Photos, with a unified Smart Album filter.
+- **Practical Organization**: Use Smart Albums, collections, tag groups, ratings, and bulk duplicate cleanup to organize your library.
+- **Flexible Viewing**: Browse by date, use random sorting, switch between Grid, Filmstrip, and Map, compare four images, and customize thumbnail size and corners for your display.
+- **RAW Support**: Group RAW + JPEG/HEIC pairs and choose RAW rendering or embedded previews for thumbnails and viewing.
 - **Broad Video Support**: Open MP4, MOV, AVI, MKV, and 20+ other video formats across platforms.
-- **Built-in Editing Tools**: Quickly crop, rotate, adjust, and save changes without leaving the app.
+- **Built-in Editing Tools**: Crop, rotate, straighten horizons, adjust colors, and save changes without leaving the app.
+- **Photo Collage**: Arrange selected photos in grid, mosaic, or picture-pile layouts, then export or print the result.
+- **Offline Albums**: Browse cached thumbnails and metadata when removable or network storage is disconnected.
+- **Fifteen UI Languages**: Choose from fifteen interface languages, with dates formatted using your system region by default.
 - **Folder-Based Workflow**: Lap reflects your real folder structure instead of forcing an import-only library model.
+- **Date-Organized Import**: Import into day, month, year, or single-folder layouts, preserving filenames and skipping duplicate content.
+
+![Lap Map View showing geotagged photos](/screenshots/lap_map_view.png)
 
 ## Getting Started
 
@@ -27,6 +37,6 @@ Lap is currently available for macOS, Linux, and Windows.
 
 - [Download the latest release](https://github.com/julyx10/lap/releases)
 - macOS: Install with Homebrew: `brew tap julyx10/lap && brew install --cask lap`, or download the `_aarch64.dmg` / `_x64.dmg` file manually.
-- Linux: Download the `_amd64.deb` or `_arm64.deb` package and install it with your package manager.
+- Linux: Install the `_amd64.deb` or `_arm64.deb` package on Debian-based distributions, or run the `_amd64.AppImage` / `_aarch64.AppImage` package.
 - Windows: Download the `_x64_en-US.msi` or `_arm64_en-US.msi` installer and complete the setup wizard.
-- [Check out what's new in v0.3.0](/guide/release-notes/v0.3.0)
+- [Check out what's new in v0.3.3](/guide/release-notes/v0.3.3)

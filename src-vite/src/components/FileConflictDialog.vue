@@ -1,5 +1,5 @@
 <template>
-  <ModalDialog :title="$t('msgbox.file_conflict.title')" :width="440" @cancel="resolve('skip')">
+  <ModalDialog :title="$t('msgbox.file_conflict.title')" :width="440" position-key="file-conflict" @cancel="resolve('skip')">
     <p class="text-sm whitespace-pre-line wrap-break-word">
       {{ $t('msgbox.file_conflict.message', { name, destination }) }}
     </p>
@@ -60,8 +60,20 @@ const emit = defineEmits<{
 const uiStore = useUIStore();
 const applyAll = ref(false);
 
-onMounted(() => uiStore.pushInputHandler('FileConflictDialog'));
-onUnmounted(() => uiStore.removeInputHandler('FileConflictDialog'));
+onMounted(() => {
+  uiStore.pushInputHandler('FileConflictDialog');
+  window.addEventListener('keydown', handleKeyDown);
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeyDown);
+  uiStore.removeInputHandler('FileConflictDialog');
+});
+
+function handleKeyDown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !uiStore.isInputActive('FileConflictDialog')) return;
+  event.preventDefault();
+  resolve('skip');
+}
 
 function resolve(policy: FileConflictPolicy) {
   emit('resolve', { policy, applyAll: applyAll.value });

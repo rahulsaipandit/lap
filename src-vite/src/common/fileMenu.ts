@@ -1,21 +1,21 @@
+import { isOriginalStorageUnavailable, isOriginalUnavailable, requiresOriginalAction, requiresLocalContent } from '@/common/availability';
 import { computed, markRaw, Ref } from 'vue';
 import { config, libConfig } from '@/common/config';
 import { SIDEBAR } from '@/common/constants';
 import { DEFAULT_PLATFORM, getShortcutLabel, ShortcutActionId } from '@/common/shortcuts';
 import {
   IconMonitor,
+  IconSave,
   IconPrint,
   IconRefresh,
   IconHeart,
   IconStar,
   IconStarFilled,
   IconTag,
-  IconRotate,
   IconCopy,
   IconRename,
-  IconMove,
+  IconFileArrowRight,
   IconTrash,
-  IconComment,
   IconPhotoSearch,
   IconPersonSearch,
   IconImageEdit,
@@ -24,26 +24,20 @@ import {
   IconFlag,
   IconFlagFilled,
   IconFlagOff,
-  IconBookmarkOff,
-  IconBookmark,
+  IconCollection,
   IconSplitOn,
   IconSplitOn4,
   IconSparkles,
+  IconCollage,
 } from '@/common/icons';
 
-// Label lookup table for "open in external app" command based on media type
-// and item count.
+import { isPreviewOnlyDocument } from '@/common/utils';
+
 const OPEN_IN_APP_LABELS = {
-  image: {
-    one: ['open_image_in_app', 'Open image in {app}...'],
-    many: ['open_selected_images_in_app', 'Open selected images in {app}...'],
-  },
-  video: {
-    one: ['open_video_in_app', 'Open video in {app}...'],
-    many: ['open_selected_videos_in_app', 'Open selected videos in {app}...'],
-  },
   generic: ['open_in_app', 'Open in external app...'],
 } as const;
+
+type ExternalAppKind = 'image' | 'video';
 
 export const useFileMenuItems = (
   file: Ref<any>,
@@ -52,53 +46,94 @@ export const useFileMenuItems = (
   translate: (key: string) => string,
   onAction: (action: string) => void,
   options?: {
-    isCollectionView?: Ref<boolean>;
     selectMode?: Ref<boolean>;
     selectionMediaKind?: Ref<'image' | 'video' | 'mixed' | 'empty'>;
     selectionCount?: Ref<number>;
+    selectionHasUnavailable?: Ref<boolean>;
+    selectionHasCloudOnly?: Ref<boolean>;
+    selectionStorageUnavailable?: Ref<boolean>;
+    selectionInCollection?: Ref<boolean>;
+    selectionFirstFavorite?: Ref<boolean>;
   }
 ) => {
-  const createAction = (actionName: string) => () => onAction(actionName);
+  const requiresAvailableFile = (action: string) => action === 'copy' || requiresOriginalAction(action) || requiresLocalContent(action);
+  const actionUnavailable = (action: string, target: any) => {
+    const cloudOnly = options?.selectMode?.value ? options.selectionHasCloudOnly?.value : target?.cloud_only;
+    if (cloudOnly && requiresLocalContent(action)) return true;
+    if (options?.selectMode?.value) {
+      return action === 'copy'
+        ? (options.selectionStorageUnavailable?.value ?? options.selectionHasUnavailable?.value)
+        : requiresOriginalAction(action) && options.selectionHasUnavailable?.value;
+    }
+    return action === 'copy'
+      ? isOriginalStorageUnavailable(target)
+      : requiresOriginalAction(action) && isOriginalUnavailable(target);
+  };
+  const createAction = (actionName: string) => Object.assign(() => {
+    if (requiresAvailableFile(actionName) && actionUnavailable(actionName, file.value)) return;
+    onAction(actionName);
+  }, { actionName });
   const shortcut = (actionId: ShortcutActionId) => getShortcutLabel(actionId, DEFAULT_PLATFORM);
 
   // Resolves a label string against the current locale, or returns the fallback if none was found.
   const menuLabel = ([key, fallback]: readonly [string, string]) =>
     String(localeMsg.value.menu.file[key] || fallback);
 
-  // Constructs a label for the "open in external app" entry, depending on media type
-  // and item count. Multi-select always uses the selected-items wording, including
-  // when only one item is selected.
-  const openInAppLabel = (
-    kind: 'image' | 'video' | 'mixed' | 'empty',
-    count = 1,
-    isMultiSelect = false,
-  ) => {
-    if (kind !== 'image' && kind !== 'video') return menuLabel(OPEN_IN_APP_LABELS.generic);
-    const name = String(
-      (kind === 'video' ? config.settings.externalVideoAppName : config.settings.externalImageAppName) || '',
-    );
-    if (!name) return menuLabel(OPEN_IN_APP_LABELS.generic);
-    const variant = OPEN_IN_APP_LABELS[kind][isMultiSelect || count > 1 ? 'many' : 'one'];
-    return menuLabel(variant).replace('{app}', name);
+  const externalAppMenu = (kind?: ExternalAppKind) => {
+    const apps = kind ? config.externalAppsFor(kind) : [];
+    const defaultApp = kind ? config.defaultExternalApp(kind) : null;
+    return {
+      label: menuLabel(OPEN_IN_APP_LABELS.generic),
+      icon: markRaw(IconExternal),
+      children: [
+        ...apps.map((app: any) => ({
+          label: app.name || app.path,
+          shortcut: app.id === defaultApp?.id ? shortcut('file.openExternalApp') : undefined,
+          action: createAction(`open-external-app:${app.id}`),
+        })),
+        ...(apps.length ? [{ label: '-', action: null }] : []),
+        {
+          label: String(localeMsg.value.menu.file.manage_app || 'Manage app...'),
+          action: createAction('manage-external-apps'),
+        },
+      ],
+    };
   };
 
   // Creates a context menu for multi-select mode.
   const buildSelectionMenu = () => {
     const kind = options?.selectionMediaKind?.value ?? 'empty';
-    const selectionIsVideo = kind === 'video';
-    const selectionIsMixed = kind === 'mixed';
-    // Gate on the app *path* (what actually launches), not the display name.
-    const appPath = String(
-      (selectionIsVideo ? config.settings.externalVideoAppPath : config.settings.externalImageAppPath) || '',
-    );
+    const externalAppKind = kind === 'image' || kind === 'video' ? kind : undefined;
     const selectionCount = options?.selectionCount?.value ?? 0;
+    const unavailable = options?.selectionHasUnavailable?.value === true;
+    const batchActions = new Set([
+      'tag', 'add-to-collection', 'rename', 'copy', 'trash',
+    ]);
+    const batchLabels = new Set([
+      localeMsg.value.rating.title,
+      localeMsg.value.culling.title,
+      translate('menu.file.move_copy'),
+    ]);
+    const batchItems = buildSingleFileMenu({}).filter(item =>
+      batchActions.has(item.action?.actionName) || batchLabels.has(item.label)
+    ).map(item => ({
+      ...item,
+      disabled: selectionCount === 0
+        || (requiresAvailableFile(item.action?.actionName || '') && actionUnavailable(item.action.actionName, null))
+        || (unavailable && item.label === translate('menu.file.move_copy')),
+      hideInSelectionPanel: true,
+    }));
+
     return [
       {
-        label: String(localeMsg.value.menu.file.compare_selected_images || 'Compare selected images'),
+        label: String(localeMsg.value.menu.file.compare_selected_images || 'Compare selected images...'),
         icon: markRaw(selectionCount >= 3 ? IconSplitOn4 : IconSplitOn),
-        disabled: kind !== 'image' || selectionCount < 2,
+        disabled: kind !== 'image' || selectionCount < 2 || options?.selectionHasCloudOnly?.value,
         action: createAction('compare-selected-images'),
       },
+      // A mixed image+video selection has no single external-app target, so
+      // disable the entry rather than showing an empty app list.
+      { ...externalAppMenu(externalAppKind), disabled: unavailable || options?.selectionHasCloudOnly?.value || kind === 'mixed' },
       {
         label: String(localeMsg.value.menu.file.fix_with_ai || 'Fix with AI...'),
         icon: markRaw(IconSparkles),
@@ -106,12 +141,52 @@ export const useFileMenuItems = (
         action: createAction('ai-fix'),
       },
       {
-        label: openInAppLabel(kind, selectionCount, true),
-        icon: markRaw(IconExternal),
-        disabled: kind === 'empty' || selectionIsMixed || !appPath,
-        shortcut: shortcut('file.openExternalApp'),
-        action: createAction('open-external-app'),
+        label: String(localeMsg.value.menu.file.create_montage || 'Create montage...'),
+        icon: markRaw(IconCollage),
+        disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount < 2,
+        action: createAction('create-montage'),
       },
+      { label: '-', action: null },
+      {
+        label: options?.selectionFirstFavorite?.value
+          ? localeMsg.value.menu.meta.unfavorite
+          : localeMsg.value.menu.meta.favorite,
+        icon: markRaw(options?.selectionFirstFavorite?.value ? IconHeartFilled : IconHeart),
+        shortcut: shortcut('meta.favorite'),
+        disabled: selectionCount === 0,
+        action: createAction(options?.selectionFirstFavorite?.value ? 'unfavorite-all' : 'favorite-all'),
+        hideInSelectionPanel: true,
+      },
+      ...batchItems.filter(item =>
+        !['rename', 'copy', 'trash'].includes(item.action?.actionName)
+        && item.label !== translate('menu.file.move_copy')
+      ),
+      { label: '-', action: null },
+      ...batchItems.filter(item => item.action?.actionName === 'rename'),
+      ...batchItems.filter(item => item.action?.actionName === 'copy'),
+      ...batchItems.filter(item => item.label === translate('menu.file.move_copy')),
+      {
+        label: localeMsg.value.menu.file.remove_from_collection,
+        hidden: !options?.selectionInCollection?.value,
+        disabled: selectionCount === 0,
+        action: createAction('remove-selected-from-collection'),
+        hideInSelectionPanel: true,
+      },
+      { label: '-', action: null },
+      {
+        label: localeMsg.value.menu.file.refresh_file_info,
+        icon: markRaw(IconRefresh),
+        disabled: unavailable || selectionCount === 0,
+        action: createAction('refresh-file-info'),
+      },
+      {
+        label: String(localeMsg.value.menu.file.save_xmp || 'Save Metadata to XMP'),
+        icon: markRaw(IconSave),
+        disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount === 0,
+        action: createAction('save-xmp'),
+      },
+      { label: '-', action: null },
+      ...batchItems.filter(item => item.action?.actionName === 'trash'),
     ];
   };
 
@@ -119,28 +194,29 @@ export const useFileMenuItems = (
   const buildSingleFileMenu = (f: any) => {
     const isImage = f.file_type === 1 || f.file_type === 3;
     const isVideo = f.file_type === 2;
-    const imageAppPath = String(config.settings.externalImageAppPath || '');
-    const videoAppPath = String(config.settings.externalVideoAppPath || '');
-    return [
+    // Grouped/query rows can omit album_id; the active album is still the
+    // correct target, matching the action handler in Content.vue.
+    const albumId = Number(libConfig.album.id || f.album_id);
+    const canSetAlbumCover = config.main.sidebarIndex === SIDEBAR.ALBUM
+      && libConfig.activePane !== 'collection'
+      && isImage
+      && albumId > 0;
+    const canSetDesktopWallpaper = f.file_type === 1
+      || (f.file_type === 3 && f.media_subtype === 'raw_jpeg_pair' && f.live_photo_video_path);
+    const unavailable = isOriginalUnavailable(f);
+    const items: any[] = [
       {
         label: localeMsg.value.menu.file.view_in_new_window,
         icon: markRaw(IconMonitor),
         shortcut: shortcut('file.openNewWindow'),
         action: createAction('open')
       },
-      {
-        label: openInAppLabel(isVideo ? 'video' : 'image'),
-        hidden: !isImage && !isVideo,
-        disabled: !((isImage && imageAppPath) || (isVideo && videoAppPath)),
-        icon: markRaw(IconExternal),
-        shortcut: shortcut('file.openExternalApp'),
-        action: createAction('open-external-app')
-      },
+      { ...externalAppMenu(isVideo ? 'video' : 'image'), hidden: !isImage && !isVideo },
       {
         label: localeMsg.value.menu.file.edit_image,
         icon: markRaw(IconImageEdit),
         shortcut: shortcut('file.editImage'),
-        disabled: !isImage,
+        disabled: !isImage || isPreviewOnlyDocument(f.file_path || ''),
         action: createAction('edit')
       },
       {
@@ -239,21 +315,9 @@ export const useFileMenuItems = (
       },
       {
         label: localeMsg.value.menu.meta.collection,
-        icon: markRaw(IconBookmark),
+        icon: markRaw(IconCollection),
         shortcut: shortcut('meta.collection'),
         action: createAction('add-to-collection'),
-      },
-      {
-        label: localeMsg.value.menu.meta.comment,
-        icon: markRaw(IconComment),
-        shortcut: shortcut('meta.comment'),
-        action: createAction('comment')
-      },
-      {
-        label: localeMsg.value.menu.meta.rotate,
-        icon: markRaw(IconRotate),
-        shortcut: shortcut('meta.rotate'),
-        action: createAction('rotate')
       },
       { label: "-", action: null },
       {
@@ -274,13 +338,12 @@ export const useFileMenuItems = (
         children: [
           {
             label: translate('menu.file.move_within_library'),
-            icon: markRaw(IconMove),
+            icon: markRaw(IconFileArrowRight),
             shortcut: shortcut('file.moveTo'),
             action: createAction('move-within-library')
           },
           {
             label: translate('menu.file.move_to_folder'),
-            shortcut: shortcut('file.moveToFolder'),
             action: createAction('move-to-folder')
           },
           {
@@ -322,20 +385,49 @@ export const useFileMenuItems = (
         action: createAction('refresh-file-info')
       },
       {
-        label: localeMsg.value.menu.file.set_album_cover,
-        hidden: config.main.sidebarIndex !== SIDEBAR.ALBUM || libConfig.activePane === 'collection' || !isImage || !Number(f.album_id),
-        action: createAction('set-album-cover')
+        label: String(localeMsg.value.menu.file.save_xmp || 'Save Metadata to XMP'),
+        icon: markRaw(IconSave),
+        action: createAction('save-xmp'),
+      },
+      {
+        label: localeMsg.value.menu.file.set_as,
+        hidden: !canSetAlbumCover && !canSetDesktopWallpaper,
+        children: [
+          {
+            label: localeMsg.value.menu.file.set_album_cover,
+            hidden: !canSetAlbumCover,
+            action: createAction('set-album-cover'),
+          },
+          {
+            label: localeMsg.value.menu.file.set_desktop_wallpaper,
+            hidden: !canSetDesktopWallpaper,
+            action: createAction('set-desktop-wallpaper'),
+          },
+        ],
       },
       { label: "-", action: null },
       {
-        label: options?.isCollectionView?.value
-          ? translate('menu.file.remove_from_collection')
-          : localeMsg.value.menu.file.move_to_trash,
-        icon: markRaw(options?.isCollectionView?.value ? IconBookmarkOff : IconTrash),
-        shortcut: shortcut('file.trash'),
-        action: createAction(options?.isCollectionView?.value ? 'remove-from-collection' : 'trash')
+        label: translate(config.settings.fileDeleteBehavior === 'permanent' ? 'menu.file.delete' : 'msgbox.move_to_trash.title'),
+        icon: markRaw(IconTrash),
+        shortcut: shortcut(config.settings.fileDeleteBehavior === 'permanent' ? 'file.deletePermanently' : 'file.trash'),
+        action: createAction('trash')
       },
     ];
+    const applyAvailability = (item: any): any => {
+      const action = item.action?.actionName || '';
+      const requiresAvailableGroup = item.label === menuLabel(OPEN_IN_APP_LABELS.generic)
+        || item.label === translate('menu.file.move_copy');
+      return {
+        ...item,
+        disabled: !!item.disabled
+          || (requiresAvailableFile(action) && actionUnavailable(action, f))
+          || (unavailable && requiresAvailableGroup)
+          || (item.label === menuLabel(OPEN_IN_APP_LABELS.generic)
+            && (options?.selectMode?.value ? options.selectionHasCloudOnly?.value : f.cloud_only)),
+        children: item.children?.map(applyAvailability),
+      };
+    };
+    return items.map(applyAvailability);
   };
 
   return computed(() => {

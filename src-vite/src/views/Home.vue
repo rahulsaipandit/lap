@@ -18,7 +18,7 @@
 
       <!-- left pane -->
       <div
-        v-if="config.leftPanel.show && !uiStore.isFullScreen"
+        v-if="!uiStore.isFullScreen"
         ref="leftPanelRootRef"
         tabindex="-1"
         :class="[
@@ -69,11 +69,11 @@
 
           <!-- library title -->
           <div
-            v-if="leftPanelMounted"
+            v-if="leftPanelMounted || databaseCorrupted"
             class="absolute top-0 left-[68px] right-0 z-10 h-10 flex items-center"
             data-tauri-drag-region
           >
-            <ContextMenu :menuItems="libraryMenuItems">
+            <ContextMenu :menuItems="getLibraryMenuItems">
               <template #trigger="{ toggle }">
                 <button
                   class="p-2 flex items-center gap-1 border border-base-200 rounded-box text-base-content/70 hover:bg-base-100/30 hover:border-base-100/15 hover:text-base-content cursor-pointer transition-colors"
@@ -100,7 +100,7 @@
 
           <!-- panel-->
           <div
-            v-if="leftPanelMounted"
+            v-if="leftPanelMounted || libraryEmpty"
             class="absolute inset-y-0 left-16 pt-10 px-1 border-l border-base-content/5 flex flex-col overflow-hidden transition-[transform,opacity] duration-200 ease-in-out"
             :class="leftPanelVisualExpanded ? 'translate-x-0 opacity-100' : '-translate-x-full opacity-0 pointer-events-none'"
             :style="{ width: `calc(${Number(config.leftPanel.width || 260) / 16}rem - 4rem)` }"
@@ -112,7 +112,7 @@
               :class="libConfig.activePane === 'collection' ? 'sidebar-pane-inactive' : ''"
               @mousedown.capture="activateMainPanel"
             >
-              <component ref="panelRef" 
+              <component v-if="databaseCorrupted === false" ref="panelRef" 
                 :key="libraryVersion"
                 :is="activeSidebarButton.component"
                 :titlebar="activeSidebarButton.text"
@@ -120,12 +120,13 @@
               />
             </div>
             <div
-              v-if="showBottomCollectionTray && config.collectionTray.expanded"
-              class="h-1 -mx-1 shrink-0 cursor-row-resize transition-colors hover:bg-primary"
+              v-if="databaseCorrupted === false && showBottomCollectionTray && config.collectionTray.expanded"
+              class="h-1 -mx-1 shrink-0 cursor-row-resize splitter-indicator splitter-horizontal"
+              :class="{ 'splitter-dragging': isDraggingCollectionSplitter }"
               @mousedown="startDraggingCollectionSplitter"
             ></div>
             <CollectionTray
-              v-if="showBottomCollectionTray"
+              v-if="databaseCorrupted === false && showBottomCollectionTray"
               :class="[
                 'overflow-hidden -mx-1',
                 isDraggingCollectionSplitter ? '' : 'transition-[height] duration-200 ease-out',
@@ -140,10 +141,10 @@
       
       <!-- splitter -->
       <div v-if="!uiStore.isFullScreen"
-        class="w-1 transition-colors shrink-0"
+        class="w-1 shrink-0"
         :class="{
-          'hover:bg-primary cursor-col-resize': config.leftPanel.show && leftPanelLayoutExpanded,
-          'bg-primary': config.leftPanel.show && leftPanelLayoutExpanded && isDraggingSplitter,
+          'cursor-col-resize splitter-indicator splitter-vertical': leftPanelLayoutExpanded,
+          'splitter-dragging': leftPanelLayoutExpanded && isDraggingSplitter,
         }" 
         @mousedown="startDraggingSplitter"
         @mouseup="stopDraggingSplitter"
@@ -156,8 +157,11 @@
           showDesktopTitleBar ? 'rounded-tl-box' : '',
         ]"
       >
-        <!-- <MapHeatmapView v-if="config.main.sidebarIndex === SIDEBAR.MAP" /> -->
-        <Content ref="contentRef" :key="libraryVersion" :titlebar="activeSidebarButton.text" :libraryEmpty="libraryEmpty"/>
+        <div v-if="databaseCorrupted" class="flex-1 flex flex-col items-center justify-center gap-3 p-8 text-center" role="alert">
+          <h2 class="text-lg font-medium">{{ $t('library.database_corrupted') }}</h2>
+          <p class="text-sm text-base-content/60">{{ $t('library.database_corrupted_hint') }}</p>
+        </div>
+        <Content v-else-if="databaseCorrupted === false" ref="contentRef" :key="libraryVersion" :titlebar="activeSidebarButton.text" :libraryEmpty="libraryEmpty" @startup-ready="finishStartup"/>
       </div>
     </div>
 
@@ -178,38 +182,38 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount, onMounted, watch, nextTick } from 'vue';
+import { defineAsyncComponent, ref, computed, onBeforeUnmount, onMounted, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { emit, listen } from '@tauri-apps/api/event';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getName } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
+import { applyAlbumAccess, recheckOfflineAlbums } from '@/common/albumRecovery';
 import { config, libConfig } from '@/common/config';
 import { useAppUpdater } from '@/common/updater';
 import { useUIStore } from '@/stores/uiStore';
 import { isWin, isMac, isLinux, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutPlatform } from '@/common/shortcuts';
-import { SIDEBAR } from '@/common/constants';
-import { getAppConfig, switchLibrary, cancelIndexing, cancelFaceIndex } from '@/common/api';
+import { SIDEBAR, SETTINGS_TAB, SETTINGS_BASE_WIDTH, SETTINGS_BASE_HEIGHT, PANEL_ANIMATION_MS } from '@/common/constants';
+import { getAppConfig, getLibraryVisibleCounts, switchLibrary, cancelIndexing, cancelFaceIndex } from '@/common/api';
 
 // vue components
 import Library from '@/components/Library.vue';
 import AlbumList from '@/components/AlbumList.vue';
-import SmartAlbumList from '@/components/SmartAlbumList.vue';
-import ImageSearch from '@/components/ImageSearch.vue';
-import Tag from '@/components/Tag.vue';
-import Calendar from '@/components/Calendar.vue';
-import Location from '@/components/Location.vue';
-import Person from '@/components/Person.vue';
-import Camera from '@/components/Camera.vue';
-// import MapHeatmapView from '@/components/MapHeatmapView.vue';
+const SmartAlbumList = defineAsyncComponent(() => import('@/components/SmartAlbumList.vue'));
+const ImageSearch = defineAsyncComponent(() => import('@/components/ImageSearch.vue'));
+const Tag = defineAsyncComponent(() => import('@/components/Tag.vue'));
+const Calendar = defineAsyncComponent(() => import('@/components/Calendar.vue'));
+const Location = defineAsyncComponent(() => import('@/components/Location.vue'));
+const Person = defineAsyncComponent(() => import('@/components/Person.vue'));
+const Camera = defineAsyncComponent(() => import('@/components/Camera.vue'));
 
 import TitleBar from '@/components/TitleBar.vue';
 import TButton from '@/components/TButton.vue';
 import Content from '@/components/Content.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import CollectionTray from '@/components/CollectionTray.vue';
-import ManageLibraries from '@/components/ManageLibraries.vue';
+const ManageLibraries = defineAsyncComponent(() => import('@/components/ManageLibraries.vue'));
 import iconLogo from '@/assets/images/icon.png';
 
 import {
@@ -230,10 +234,28 @@ import {
 const isSwitchingLibrary = ref(false);
 const libraryVersion = ref(0);
 const libraryEmpty = ref(false);
+// Mount library components only after the startup corruption check has completed.
+const databaseCorrupted = ref<boolean | null>(null);
 
 const checkLibraryEmpty = async () => {
+  // Guard the corruption probe so this function never rejects: it is called fire-and-forget from
+  // onMounted / the albums-refreshed listener, and awaited before the switching lock is released
+  // and before emit('library-switched'). An unhandled rejection there would stick the overlay or
+  // skip the switch notification. On IPC failure, keep the previous (non-corrupt) behaviour.
   try {
-    const albums = await invoke<any[]>('get_all_albums');
+    databaseCorrupted.value = await invoke<boolean>('is_database_corrupted');
+  } catch {
+    databaseCorrupted.value = false;
+  }
+  if (databaseCorrupted.value) {
+    libraryEmpty.value = false;
+    // Note: do NOT force showPanel here — it writes the persisted config.leftPanel.show and would
+    // leave the panel expanded after switching back to a healthy library. The library menu is kept
+    // reachable while corrupt via `v-if="leftPanelMounted || databaseCorrupted"` in the template.
+    return;
+  }
+  try {
+    const albums = await invoke<any[]>('get_all_albums', { refreshAccessibility: false });
     libraryEmpty.value = (albums?.length ?? 0) === 0;
     if (libraryEmpty.value) {
       config.main.sidebarIndex = SIDEBAR.ALBUM;
@@ -242,8 +264,6 @@ const checkLibraryEmpty = async () => {
     libraryEmpty.value = false;
   }
 };
-const SETTINGS_BASE_WIDTH = 600;
-const SETTINGS_BASE_HEIGHT = 620;
 
 /// i18n
 const { locale, messages } = useI18n();
@@ -255,8 +275,11 @@ const uiStore = useUIStore();
 const panelRef = ref<any>(null);
 const contentRef = ref<any>(null);
 const leftPanelRootRef = ref<HTMLElement | null>(null);
-const showPanel = ref(true);
-const LEFT_PANEL_ANIMATION_MS = 200;
+const showPanel = computed({
+  get: () => config.leftPanel.show,
+  set: (value: boolean) => { config.leftPanel.show = value; },
+});
+
 const leftPanelMounted = ref(showPanel.value);
 const leftPanelVisualExpanded = ref(showPanel.value);
 const leftPanelLayoutExpanded = ref(showPanel.value);
@@ -289,7 +312,7 @@ watch(showPanel, async (expanded) => {
       if (animationVersion !== leftPanelAnimationVersion) return;
       leftPanelAnimationTimer = null;
       void commitLeftPanelLayout(true);
-    }, LEFT_PANEL_ANIMATION_MS);
+    }, PANEL_ANIMATION_MS);
     return;
   }
 
@@ -301,7 +324,7 @@ watch(showPanel, async (expanded) => {
       if (animationVersion !== leftPanelAnimationVersion) return;
       leftPanelMounted.value = false;
     });
-  }, LEFT_PANEL_ANIMATION_MS);
+  }, PANEL_ANIMATION_MS);
 });
 
 // Library state
@@ -337,6 +360,8 @@ let unlistenOpenAbout: (() => void) | null = null;
 let unlistenAlbumsRefreshed: (() => void) | null = null;
 let unlistenAddAlbumRequested: (() => void) | null = null;
 let unlistenEditAlbumRequested: (() => void) | null = null;
+// Native Edit menu "Select All" routes to the photo selection via the backend event.
+let unlistenMenuSelectAll: (() => void) | null = null;
 const shortcutPlatform: ShortcutPlatform = isMac ? 'mac' : (isLinux ? 'linux' : 'windows');
 const {
   updateAvailable,
@@ -362,7 +387,6 @@ const buttons = computed(() =>  [
   { index: SIDEBAR.PERSON, icon: IconPerson, component: Person, text: localeMsg.value.sidebar.people, hidden: !config.settings.face.enabled },
   { index: SIDEBAR.LOCATION, icon: IconLocation, component: Location, text: localeMsg.value.sidebar.location },
   { index: SIDEBAR.CAMERA, icon: IconCamera, component: Camera, text: localeMsg.value.sidebar.camera },
-  // { icon: IconMapDefault, component: null, text: localeMsg.value.sidebar.map },
 ]);
 
 const activeSidebarButton = computed(() =>
@@ -390,6 +414,19 @@ watch(() => config.libraryChangedVersion, async () => {
   appConfig.value = await getAppConfig();
 });
 
+const libraryFileCounts = ref<Record<string, number | null>>({});
+let libraryCountsRefreshing = false;
+function getLibraryMenuItems() {
+  if (!libraryCountsRefreshing) {
+    libraryCountsRefreshing = true;
+    void Promise.all((appConfig.value?.libraries || []).filter(lib => !lib.hidden).map(async lib => {
+      const counts = await getLibraryVisibleCounts(lib.id);
+      libraryFileCounts.value[lib.id] = counts?.all ?? null;
+    })).finally(() => { libraryCountsRefreshing = false; });
+  }
+  return libraryMenuItems.value;
+}
+
 const libraryMenuItems = computed(() => {
   const items: any[] = [];
   
@@ -400,6 +437,11 @@ const libraryMenuItems = computed(() => {
       const isSelected = lib.id === appConfig.value.current_library_id;
       items.push({
         label: lib.name,
+        // ContextMenu snapshots items on open; a getter keeps its badge reactive.
+        get count() {
+          const count = libraryFileCounts.value[lib.id];
+          return count === 0 ? undefined : count === null ? '—' : count?.toLocaleString(locale.value) ?? '…';
+        },
         icon: isSelected ? IconDot : null,
         action: () => {
           if (!isSelected) {
@@ -423,6 +465,23 @@ const libraryMenuItems = computed(() => {
   return items;
 });
 
+let startupFinished = false;
+function handleAccessRecovery() {
+  if (isSwitchingLibrary.value || databaseCorrupted.value !== false) return;
+  void recheckOfflineAlbums();
+}
+
+async function finishStartup() {
+  if (startupFinished) return;
+  startupFinished = true;
+  uiStore.startupReady = true;
+  performance.mark('startup-first-content-ready');
+  void invoke('finish_startup', { model: config.settings.imageSearch.model || 0 }).catch(console.error);
+  if (config.settings.autoCheckUpdates !== false) void checkForUpdates(false);
+}
+watch(databaseCorrupted, corrupted => {
+  if (corrupted) void nextTick(() => requestAnimationFrame(() => requestAnimationFrame(() => finishStartup())));
+});
 
 onMounted(async () => {
   window.addEventListener('keydown', handleHomeKeyDown);
@@ -430,7 +489,10 @@ onMounted(async () => {
     void clickSettings();
   });
   unlistenOpenAbout = await listen('app-open-about', () => {
-    void clickSettings(5);
+    void clickSettings(SETTINGS_TAB.ABOUT);
+  });
+  unlistenMenuSelectAll = await listen('menu-select-all', () => {
+    contentRef.value?.selectAll?.();
   });
 
   appConfig.value = await getAppConfig();
@@ -439,7 +501,6 @@ onMounted(async () => {
 
   unlistenAddAlbumRequested = await listen('add-album-requested', async () => {
     if (config.main.sidebarIndex !== SIDEBAR.ALBUM) config.main.sidebarIndex = SIDEBAR.ALBUM;
-    showPanel.value = true;
     await nextTick();
     (panelRef.value as any)?.clickNewAlbum?.();
   });
@@ -453,9 +514,17 @@ onMounted(async () => {
     (panelRef.value as any)?.openAlbumEdit?.(albumId);
   });
 
-  unlistenAlbumsRefreshed = await listen('albums-refreshed', () => {
+  unlistenAlbumsRefreshed = await listen('albums-refreshed', async (event: any) => {
+    const libraryId = event.payload?.libraryId || libConfig._libraryId;
+    if (libraryId !== libConfig._libraryId) return;
+    for (const album of event.payload?.albums || []) {
+      if (typeof album.is_accessible === 'boolean') {
+        await applyAlbumAccess(album, album.is_accessible, libraryId);
+      }
+    }
     void checkLibraryEmpty();
   });
+  window.addEventListener('focus', handleAccessRecovery);
 
   try {
     const name = await getName();
@@ -464,18 +533,18 @@ onMounted(async () => {
     console.error('Failed to get app name:', e);
   }
 
-  if (config.settings.autoCheckUpdates !== false) {
-    void checkForUpdates(false);
-  }
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener('focus', handleAccessRecovery);
   clearLeftPanelAnimationTimer();
   window.removeEventListener('keydown', handleHomeKeyDown);
   document.removeEventListener('mousemove', handleCollectionMouseMove);
   document.removeEventListener('mouseup', stopDraggingCollectionSplitter);
   unlistenOpenPreferences?.();
   unlistenOpenPreferences = null;
+  unlistenMenuSelectAll?.();
+  unlistenMenuSelectAll = null;
   unlistenOpenAbout?.();
   unlistenOpenAbout = null;
   unlistenAlbumsRefreshed?.();
@@ -511,7 +580,7 @@ function handleHomeKeyDown(event: KeyboardEvent) {
   if (matchesShortcut('app.search', event, shortcutPlatform)) {
     event.preventDefault();
     event.stopPropagation();
-    if (!libraryEmpty.value) {
+    if (!libraryEmpty.value && !databaseCorrupted.value) {
       if (config.main.sidebarIndex === SIDEBAR.SEARCH && showPanel.value) {
         nextTick(() => (panelRef.value as any)?.focusSearchInput?.());
       } else {
@@ -528,14 +597,13 @@ function handleHomeKeyDown(event: KeyboardEvent) {
 
   event.preventDefault();
   event.stopPropagation();
-  if (!libraryEmpty.value) {
-    showPanel.value = !showPanel.value;
-  }
+  showPanel.value = !showPanel.value;
 }
 
 const doSwitchLibrary = async (libraryId: string) => {
   try {
     isSwitchingLibrary.value = true;
+    databaseCorrupted.value = null;
 
     // Save current library state before switching (preserves the indexing queue)
     await libConfig.save();
@@ -560,11 +628,15 @@ const doSwitchLibrary = async (libraryId: string) => {
     await libConfig.reload();
     appConfig.value = await getAppConfig();
     libraryVersion.value++;
-    void checkLibraryEmpty();
+    // Settle the corruption/empty state before notifying, so `library-switched` listeners see a
+    // resolved databaseCorrupted (matches onManageLibrariesOk's ordering).
+    await checkLibraryEmpty();
     await emit('library-switched');
   } catch (error) {
     libConfig._initialized = true;
     console.error('Failed to switch library:', error);
+    // Still settle state after a failed switch so the UI reflects the current library.
+    await checkLibraryEmpty();
   } finally {
     isSwitchingLibrary.value = false;
   }
@@ -577,11 +649,12 @@ const onManageLibrariesOk = async () => {
 
   if (oldLibId && appConfig.value?.current_library_id !== oldLibId) {
     isSwitchingLibrary.value = true;
+    databaseCorrupted.value = null;
     try {
       // The backend has already switched; reload in-place.
       await libConfig.reload();
       libraryVersion.value++;
-      void checkLibraryEmpty();
+      await checkLibraryEmpty();
       await emit('library-switched');
     } finally {
       isSwitchingLibrary.value = false;
@@ -595,14 +668,11 @@ const onManageLibrariesUpdated = async () => {
 
 // click sidebar
 function clickSidebar(index: number) {
+  // While the library is corrupt the panel <component> is unmounted; ignore navigation so we don't
+  // silently mutate the persisted sidebarIndex and dead-end in a blank pane.
+  if (databaseCorrupted.value) return;
   activateMainPanel();
   if (libraryEmpty.value && index !== SIDEBAR.ALBUM) return;
-  if (index === SIDEBAR.MAP) {
-    // map view has no filter panel - give it the full content area
-    showPanel.value = false;
-    config.main.sidebarIndex = index;
-    return;
-  }
   if (config.main.sidebarIndex === index) {
     showPanel.value = !showPanel.value;
   } else {
@@ -617,7 +687,7 @@ function activateMainPanel() {
 
 // Dragging the splitter
 function startDraggingSplitter(event: MouseEvent) {
-  if(!config.leftPanel.show || !leftPanelLayoutExpanded.value) return; // no expanded left pane
+  if(!leftPanelLayoutExpanded.value) return; // no expanded left pane
 
   isDraggingSplitter.value = true;
   document.addEventListener('mousemove', handleMouseMove);
@@ -687,17 +757,34 @@ async function clickSettings(tabIndex?: number) {
     await emit('settings-settingsTabIndex-changed', tabIndex);
   }
 
-  // check if the settings window is already open
-  const settingsWindow = await WebviewWindow.getByLabel('settings');
+  // Reuse an existing settings window if it can be shown; otherwise destroy it
+  // and create a fresh one. Re-showing a closed transparent window can fail
+  // silently on Windows, so never swallow the failure.
+  let settingsWindow: WebviewWindow | null = null;
+  try {
+    settingsWindow = await WebviewWindow.getByLabel('settings');
+  } catch (error) {
+    console.error('Failed to look up settings window:', error);
+  }
+
   if (settingsWindow) {
-    if (isWin && await settingsWindow.isMinimized()) {
-      await settingsWindow.unminimize();
+    try {
+      if (isWin && await settingsWindow.isMinimized()) {
+        await settingsWindow.unminimize();
+      }
+      await settingsWindow.show();
+      if (isWin) {
+        await settingsWindow.setFocus();
+      }
+      return;
+    } catch (error) {
+      console.error('Failed to show existing settings window, recreating:', error);
+      try {
+        await settingsWindow.destroy();
+      } catch (destroyError) {
+        console.error('Failed to destroy stale settings window:', destroyError);
+      }
     }
-    await settingsWindow.show();
-    if (isWin) {
-      await settingsWindow.setFocus();
-    }
-    return;
   }
 
   const options: any = {
@@ -724,11 +811,6 @@ async function clickSettings(tabIndex?: number) {
   
   newSettingsWindow.once('tauri://created', () => {
     console.log('settings window created');
-  });
-
-  newSettingsWindow.once('tauri://close-requested', () => {
-    newSettingsWindow.close();
-    console.log('settings window closed');
   });
 }
 

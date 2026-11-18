@@ -1,12 +1,19 @@
 <template>
   <div
     ref="videoContainer"
-    class="relative w-full h-full overflow-hidden cursor-pointer"
+    class="relative w-full h-full overflow-hidden cursor-default"
     :class="{ 'pointer-events-none': !isActive }"
     style="touch-action: none;"
     @wheel.prevent="handleWheel"
     @contextmenu="handleContextMenu"
   >
+    <div v-if="originalUnavailable" class="absolute inset-0 z-30 flex items-center justify-center bg-base-200">
+      <img v-if="offlinePoster" :src="offlinePoster" class="max-w-full max-h-full object-contain" @error="offlinePoster = ''" />
+      <div v-else class="flex flex-col items-center justify-center text-base-content/30">
+        <IconVideoSlash class="w-8 h-8 mb-2" />
+        <span>{{ $t('tooltip.not_found.files') }}</span>
+      </div>
+    </div>
     <TransitionGroup :name="transitionName" @after-leave="handleTransitionEnd">
       <div
         v-for="index in [0, 1]"
@@ -24,14 +31,20 @@
       </div>
     </TransitionGroup>
 
-    <div v-if="showPlayOverlay && !hasError && !isPlaying && !isLoading" class="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-      <div
-        class="w-16 h-16 rounded-full bg-base-100/70 flex items-center justify-center hover:scale-110 transition-all duration-300 ease-out group pointer-events-auto cursor-pointer"
-        @click.stop="clickPlayVideo"
-      >
-        <component :is="isReplaying ? IconVideoReplay : IconVideoPlay" class="w-8 h-8" />
+    <Transition name="playback-overlay" :css="hasPlaybackInteraction && !isPlaying">
+      <div v-if="showPlayOverlay && !hasError && !isLoading && !isSeeking && (playbackFeedback || isReplaying || !hasPlaybackInteraction)"
+        data-video-play-overlay
+        class="absolute inset-0 flex items-center justify-center z-10"
+        :class="playbackFeedback ? 'pointer-events-none' : 'pointer-events-auto cursor-pointer'"
+        @click.stop="clickPlayVideo">
+        <div
+          class="w-16 h-16 rounded-full bg-base-100/70 flex items-center justify-center transition-transform duration-200 ease-out"
+          :class="{ 'pointer-events-auto cursor-pointer': !playbackFeedback }"
+        >
+          <component :is="playbackFeedback === 'pause' ? IconVideoPause : (isReplaying ? IconVideoReplay : IconVideoPlay)" class="w-8 h-8" />
+        </div>
       </div>
-    </div>
+    </Transition>
 
     <Transition name="loading-overlay">
       <div v-if="showSpinner" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-20 bg-base-200/20 px-6 text-center">
@@ -66,17 +79,20 @@
 </template>
 
 <script setup lang="ts">
+import { GESTURE_LOCK_THRESHOLD, HORIZONTAL_NAV_THRESHOLD, PLAYBACK_DEADLINE_MS, DIRECT_PLAYBACK_TIMEOUT_MS, LOADING_OVERLAY_DELAY_MS } from '@/common/constants';
 import { ref, watch, onMounted, onBeforeUnmount, computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { useToast } from '@/common/toast';
 import { config } from '@/common/config';
-import { IconVideoSlash, IconVideoPlay, IconVideoReplay } from '@/common/icons';
+import { IconVideoSlash, IconVideoPlay, IconVideoReplay, IconVideoPause } from '@/common/icons';
 import videojs from 'video.js/core';
 import 'video.js/dist/video-js.min.css';
-import { getAssetSrc, isLinux, isMac, isWin } from '@/common/utils';
-import { openFileWithApp } from '@/common/api';
+import { getThumbUrl, getAssetSrc, isLinux, isMac, isWin } from '@/common/utils';
+import { isCloudOnlyFile, openFileWithApp } from '@/common/api';
 import zhCN from 'video.js/dist/lang/zh-CN.json';
 import {
   prepareVideo,
+  getVideoStreamUrl,
   cancelVideoPrepare,
   isWebViewVideoPlaybackDisabled,
   type VideoPrepareMode,
@@ -85,6 +101,9 @@ import {
 videojs.addLanguage('zh-CN', zhCN);
 
 const props = defineProps({
+  originalUnavailable: { type: Boolean, default: false },
+  fileId: { type: Number, default: 0 },
+  thumbnailSrc: { type: String, default: '' },
   filePath: { type: String, required: false },
   rotate: { type: Number, default: 0 },
   isZoomFit: { type: Boolean, default: false },
@@ -98,6 +117,7 @@ const props = defineProps({
 
 const emit = defineEmits(['message-from-video-viewer', 'slideshow-next', 'scale', 'viewport-change', 'context-menu']);
 const { t: $t } = useI18n();
+const toast = useToast();
 
 const videoContainer = ref<HTMLDivElement | null>(null);
 const videoElements = ref<HTMLVideoElement[]>([]);
@@ -105,6 +125,10 @@ const players = ref<(ReturnType<typeof videojs> | null)[]>([null, null]);
 const playerEpochs = ref([0, 0]);
 const videoJsLang = computed(() => (config.settings.language === 'zh' ? 'zh-CN' : config.settings.language));
 
+const offlinePoster = ref('');
+watch(() => [props.originalUnavailable, props.fileId, props.thumbnailSrc], () => {
+  offlinePoster.value = props.thumbnailSrc || (props.fileId ? getThumbUrl(props.fileId, false, config.settings.thumbnailSize) : '');
+}, { immediate: true });
 const hasError = ref(false);
 const errorMessage = ref('');
 const isLoading = ref(false);
@@ -112,6 +136,24 @@ const showSpinner = ref(false);
 const isCompatibilityProcessing = ref(false);
 const isPlaying = ref(false);
 const isReplaying = ref(false);
+const hasPlaybackInteraction = ref(false);
+const isSeeking = ref(false);
+const playbackFeedback = ref<'pause' | null>(null);
+let playbackFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearPlaybackFeedback() {
+  if (playbackFeedbackTimer) clearTimeout(playbackFeedbackTimer);
+  playbackFeedbackTimer = null;
+  playbackFeedback.value = null;
+}
+
+function showPlaybackFeedback() {
+  clearPlaybackFeedback();
+  if (isLoading.value || !props.isActive || isSeeking.value || getActivePlayer()?.scrubbing()) return;
+  playbackFeedback.value = 'pause';
+  playbackFeedbackTimer = setTimeout(clearPlaybackFeedback, 1500);
+}
+
 const isFit = ref(false);
 const scale = ref(1);
 const viewportOffset = ref({ x: 0, y: 0 });
@@ -126,9 +168,10 @@ let nextBackendRequestId = 0;
 const activeBackendRequestIds: Array<number | null> = [null, null];
 const loadAttemptCleanups: Array<(() => void) | null> = [null, null];
 
-const externalVideoAppPath = computed(() => String(config.settings?.externalVideoAppPath || '').trim());
-const externalVideoAppName = computed(() => String(config.settings?.externalVideoAppName || '').trim());
-const canOpenExternalApp = computed(() => !!(props.filePath && externalVideoAppPath.value));
+const externalVideoApp = computed(() => config.defaultExternalApp('video'));
+const externalVideoAppPath = computed(() => String(externalVideoApp.value?.path || '').trim());
+const externalVideoAppName = computed(() => String(externalVideoApp.value?.name || '').trim());
+const canOpenExternalApp = computed(() => !props.originalUnavailable && !!(props.filePath && externalVideoAppPath.value));
 const externalOpenLabel = computed(() => {
   if (externalVideoAppName.value) {
     return $t('video.errors.open_in_external_app_named', { app: externalVideoAppName.value }) || `Open in ${externalVideoAppName.value}`;
@@ -140,8 +183,14 @@ const loadingLabel = computed(() => (
 ));
 
 async function openInExternalApp() {
-  if (!props.filePath || !externalVideoAppPath.value) return;
-  await openFileWithApp(props.filePath, externalVideoAppPath.value);
+  if (props.originalUnavailable || !props.filePath || !externalVideoAppPath.value) return;
+  try {
+    await openFileWithApp(props.filePath, externalVideoAppPath.value);
+  } catch (error) {
+    toast.error(String(error).includes('File is online-only')
+      ? $t('offline.requires_original')
+      : $t('tooltip.open_external.failed'));
+  }
 }
 
 function handleContextMenu(event: MouseEvent) {
@@ -159,8 +208,6 @@ let hasNavigatedThisGesture = false;
 const gestureType = ref<'none' | 'zoom' | 'nav'>('none');
 const navDirection = ref<'next' | 'prev' | ''>('');
 let lastDeltaX = 0;
-const GESTURE_LOCK_THRESHOLD = 10;
-const HORIZONTAL_NAV_THRESHOLD = 100;
 
 const transitionName = computed(() => {
   if (props.isSlideShow) return 'slide-next';
@@ -201,16 +248,14 @@ const playerOptions = computed(() => ({
   controlBar: {
     pictureInPictureToggle: false,
     playbackRateMenuButton: false,
-    fullscreenToggle: true,
+    fullscreenToggle: false,
     audioTrackButton: false,
     volumePanel: { inline: true },
   },
 }));
 
 const getActivePlayer = () => players.value[activeVideo.value];
-const PLAYBACK_DEADLINE_MS = 30_000;
-const DIRECT_PLAYBACK_TIMEOUT_MS = 8000;
-const LOADING_OVERLAY_DELAY_MS = 500;
+
 let playbackDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 let loadingOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 const directPlaybackTypes: Record<string, string> = {
@@ -314,6 +359,23 @@ const updateTransform = (options: boolean | { resetRotation?: boolean, recalcSca
     }
   }
 
+  if (videoWidth && videoHeight && containerWidth && containerHeight) {
+    const width = (isRotated ? videoHeight : videoWidth) * scale.value;
+    const height = (isRotated ? videoWidth : videoHeight) * scale.value;
+    // Match Image.vue's clampPosition per axis, including its pixel rounding:
+    // center content that fits, otherwise keep its edges outside the viewport.
+    const limitX = (width - containerWidth) / 2;
+    const limitY = (height - containerHeight) / 2;
+    viewportOffset.value = {
+      x: Math.floor(width) > containerWidth
+        ? Math.min(Math.max(viewportOffset.value.x, -limitX), limitX)
+        : 0,
+      y: Math.floor(height) > containerHeight
+        ? Math.min(Math.max(viewportOffset.value.y, -limitY), limitY)
+        : 0,
+    };
+  }
+
   video.style.transform = `translate(calc(-50% + ${viewportOffset.value.x}px), calc(-50% + ${viewportOffset.value.y}px)) rotate(${rotate.value}deg) scale(${scale.value})`;
 
   emit('scale', { scale: scale.value, displayScale: scale.value, minScale: 0.1, maxScale: 10 });
@@ -329,7 +391,7 @@ function refreshFullscreenLayout(index: number) {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       if (activeVideo.value === index) {
-        updateTransform({ recalcScale: true });
+        updateTransform({ recalcScale: isFit.value });
       }
     });
   });
@@ -361,18 +423,32 @@ const setupPlayer = (index: number) => {
         }
         isPlaying.value = true;
         isReplaying.value = false;
+        hasPlaybackInteraction.value = true;
+        clearPlaybackFeedback();
       }
     });
 
     player.on('pause', () => {
       if (activeVideo.value === index) {
         isPlaying.value = false;
-        isReplaying.value = false;
+        if (!player.ended()) showPlaybackFeedback();
       }
+    });
+
+    player.on('seeking', () => {
+      if (activeVideo.value !== index) return;
+      isSeeking.value = true;
+      hasPlaybackInteraction.value = true;
+      isReplaying.value = false;
+      clearPlaybackFeedback();
+    });
+    player.on('seeked', () => {
+      if (activeVideo.value === index) isSeeking.value = false;
     });
 
     player.on('ended', () => {
       if (activeVideo.value === index) {
+        clearPlaybackFeedback();
         if (!props.isSlideShow && config.settings.loopVideo) {
           player.play().catch(() => {});
           return;
@@ -425,6 +501,9 @@ const loadVideo = async (filePath: string) => {
   clearLoadingOverlayTimer();
   clearPlaybackDeadlineTimer();
   const currentLoadId = ++currentLoadingId;
+  clearPlaybackFeedback();
+  hasPlaybackInteraction.value = false;
+  isSeeking.value = false;
   
   // IMMEDIATELY set loading state to block volumechange feedbacks from old players
   hasError.value = false;
@@ -444,6 +523,20 @@ const loadVideo = async (filePath: string) => {
   await Promise.allSettled(cancelPromises);
 
   if (currentLoadId !== currentLoadingId) return;
+  if (props.originalUnavailable) {
+    getActivePlayer()?.pause();
+    resetLoadingUi();
+    return;
+  }
+  const cloudOnly = await isCloudOnlyFile(filePath);
+  if (currentLoadId !== currentLoadingId) return;
+  if (cloudOnly) {
+    getActivePlayer()?.pause();
+    resetLoadingUi();
+    hasError.value = true;
+    errorMessage.value = $t('offline.requires_original');
+    return;
+  }
 
   const currentPlayer = getActivePlayer();
   if (currentPlayer) {
@@ -600,12 +693,26 @@ const loadVideo = async (filePath: string) => {
     }
   };
 
-  const loadDirect = (type: string | null) => {
+  const loadDirect = async (type: string | null) => {
     resetCompatibilityProcessing();
+    let playbackSrc: string;
+    try {
+      // Use the same Range-capable transport as prepared videos on Linux,
+      // without probing or copying the original MP4/M4V file.
+      playbackSrc = isLinux && /\.(mp4|m4v)$/i.test(filePath)
+        ? await getVideoStreamUrl(filePath)
+        : getAssetSrc(filePath);
+    } catch (error) {
+      if (currentLoadId !== currentLoadingId) return;
+      console.warn('[Video] Direct stream URL unavailable, preparing a compatible source...', error);
+      void loadPrepared('compatible');
+      return;
+    }
+    if (currentLoadId !== currentLoadingId) return;
     player.reset();
     const source = type
-      ? { src: getAssetSrc(filePath), type }
-      : { src: getAssetSrc(filePath) };
+      ? { src: playbackSrc, type }
+      : { src: playbackSrc };
     player.src(source);
 
     let directLoadTimer: ReturnType<typeof setTimeout> | null = null;
@@ -720,7 +827,7 @@ function handlePlayerError(playerInstance: ReturnType<typeof videojs>) {
       case 4: msg = getFallbackErrorMessage(); break;
     }
   } else {
-    msg = $t('video.errors.playback_failed') || 'Playback failed';
+    msg = $t('video.errors.playback_failed');
   }
 
   hasError.value = true;
@@ -780,9 +887,10 @@ function handlePinchPointerEnd(event: PointerEvent) {
 }
 
 function handleGlobalPinchWheel(event: WheelEvent) {
-  if (!event.ctrlKey) return;
-  if (!videoContainer.value) return;
-  const rect = (videoContainer.value as HTMLElement).getBoundingClientRect();
+  if (!event.ctrlKey || !props.isActive) return;
+  const container = getTransformContainer(getActivePlayer());
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
   if (
     event.clientX < rect.left || event.clientX > rect.right ||
     event.clientY < rect.top || event.clientY > rect.bottom
@@ -797,15 +905,43 @@ function handleGlobalPinchWheel(event: WheelEvent) {
 // Browser-matching exp formula for touchpad pinch (small deltaY); coarser fixed
 // step for Ctrl+mouse-wheel (deltaY ~100 per notch).
 function applyZoomFromWheel(event: WheelEvent) {
+  if (event.deltaY === 0) return;
+  let newScale: number;
   const isPinch = event.ctrlKey && event.deltaMode === 0 && Math.abs(event.deltaY) < 50;
   if (isPinch) {
-    scale.value = Math.max(0.1, Math.min(10, scale.value * Math.exp(-event.deltaY / 96)));
+    newScale = Math.max(0.1, Math.min(10, scale.value * Math.exp(-event.deltaY / 96)));
   } else {
     const zoomFactor = 0.1;
-    scale.value = event.deltaY < 0
+    newScale = event.deltaY < 0
       ? Math.min(scale.value * (1 + zoomFactor), 10)
       : Math.max(scale.value * (1 - zoomFactor), 0.1);
   }
+  zoomAtCursor(event, newScale);
+}
+
+function zoomAtCursor(event: WheelEvent, newScale: number) {
+  const container = getTransformContainer(getActivePlayer());
+  if (container) {
+    const rect = container.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      // Convert the cursor to layout coordinates, accounting for UI scaling.
+      const x = (event.clientX - rect.left) * container.clientWidth / rect.width - container.clientWidth / 2;
+      const y = (event.clientY - rect.top) * container.clientHeight / rect.height - container.clientHeight / 2;
+      zoomAtPosition(x, y, newScale);
+      return;
+    }
+  }
+  zoomAtPosition(0, 0, newScale);
+}
+
+// Coordinates are relative to the viewport center; buttons use (0, 0).
+function zoomAtPosition(x: number, y: number, newScale: number) {
+  const ratio = newScale / scale.value;
+  viewportOffset.value = {
+    x: x - (x - viewportOffset.value.x) * ratio,
+    y: y - (y - viewportOffset.value.y) * ratio,
+  };
+  scale.value = newScale;
   isFit.value = false;
   updateTransform();
 }
@@ -821,7 +957,7 @@ onMounted(async () => {
 
   if (videoContainer.value) {
     resizeObserver = new ResizeObserver(() => {
-      updateTransform({ recalcScale: true });
+      updateTransform({ recalcScale: isFit.value });
     });
     resizeObserver.observe(videoContainer.value);
     const el = videoContainer.value as HTMLElement;
@@ -837,6 +973,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   currentLoadingId++;
+  clearPlaybackFeedback();
   resetLoadingUi();
   resizeObserver?.disconnect();
   if (videoContainer.value) {
@@ -865,8 +1002,8 @@ onBeforeUnmount(() => {
   });
 });
 
-watch(() => props.filePath, (newPath) => {
-  if (newPath) loadVideo(newPath);
+watch(() => [props.filePath, props.originalUnavailable], ([newPath]) => {
+  if (newPath) loadVideo(String(newPath));
 });
 
 watch(() => props.rotate, (val) => {
@@ -899,6 +1036,7 @@ watch(() => props.isActive, (isActive) => {
   const player = getActivePlayer();
   if (!player) return;
   if (!isActive) {
+    clearPlaybackFeedback();
     player.pause();
     player.muted(true);
     return;
@@ -906,24 +1044,23 @@ watch(() => props.isActive, (isActive) => {
   player.volume(config.video.volume);
   player.muted(config.video.muted);
   if (props.playOnActivate && !isPlaying.value) {
+    // Live/Motion Photo hover starts a new preview, rather than resuming it.
+    player.currentTime(0);
     player.play().catch(() => {});
   }
 });
 
 const zoomIn = () => {
-  scale.value = Math.min(scale.value * 2, 10);
-  updateTransform();
+  zoomAtPosition(0, 0, Math.min(scale.value * 2, 10));
 };
 const zoomOut = () => {
-  scale.value = Math.max(scale.value / 2, 0.1);
-  updateTransform();
+  zoomAtPosition(0, 0, Math.max(scale.value / 2, 0.1));
 };
 const zoomActual = () => {
-  scale.value = 1;
-  updateTransform();
+  zoomAtPosition(0, 0, 1);
 };
-const rotateRight = () => {
-  rotate.value = (rotate.value + 90) % 360;
+const rotateView = (delta = 90) => {
+  rotate.value += delta;
   updateTransform();
 };
 const togglePlay = () => {
@@ -1014,7 +1151,7 @@ defineExpose({
   zoomIn,
   zoomOut,
   zoomActual,
-  rotateRight,
+  rotateView,
   togglePlay,
   getViewportState,
   applyViewportState,
@@ -1083,27 +1220,18 @@ function handleWheel(event: WheelEvent) {
     if (gestureType.value === 'zoom' || Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
       const zoomFactor = 0.01;
       const delta = -event.deltaY * zoomFactor;
-      scale.value = Math.max(0.1, Math.min(10, scale.value + delta));
-      updateTransform();
+      zoomAtCursor(event, Math.max(0.1, Math.min(10, scale.value + delta)));
     }
   } else {
     if (config.settings.mouseWheelMode === 0) {
       if (event.ctrlKey) {
-        const zoomFactor = 0.1;
-        scale.value = event.deltaY < 0
-          ? Math.min(scale.value * (1 + zoomFactor), 10)
-          : Math.max(scale.value * (1 - zoomFactor), 0.1);
-        updateTransform();
+        applyZoomFromWheel(event);
       } else {
         const direction = event.deltaY < 0 ? 'prev' : 'next';
         emit('message-from-video-viewer', { message: direction });
       }
     } else {
-      const zoomFactor = 0.1;
-      scale.value = event.deltaY < 0
-        ? Math.min(scale.value * (1 + zoomFactor), 10)
-        : Math.max(scale.value * (1 - zoomFactor), 0.1);
-      updateTransform();
+      applyZoomFromWheel(event);
     }
   }
 }
@@ -1159,5 +1287,20 @@ function handleWheel(event: WheelEvent) {
 .loading-overlay-leave-to {
   opacity: 0;
   transform: translateY(4px);
+}
+.playback-overlay-enter-active,
+.playback-overlay-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.playback-overlay-enter-from,
+.playback-overlay-leave-to {
+  opacity: 0;
+  transform: scale(0.8);
+}
+.playback-overlay-leave-active {
+  pointer-events: none;
+}
+.playback-overlay-leave-active > div {
+  pointer-events: none;
 }
 </style>
