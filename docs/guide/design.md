@@ -403,7 +403,7 @@ Logic:
 
 **Hash Calculation:**
 - BLAKE3, streamed in 64 KB chunks (flat memory)
-- Computed only for files whose `size` is shared with another file (a unique size cannot be an exact duplicate) and whose stored `mtime` differs from the file's `modified_at`
+- Computed only for files whose `size` is shared with another file (a unique size cannot be an exact duplicate) and whose stored `mtime` or `file_size` differs from the file's current `modified_at` / `size`
 - Stored in `file_hashes`, keyed by `file_id`; `hash` is intentionally non-unique so copies group together in `duplicate_groups`
 
 #### Dedup Performance & Resource Contention
@@ -414,23 +414,20 @@ Logic:
 - Result: Most files in a typical photo library skip hashing entirely
 
 **Performance estimates:**
-- **Mixed photo/video library** (diverse file sizes): typically 10-20% of files need hashing; rest skipped by size filter
+- **Mixed photo/video library** (diverse file sizes): only same-size candidates are hashed; the rest are skipped by the size filter (fraction not measured)
 - **Worst case** (many same-size files, e.g., fixed-size RAW stacks or exports): approaches 100% read
   - **HDD** (100-150 MB/s throughput): 2-3 hours to read 1 TB
   - **SSD** (500 MB/s throughput): ~35 minutes to read 1 TB
   - BLAKE3 is not the bottleneck; disk I/O is
-- **Re-scan** (unchanged files): minutes only; mtime check skips unchanged files, cost is DB queries
+- **Re-scan** (unchanged files): minutes only; mtime and size check skips unchanged files, cost is DB queries
 
 **Threading & Resource Contention:**
 - Dedup runs on its own `std::thread::spawn` thread (not Tokio async; runs in parallel with UI)
-- Thumbnails and embeddings are throttled by `ProcessingBudget` semaphores (Tokio, capped at 4 concurrent by default)
+- Thumbnails and embeddings are throttled by `ProcessingBudget` semaphores (Tokio; lane sizes derive from `available_parallelism`: 70% of cores split between normal and heavy thumbnail lanes, embeddings limited to 1)
 - **Dedup hashing is NOT under those semaphores**, so it can compete with thumbnail generation for disk bandwidth
 - Recommendation for future: gate dedup hashing behind a low-priority semaphore, or pause while thumbnail/embedding queues are busy
 
-**Known gap in incremental detection:**
-- `check_if_needs_hash` compares only `mtime`, not file size
-- A file replaced with identical `mtime` but different content would retain a stale hash
-- File size is already stored in `file_hashes`; should also be compared for robust change detection
+**Incremental detection:** `check_if_needs_hash` compares both `mtime` and `file_size` against `file_hashes`, so a replaced file with an unchanged mtime but a different size is re-hashed. A same-size, same-mtime content change is still undetected.
 
 ### Thumbnail Generation Pipeline
 
@@ -523,7 +520,7 @@ for task in tasks {
 |-----------|-----------|-------|
 | Initial index (n files) | O(n) | Linear WalkDir traversal |
 | EXIF extraction | O(1) | Per-file constant time |
-| Hash calculation | O(file_size) per candidate | Only same-size candidates are read; unchanged files skipped by mtime |
+| Hash calculation | O(file_size) per candidate | Only same-size candidates are read; unchanged files skipped by mtime and size |
 | Thumbnail gen | O(w×h) | Proportional to image dimensions |
 | Re-scan (unchanged) | O(n) | Still traverses all, but resume available |
 

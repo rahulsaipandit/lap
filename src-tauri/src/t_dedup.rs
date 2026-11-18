@@ -509,17 +509,18 @@ fn check_if_needs_hash(conn: &Connection, file: &AFile) -> Result<bool, String> 
     let mtime = file.modified_at.unwrap_or(0);
     let id = file.id.unwrap();
 
-    let db_mtime: Option<i64> = conn
+    let stored: Option<(i64, i64)> = conn
         .query_row(
-            "SELECT mtime FROM file_hashes WHERE file_id = ?1",
+            "SELECT mtime, file_size FROM file_hashes WHERE file_id = ?1",
             params![id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
 
-    match db_mtime {
-        Some(stored_mtime) => Ok(stored_mtime != mtime),
+    // Re-hash when either mtime or size changed; a replaced file can keep its mtime.
+    match stored {
+        Some((stored_mtime, stored_size)) => Ok(stored_mtime != mtime || stored_size != file.size),
         None => Ok(true),
     }
 }
@@ -2475,5 +2476,27 @@ mod keep_rules_tests {
             }
             println!("PASS {}", case.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod needs_hash_tests {
+    use super::*;
+
+    fn file(id: i64, size: i64, mtime: i64) -> AFile {
+        AFile { id: Some(id), size, modified_at: Some(mtime), ..Default::default() }
+    }
+
+    #[test]
+    fn rehashes_when_size_changes_even_if_mtime_matches() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file_hashes(file_id INTEGER PRIMARY KEY, hash TEXT, file_size INTEGER, mtime INTEGER);
+             INSERT INTO file_hashes VALUES (1,'h',100,10);",
+        ).unwrap();
+        assert!(!check_if_needs_hash(&conn, &file(1, 100, 10)).unwrap(), "unchanged file is skipped");
+        assert!(check_if_needs_hash(&conn, &file(1, 200, 10)).unwrap(), "size change with same mtime");
+        assert!(check_if_needs_hash(&conn, &file(1, 100, 11)).unwrap(), "mtime change");
+        assert!(check_if_needs_hash(&conn, &file(2, 100, 10)).unwrap(), "no stored hash");
     }
 }
