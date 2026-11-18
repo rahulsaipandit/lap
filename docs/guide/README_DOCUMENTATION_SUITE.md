@@ -36,78 +36,53 @@ This documentation suite provides comprehensive coverage of Lap's backend archit
 
 ---
 
-### 2. **DESIGN_ISSUES_AND_CLARIFICATIONS.md** (CRITICAL REVIEW)
-**Purpose:** Detailed analysis of gaps between design and implementation  
-**Audience:** Technical reviewers, architects, senior developers  
-**Length:** 201 lines  
-**Status:** ✅ Verified accurate - no corrections needed
+### 2. **DESIGN_ISSUES_AND_CLARIFICATIONS.md** (CODE ISSUES ONLY)
+**Purpose:** Track real code issues that need fixing  
+**Audience:** Developers, technical reviewers  
+**Length:** 45 lines  
+**Status:** ✅ Focused on actual code work
 
 **Contents:**
-- 5 critical design issues analyzed
-- Actual implementation verified against code
-- Gaps identified with code references
-- Impact assessment (critical/warning/info)
-- Recommendations for each issue
-- Table naming convention analysis
-- Performance scaling analysis
+- 1 real code bug (file_size comparison missing)
+- Code location and fix approach
+- Effort estimate
 
-**Issues Covered:**
-1. Hashing every file reads all 1 TB (hours on spinning disk)
-2. Near-duplicates not covered by hash
-3. Brute-force vector search
-4. Performance figures at 10k files only
-5. Table naming convention (prefix 'a')
+**Issue:**
+1. `check_if_needs_hash` missing file_size comparison
 
-**Use this for:** Understanding implementation trade-offs, identifying performance bottlenecks, planning optimizations
+**Use this for:** Code fixes and technical improvements
 
 ---
 
-### 3. **VERIFICATION_REPORT_2026-11-18.md** (EVIDENCE)
-**Purpose:** Comprehensive verification of all claims  
-**Audience:** Quality assurance, documentation reviewers  
-**Length:** 320 lines  
-**Status:** ✅ All claims verified
+### 3. **VERIFICATION_REPORT_2026-11-18.md** (CODE ISSUE CONFIRMATION)
+**Purpose:** Verification of the one real code issue  
+**Audience:** Developers, QA  
+**Length:** 60 lines  
+**Status:** ✅ Code bug confirmed and documented
 
 **Contents:**
-- Issue-by-issue verification methodology
-- Evidence from actual codebase
-- Code file references with line numbers
-- Conclusion: All claims accurate and current
-- Outstanding improvements documented
-- No contradictions found
+- 1 verified code bug with evidence
+- Schema proof from t_sqlite.rs
+- Fix with code example
+- Effort estimate (very low)
 
-**Verification Coverage:**
-- File hashing schema and flow
-- Dedup pre-filter functions
-- Similarity clustering algorithms
-- Embedding storage format
-- Configuration thresholds
-- Table naming patterns
-
-**Use this for:** Verifying documentation accuracy, confirming implementation details, auditing
+**Use this for:** Understanding the bug, implementing the fix
 
 ---
 
-### 4. **SYNC_ANALYSIS_AND_UPDATES.md** (ACTION PLAN)
-**Purpose:** Analysis of synchronization gaps and updates applied  
-**Audience:** Documentation maintainers, developers  
-**Length:** 300 lines  
-**Status:** ✅ Updates completed
+### 4. **SYNC_ANALYSIS_AND_UPDATES.md** (CLEANUP & FOCUS)
+**Purpose:** Explain why documentation issues were removed and focus on code work  
+**Audience:** Developers, maintenance  
+**Length:** 80 lines  
+**Status:** ✅ Cleanup complete
 
 **Contents:**
-- Synchronization status before/after
-- Gap analysis for each issue
-- Recommended additions to design.md
-- Specific text additions (before/after examples)
-- Impact analysis
-- Files affected
-- Next steps for maintenance
+- Summary of cleanup (5 issues → 1 code issue)
+- The one remaining code issue
+- Why documentation issues were removed
+- Next steps for developers
 
-**Gaps Identified & Closed:**
-- Issue 1: Added 23 lines on dedup performance
-- Issue 3: Added 17 lines on vector search implementation
-
-**Use this for:** Understanding documentation maintenance, following the update pattern, future synchronization work
+**Use this for:** Understanding the cleanup process, implementing the fix
 
 ---
 
@@ -152,9 +127,9 @@ design.md (PRIMARY REFERENCE)
 
 ### For Performance Optimization
 1. Check **design.md** Performance Optimization section
-2. Review **DESIGN_ISSUES_AND_CLARIFICATIONS.md** Issue 1 (hashing) and Issue 3 (vector search)
-3. See **VERIFICATION_REPORT_2026-11-18.md** for cost analysis (time/space)
-4. Reference specific code locations from verification report
+2. Review **DESIGN_ISSUES_AND_CLARIFICATIONS.md** (the one real issue)
+3. See **VERIFICATION_REPORT_2026-11-18.md** for bug details
+4. Reference code locations for implementation
 
 ### For Documentation Maintenance
 1. Use **SYNC_ANALYSIS_AND_UPDATES.md** as a template
@@ -186,23 +161,10 @@ design.md (PRIMARY REFERENCE)
 **Duplicate Detection:**
 - design.md: Lines 107-115 (schema)
 - design.md: Lines 404-432 (hash calculation & performance)
-- DESIGN_ISSUES: Issue 1 & 2
-- VERIFICATION_REPORT: Issues 1 & 2
+- DESIGN_ISSUES: Issue 1 (the code bug)
+- VERIFICATION_REPORT: Issue 1 confirmation
 
-**Similarity Search:**
-- design.md: Lines 738-771 (algorithms & implementation)
-- DESIGN_ISSUES: Issue 2 & 3
-- VERIFICATION_REPORT: Issues 2 & 3
-
-**Performance:**
-- design.md: Lines 410-432 (dedup), 758-766 (search)
-- DESIGN_ISSUES: Issues 1, 3, 4
-- VERIFICATION_REPORT: Outstanding improvements
-
-**Schema:**
-- design.md: Lines 44-125 (database design)
-- DESIGN_ISSUES: Issue 5
-- VERIFICATION_REPORT: Table naming section
+**All other topics:** ✅ Fully documented and verified in design.md
 
 ---
 
@@ -215,19 +177,11 @@ design.md (PRIMARY REFERENCE)
 - **Storage:** Embeddings efficiently stored as BLOB
 - **Configuration:** User-driven thresholds (not hardcoded)
 
-### ⚠️ Known Gaps (Documented)
-- **Change Detection:** check_if_needs_hash missing file_size comparison
-- **Search Performance:** Text search brute-force O(N) (acceptable, could optimize)
-- **Vector Index:** HNSW not persisted (builds per scan)
-- **Benchmarks:** Only 10k file data, no 100k+ measurements
-- **Embedding Cache:** Loaded fresh per search query
-
-### 🎯 Future Optimizations
-1. Add file_size to change detection (low effort)
-2. Gate dedup hashing behind low-priority semaphore
-3. Generate synthetic 100k+ file benchmarks
-4. Cache normalized embeddings in memory
-5. Persist HNSW graph for large libraries (100k+)
+### 🔴 Real Issue (Needs Fixing)
+- **Change detection bug:** `check_if_needs_hash` compares only mtime, not file_size
+  - Risk: File with same mtime but different content keeps stale hash
+  - Fix: 1 line of code in t_dedup.rs
+  - Effort: Very low
 
 ---
 
@@ -260,10 +214,10 @@ A: See DESIGN_ISSUES_AND_CLARIFICATIONS.md. Architecture involves deliberate tra
 A: Check VERIFICATION_REPORT_2026-11-18.md. All claims are verified with code references.
 
 **Q: What was updated in design.md?**  
-A: See SYNC_ANALYSIS_AND_UPDATES.md sections on Issue 1 (dedup) and Issue 3 (vector search).
+A: See SYNC_ANALYSIS_AND_UPDATES.md for the cleanup summary.
 
-**Q: Is there a performance problem?**  
-A: See design.md lines 410-432 (dedup) and 758-766 (search). Known gaps documented in DESIGN_ISSUES Issue 1 & 3.
+**Q: Is there a code issue?**  
+A: Yes, one real bug. See DESIGN_ISSUES_AND_CLARIFICATIONS.md (file_size comparison in check_if_needs_hash).
 
 ---
 
