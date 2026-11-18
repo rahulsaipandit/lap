@@ -65,166 +65,61 @@ Lap uses SQLite to store library metadata locally. The database is initialized d
 
 #### Core Tables
 
-**albums** — Photo folders/libraries
+Table names are mixed: older tables carry an `a` prefix (`afiles`, `afolders`, ...), newer ones do not. The prefix is historical and carries no meaning. Columns below are abridged; see `t_sqlite.rs` and `t_migration.rs` for the full definitions.
+
+**albums** — Photo folders/libraries (`id, name, path UNIQUE, display_order_id, cover_file_id, description, indexed, total, last_scan_time, ...`)
+
+**afolders** — Hierarchical folder structure (`id, album_id, parent_id, name, path, is_excluded_from_search, ...`)
+
+**afiles** — Photo/video metadata, one row per file
 ```sql
-CREATE TABLE albums (
+-- abridged
+afiles (
   id INTEGER PRIMARY KEY,
-  name TEXT,
-  path TEXT UNIQUE,
-  created_at INTEGER,
-  modified_at INTEGER,
-  display_order_id INTEGER,
-  cover_file_id INTEGER,
-  description TEXT,
-  indexed INTEGER,     -- Indexed file count
-  total INTEGER,       -- Total file count
-  last_scan_time INTEGER
-);
+  folder_id INTEGER,       -- FK to afolders
+  name TEXT, size INTEGER,
+  file_type INTEGER,       -- image / video / RAW classification
+  created_at, modified_at, taken_date,
+  width, height, duration,
+  icc_profile, color_space, bit_depth,
+  is_favorite, rating, culling_flag, rotate, comments,
+  has_tags, has_faces,
+  e_make, e_model, e_lens_make, e_lens_model, e_exposure_time,
+  e_f_number, e_focal_length, e_iso_speed, e_title, e_headline,
+  e_description, e_artist, ...,   -- EXIF/XMP fields live here, not in a separate table
+  embeds BLOB              -- CLIP image embedding (little-endian f32 x 512), NULL until indexed
+)
+```
+There is no `file_hash` column and no separate embeddings table.
+
+**athumbs** — Cached thumbnails keyed by file.
+
+**atags / afile_tags** — Tags (hierarchical: `atags.parent_id` self-reference, `UNIQUE` name) and the file-to-tag link (`PRIMARY KEY (file_id, tag_id)`). **axmp_tag_paths** records XMP tag path sources.
+
+**acollections / acollections_files** — Flexible file groupings not tied to the filesystem.
+
+**persons / faces** — Face recognition
+```sql
+persons (id, name, cover_face_id, thumbnail BLOB, created_at, locked)
+faces   (id, file_id, bbox TEXT, embedding BLOB, person_id, created_at, ignored)
 ```
 
-**files** — Photo/video metadata
+**file_hashes / duplicate_groups / duplicate_group_items** — Exact-duplicate detection
 ```sql
-CREATE TABLE files (
-  id INTEGER PRIMARY KEY,
-  album_id INTEGER,
-  file_path TEXT,
-  file_name TEXT,
-  file_size INTEGER,
-  file_type INTEGER,   -- 0: Image, 1: RAW, 2: Video
-  created_at INTEGER,  -- Photo capture time (from EXIF or file mtime)
-  modified_at INTEGER,
-  width INTEGER,
-  height INTEGER,
-  duration INTEGER,    -- Video duration in ms
-  orientation INTEGER, -- 1-8 (EXIF orientation)
-  file_hash TEXT UNIQUE,
-  indexed_at INTEGER,
-  FOREIGN KEY (album_id) REFERENCES albums(id)
-);
+file_hashes (
+  file_id INTEGER PRIMARY KEY,   -- one row per file
+  hash TEXT NOT NULL,            -- BLAKE3; intentionally NOT unique
+  file_size INTEGER NOT NULL, mtime INTEGER NOT NULL, computed_at INTEGER NOT NULL
+)  -- index on (hash, file_size)
+duplicate_groups (id, hash, file_size, file_count, total_size, reviewed, updated_at)
+  -- UNIQUE (hash, file_size)
+duplicate_group_items (group_id, file_id, is_keep, is_selected, score)  -- PK (group_id, file_id)
 ```
+Flow: `afiles -> file_hashes -> duplicate_groups -> duplicate_group_items`.
 
-**folders** — Hierarchical folder structure
-```sql
-CREATE TABLE folders (
-  id INTEGER PRIMARY KEY,
-  album_id INTEGER,
-  name TEXT,
-  path TEXT,
-  parent_id INTEGER,
-  FOREIGN KEY (album_id) REFERENCES albums(id)
-);
-```
+**similarity_scans / similarity_groups / similarity_group_items** — Visual near-duplicate scan results, scoped by `scope_key` (items carry `score`, `is_keep`).
 
-**ai_embeddings** — Image search embeddings
-```sql
-CREATE TABLE ai_embeddings (
-  id INTEGER PRIMARY KEY,
-  file_id INTEGER UNIQUE,
-  embedding BLOB,      -- Binary embedding vector
-  model_kind INTEGER,  -- 0: Default, 1: Multilingual
-  FOREIGN KEY (file_id) REFERENCES files(id)
-);
-```
-
-**faces** — Face detection results
-```sql
-CREATE TABLE faces (
-  id INTEGER PRIMARY KEY,
-  file_id INTEGER,
-  bbox_data TEXT,      -- JSON: {x, y, width, height, confidence, landmarks}
-  embedding BLOB,      -- Face embedding vector
-  processed_at INTEGER,
-  FOREIGN KEY (file_id) REFERENCES files(id)
-);
-```
-
-**people** — Face clusters (groups of similar faces)
-```sql
-CREATE TABLE people (
-  id INTEGER PRIMARY KEY,
-  name TEXT,
-  cover_face_id INTEGER,
-  created_at INTEGER,
-  updated_at INTEGER
-);
-```
-
-**tags** — User-defined tags
-```sql
-CREATE TABLE tags (
-  id INTEGER PRIMARY KEY,
-  name TEXT UNIQUE,
-  created_at INTEGER
-);
-```
-
-**file_tags** — Tag associations
-```sql
-CREATE TABLE file_tags (
-  id INTEGER PRIMARY KEY,
-  file_id INTEGER,
-  tag_id INTEGER,
-  FOREIGN KEY (file_id) REFERENCES files(id),
-  FOREIGN KEY (tag_id) REFERENCES tags(id)
-);
-```
-
-**collections** — Flexible file groupings (not tied to filesystem)
-```sql
-CREATE TABLE collections (
-  id INTEGER PRIMARY KEY,
-  name TEXT,
-  description TEXT,
-  created_at INTEGER,
-  updated_at INTEGER
-);
-```
-
-**collection_items** — Collection membership
-```sql
-CREATE TABLE collection_items (
-  id INTEGER PRIMARY KEY,
-  collection_id INTEGER,
-  file_id INTEGER,
-  FOREIGN KEY (collection_id) REFERENCES collections(id),
-  FOREIGN KEY (file_id) REFERENCES files(id)
-);
-```
-
-**file_metadata** — Extended metadata
-```sql
-CREATE TABLE file_metadata (
-  id INTEGER PRIMARY KEY,
-  file_id INTEGER UNIQUE,
-  camera TEXT,
-  lens TEXT,
-  iso INTEGER,
-  shutter_speed TEXT,
-  aperture REAL,
-  focal_length REAL,
-  gps_latitude REAL,
-  gps_longitude REAL,
-  gps_altitude REAL,
-  gps_timestamp INTEGER,
-  FOREIGN KEY (file_id) REFERENCES files(id)
-);
-```
-
-**smart_albums** — Saved rule-based queries
-```sql
-CREATE TABLE smart_albums (
-  id INTEGER PRIMARY KEY,
-  name TEXT,
-  description TEXT,
-  source TEXT,         -- 'rules', 'manual'
-  query_config TEXT,   -- JSON: {version, match, rules}
-  sort_config TEXT,    -- JSON: {type, order}
-  group_config TEXT,   -- JSON: {type}
-  cover_file_id INTEGER,
-  created_at INTEGER,
-  updated_at INTEGER
-);
-```
+**folder_scan_state** — Per-folder scan/resume state.
 
 ---
 
@@ -283,9 +178,9 @@ Tauri commands (`#[tauri::command]`) provide the bridge between the Vue frontend
 - `update_file_comment(file_id: i64, comment: String)` → Add/edit comment
 
 #### Smart Albums
-- `save_smart_album(config)` → Create or update saved query
-- `query_smart_album(album_id: i64)` → Execute smart album query
-- `delete_smart_album(album_id: i64)` → Remove saved query
+- Smart albums are saved in the app config (`t_config.rs`), not in a database table; saving is a config update
+- `get_smart_query_files(params)` / `get_smart_query_count_and_sum` / `get_smart_query_time_line` → Execute a smart album query
+- Deleting a smart album removes its entry from the config
 
 #### Utility
 - `open_file_in_explorer(path: String)` → Open file location in system explorer
@@ -507,9 +402,9 @@ Logic:
 - Extract creation date from container metadata
 
 **Hash Calculation:**
-- BLAKE3 on entire file contents
-- Stored in `file_hash` column (UNIQUE constraint)
-- Enables deduplication detection
+- BLAKE3, streamed in 64 KB chunks (flat memory)
+- Computed only for files whose `size` is shared with another file (a unique size cannot be an exact duplicate) and whose stored `mtime` differs from the file's `modified_at`
+- Stored in `file_hashes`, keyed by `file_id`; `hash` is intentionally non-unique so copies group together in `duplicate_groups`
 
 ### Thumbnail Generation Pipeline
 
@@ -602,7 +497,7 @@ for task in tasks {
 |-----------|-----------|-------|
 | Initial index (n files) | O(n) | Linear WalkDir traversal |
 | EXIF extraction | O(1) | Per-file constant time |
-| Hash calculation | O(file_size) | Full file read required |
+| Hash calculation | O(file_size) per candidate | Only same-size candidates are read; unchanged files skipped by mtime |
 | Thumbnail gen | O(w×h) | Proportional to image dimensions |
 | Re-scan (unchanged) | O(n) | Still traverses all, but resume available |
 
@@ -618,7 +513,7 @@ for task in tasks {
 
 #### Empirical Performance
 
-**Test: 10,000 mixed images/RAW/videos**
+**Test: 10,000 mixed images/RAW/videos** (measured at 10k only; larger sizes are unmeasured, see DESIGN_ISSUES_AND_CLARIFICATIONS.md)
 - Traversal + metadata extraction: ~5-10 seconds
 - Thumbnail generation (4 concurrent): ~20-30 seconds
 - Total first index: ~30-40 seconds
@@ -794,7 +689,7 @@ Thumbnails are cached in Lap's application data directory and keyed by file hash
      - Store face record with embedding
 2. After detection:
    - Run hierarchical clustering on embeddings
-   - Build HNSW graph for fast similarity search (K=80 neighbors)
+   - Build HNSW graph for fast similarity search
    - Group faces into clusters (people)
 3. User can refine clusters manually
 
@@ -809,9 +704,13 @@ Thumbnails are cached in Lap's application data directory and keyed by file hash
 
 ### Similarity Search
 
-**Visual Similarity:** Euclidean distance in embedding space
-- Uses same vision model embeddings as text search
-- Finds images with similar color, composition, subject matter
+**Text / image-by-example search:** cosine similarity over `afiles.embeds`, computed by a linear scan in Rust (O(N) per query; no ANN index). Thresholds come from settings (text search presets 0.255-0.32; "find related photos" 0.7).
+
+**Visual near-duplicate grouping** (`t_similar.rs`):
+- CLIP embeddings indexed in an in-memory HNSW graph (cosine distance; M=16, ef_construction=200, search ef=200, top 63 neighbours)
+- Pairs at or above the user-selected threshold (presets 0.97 / 0.93 / 0.90 / 0.85, default 0.93) become edges
+- Complete-linkage clustering: two clusters merge only if every cross pair meets the threshold; groups are capped at 64 files
+- Exact duplicates use BLAKE3 (see Hash Calculation), not this path; no perceptual hash is implemented
 
 **Configuration:**
 - Min confidence threshold: 0.65
@@ -894,8 +793,7 @@ Located in app data directory; persists:
 - **Cancellation Support:** User can stop indexing mid-process
 
 ### Query Optimization
-- **SQLite Indexes:** On `file_id`, `album_id`, `created_at`, `file_hash`
-- **Smart Album Compilation:** Pre-compute rule matching for caching
+- **SQLite Indexes:** On foreign keys (`file_id`, `folder_id`, `album_id`), `file_hashes(hash, file_size)`, and others defined in `t_sqlite.rs` / `t_migration.rs`
 - **Pagination:** Fetch 100 items per page by default
 - **Lazy Loading:** Load metadata on-demand, not all at startup
 
@@ -967,7 +865,7 @@ Located in app data directory; persists:
 - Update file type detection logic
 
 ### Custom Metadata Extraction
-- EXIF → Extend `t_sqlite.rs` file_metadata table
+- EXIF → Add columns to `afiles` in `t_sqlite.rs` (plus a migration in `t_migration.rs`)
 - GPS → Add Leaflet map integration in frontend
 - Custom XMP → Parse and store in extended metadata
 
@@ -1036,14 +934,14 @@ This design document is supplemented by companion analysis documents:
 - **[INDEXING_ENGINE_ANALYSIS.md](./INDEXING_ENGINE_ANALYSIS.md)** — Quick-reference summary of the indexing engine architecture, algorithms, performance metrics, and code locations.
 
 - **[DESIGN_ISSUES_AND_CLARIFICATIONS.md](./DESIGN_ISSUES_AND_CLARIFICATIONS.md)** — Critical design review addressing architectural questions, performance considerations, and documentation gaps. Includes analysis of:
-  - Duplicate detection (file_hash handling)
+  - Duplicate detection (`file_hashes` handling)
   - Performance scaling to large libraries (1TB+)
   - Near-duplicate detection via visual similarity
-  - Vector search architecture (brute-force vs. ANN)
+  - Vector search architecture (brute-force cosine scan vs. ANN)
   - Table naming conventions
 
 ---
 
 **Document Version:** 1.0  
-**Last Updated:** 2026-01-18  
+**Last Updated:** 2026-11-18 (schema and similarity sections corrected against source)  
 **Project:** Lap v0.3.0
