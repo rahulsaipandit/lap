@@ -8,39 +8,7 @@ Each issue lists **Status** (what is still open in code vs. fixed in docs) and t
 
 ---
 
-## Issue 1: `file_hash UNIQUE` Conflicts with Duplicate Detection
-
-### What the old design doc claimed
-"File hash stored in `file_hash` column (UNIQUE constraint)" on the files table. Two identical photos share a BLAKE3 hash, so a UNIQUE constraint would contradict "show all duplicate copies".
-
-### Actual implementation (verified)
-There is no `file_hash` column. Hashes live in a separate table, and duplicates are materialised in two more:
-
-```
-file_hashes:
-  file_id INTEGER PRIMARY KEY  (FK to afiles, ON DELETE CASCADE)
-  hash TEXT NOT NULL           (NOT unique)
-  file_size INTEGER NOT NULL, mtime INTEGER NOT NULL, computed_at INTEGER NOT NULL
-  idx_file_hashes_hash_size (hash, file_size)  non-unique
-  (+ index on mtime)
-
-duplicate_groups:       id, hash, file_size, file_count, total_size, reviewed, updated_at
-                        UNIQUE INDEX uidx_duplicate_groups_hash_size (hash, file_size)
-duplicate_group_items:  PK (group_id, file_id), is_keep, is_selected, score
-```
-
-Flow: `afiles -> file_hashes (1 row/file) -> duplicate_groups (1 row per hash+size) -> duplicate_group_items (N files/group)`.
-
-`INSERT OR REPLACE INTO file_hashes` is safe because the conflict key is `file_id` (one row per file), not `hash`.
-`rebuild_duplicate_groups` groups by `(hash, file_size)` and creates a group for every pair with count > 1.
-
-### Status
-- Code: correct, nothing to change.
-- Doc: **fixed** in `design.md` (schema and "Hash Calculation" section).
-
----
-
-## Issue 2: Hashing Every File Reads All Data (Hours on 1TB)
+## Issue 1: Hashing Every File Reads All Data (Hours on 1TB)
 
 ### Correction to the original analysis
 The claim that every file is fully read on first run is wrong. Two filters run before any hashing:
@@ -68,7 +36,7 @@ Dedup runs on its own `std::thread::spawn` thread. Thumbnails and embeddings are
 
 ---
 
-## Issue 3: Near-Duplicates Not Covered by Hash
+## Issue 2: Near-Duplicates Not Covered by Hash
 
 ### What BLAKE3 detects
 Exact byte-for-byte copies only. Re-compressed, resized, rotated or edited copies are not found.
@@ -97,7 +65,7 @@ Limitation: HNSW returns approximate neighbours, so recall is not 100%, and only
 
 ---
 
-## Issue 4: Brute-Force Vector Search
+## Issue 3: Brute-Force Vector Search
 
 ### Corrections
 - There is **no `ai_embeddings` table**. Embeddings are a little-endian `f32` BLOB in `afiles.embeds` (`update_embedding` / `get_embedding_by_id` in `t_sqlite.rs`).
@@ -118,14 +86,14 @@ Limitation: HNSW returns approximate neighbours, so recall is not 100%, and only
 
 ---
 
-## Issue 5: Performance Figures at 10k Files Only
+## Issue 4: Performance Figures at 10k Files Only
 
 ### Benchmarks from the design doc
-| Operation | Claimed time (10k files) |
-|-----------|-------------------------|
-| Initial index | 30-40 s |
-| Re-scan (unchanged) | 5-10 s |
-| Thumbnail generation (4x) | 20-30 s |
+| Operation                 | Claimed time (10k files) |
+|---------------------------|--------------------------|
+| Initial index             | 30-40 s                  |
+| Re-scan (unchanged)       | 5-10 s                   |
+| Thumbnail generation (4x) | 20-30 s                  |
 
 ### Reality
 The figures were measured only at 10k files. Larger numbers in earlier versions were linear extrapolations and must not be presented as benchmarks. Expected non-linear effects: SQLite index growth, brute-force search (Issue 4), and the O(n x k) similarity pass. Dedup cost depends on the same-size candidate set (Issue 2), not library size.
@@ -136,7 +104,7 @@ The figures were measured only at 10k files. Larger numbers in earlier versions 
 
 ---
 
-## Issue 6: Table Naming and Schema Reference
+## Issue 5: Table Naming and Schema Reference
 
 ### Correction
 Earlier versions claimed all user tables use an `a` prefix and listed `apeople`, `afaces`, `asmart_albums`. Those names do not exist. `design.md` also documented tables that do not exist (`files`, `folders`, `ai_embeddings`, `people`, `tags`, `file_tags`, `collections`, `collection_items`, `file_metadata`, `smart_albums`). The real schema (from `CREATE TABLE` statements in `t_sqlite.rs` and `t_migration.rs`):
@@ -164,12 +132,11 @@ Other facts:
 
 | Issue | Doc status | Open code work |
 |-------|-----------|----------------|
-| 1. Hash UNIQUE | Fixed | None |
-| 2. 1TB hashing | Fixed | Optional: prefix pre-hash, hashing throttle, compare `file_size`, progress counts |
-| 3. Near-duplicates | Fixed | None (threshold now configurable) |
-| 4. Brute-force search | Fixed | Recommended: embedding cache, bounded heap; later: persisted HNSW |
-| 5. Performance figures | Fixed (relabelled) | Measure at 100k+ |
-| 6. Table names | Fixed | None |
+| 1. 1TB hashing | Fixed | Optional: prefix pre-hash, hashing throttle, compare `file_size`, progress counts |
+| 2. Near-duplicates | Fixed | None (threshold now configurable) |
+| 3. Brute-force search | Fixed | Recommended: embedding cache, bounded heap; later: persisted HNSW |
+| 4. Performance figures | Fixed (relabelled) | Measure at 100k+ |
+| 5. Table names | Fixed | None |
 
 ---
 

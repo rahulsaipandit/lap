@@ -10,15 +10,15 @@
 
 ### Technology Stack
 
-| Component | Technology | Purpose |
-|-----------|----------|---------|
-| **Framework** | Tauri 2.0 | Desktop application framework; bridges Rust backend with web frontend |
-| **Backend** | Rust (stable) | Core business logic, media processing, and AI inference |
-| **Database** | SQLite | Local file metadata, collections, tags, ratings, and library state |
-| **Frontend** | Vue 3 + Vite + Tailwind | User interface for browsing, organizing, and editing photos |
-| **AI Runtime** | ONNX Runtime | Local inference for image search, face detection, and embedding |
-| **Image Processing** | Multiple libraries | RAW/JPEG/HEIC decoding and thumbnail generation |
-| **Video Processing** | FFmpeg (sidecar) | Video thumbnail extraction and format compatibility |
+| Component            | Technology              | Purpose                                                               |
+|----------------------|-------------------------|-----------------------------------------------------------------------|
+| **Framework**        | Tauri 2.0               | Desktop application framework; bridges Rust backend with web frontend |
+| **Backend**          | Rust (stable)           | Core business logic, media processing, and AI inference               |
+| **Database**         | SQLite                  | Local file metadata, collections, tags, ratings, and library state    |
+| **Frontend**         | Vue 3 + Vite + Tailwind | User interface for browsing, organizing, and editing photos           |
+| **AI Runtime**       | ONNX Runtime            | Local inference for image search, face detection, and embedding       |
+| **Image Processing** | Multiple libraries      | RAW/JPEG/HEIC decoding and thumbnail generation                       |
+| **Video Processing** | FFmpeg (sidecar)        | Video thumbnail extraction and format compatibility                   |
 
 ### Module Organization
 
@@ -406,6 +406,32 @@ Logic:
 - Computed only for files whose `size` is shared with another file (a unique size cannot be an exact duplicate) and whose stored `mtime` differs from the file's `modified_at`
 - Stored in `file_hashes`, keyed by `file_id`; `hash` is intentionally non-unique so copies group together in `duplicate_groups`
 
+#### Dedup Performance & Resource Contention
+
+**Pre-filtering (why most files are skipped):**
+- `get_files_by_sizes` (SQL `HAVING COUNT(size) > 1 AND size > 0`) filters to only files whose size is shared by at least one other file
+- Files with unique size cannot be exact duplicates and are never hashed
+- Result: Most files in a typical photo library skip hashing entirely
+
+**Performance estimates:**
+- **Mixed photo/video library** (diverse file sizes): typically 10-20% of files need hashing; rest skipped by size filter
+- **Worst case** (many same-size files, e.g., fixed-size RAW stacks or exports): approaches 100% read
+  - **HDD** (100-150 MB/s throughput): 2-3 hours to read 1 TB
+  - **SSD** (500 MB/s throughput): ~35 minutes to read 1 TB
+  - BLAKE3 is not the bottleneck; disk I/O is
+- **Re-scan** (unchanged files): minutes only; mtime check skips unchanged files, cost is DB queries
+
+**Threading & Resource Contention:**
+- Dedup runs on its own `std::thread::spawn` thread (not Tokio async; runs in parallel with UI)
+- Thumbnails and embeddings are throttled by `ProcessingBudget` semaphores (Tokio, capped at 4 concurrent by default)
+- **Dedup hashing is NOT under those semaphores**, so it can compete with thumbnail generation for disk bandwidth
+- Recommendation for future: gate dedup hashing behind a low-priority semaphore, or pause while thumbnail/embedding queues are busy
+
+**Known gap in incremental detection:**
+- `check_if_needs_hash` compares only `mtime`, not file size
+- A file replaced with identical `mtime` but different content would retain a stale hash
+- File size is already stored in `file_hashes`; should also be compared for robust change detection
+
 ### Thumbnail Generation Pipeline
 
 #### Async Task-Based Design
@@ -711,6 +737,28 @@ Thumbnails are cached in Lap's application data directory and keyed by file hash
 - Pairs at or above the user-selected threshold (presets 0.97 / 0.93 / 0.90 / 0.85, default 0.93) become edges
 - Complete-linkage clustering: two clusters merge only if every cross pair meets the threshold; groups are capped at 64 files
 - Exact duplicates use BLAKE3 (see Hash Calculation), not this path; no perceptual hash is implemented
+
+#### Implementation Details
+
+**Embedding storage:**
+- Stored in `afiles.embeds` column as BLOB (not a separate table)
+- Format: little-endian f32 bytes (4 bytes per float; 512 floats = 2048 bytes per image)
+- Loaded via `get_embedding_by_id`; converted with `f32::from_le_bytes`
+
+**Text & image-by-example search (brute-force O(N)):**
+- Selects all files with embeddings, applying filters (album, file-type, exclusions)
+- Computes cosine similarity for each file in Rust
+- Keeps scores **strictly above** threshold (not >=)
+- Sorts all results by score descending; fetches file rows for display
+- **Cost per query:** reads N × 512 × 4 bytes (~2 KB per image)
+  - 100k images: ~200 MB read + cosine calculation per search
+  - 1M images: ~2 GB (too slow for interactive use without optimization)
+- Future optimization: cache normalized embeddings in memory, precompute norms, use bounded min-heap for results
+
+**Visual similarity grouping (HNSW O(log N)):**
+- HNSW graph is built in-memory per similarity scan; not persisted
+- Provides efficient approximate nearest-neighbor search for clustering
+- Distinct from text/image search, which remains brute-force (no HNSW index)
 
 **Configuration:**
 - Min confidence threshold: 0.65
