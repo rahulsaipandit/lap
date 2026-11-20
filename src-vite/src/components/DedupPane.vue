@@ -234,7 +234,7 @@
                       · {{ formatFileSize(getMediaItemSize(item.file)) }}
                     </div>
                     <div v-else-if="item.file?.[preferredDateField] > 0" class="text-[11px] text-base-content/30">
-                      {{ $t(`file_info.${preferredDateField}`) }}: {{ formatTimestamp(item.file[preferredDateField], 'date_time') }}
+                      {{ preferredDateLabel }}: {{ formatTimestamp(item.file[preferredDateField], 'date_time') }}
                     </div>
                   </div>
                   <div class="shrink-0 w-16 min-h-10 flex flex-col items-center justify-center gap-0.5">
@@ -278,6 +278,9 @@
                       >
                         <IconFlag class="w-3.5 h-3.5" />
                       </button>
+                    </div>
+                    <div @click.stop @dblclick.stop @keydown.stop>
+                      <ContextMenu :iconMenu="IconMore" :menuItems="() => dedupItemMenuItems(item)" :smallIcon="true" />
                     </div>
                   </div>
                 </div>
@@ -488,10 +491,10 @@
                     {{ formatDedupFolderPath(item.file) }}
                   </div>
                   <div v-if="item.file?.[preferredDateField] > 0" class="text-[11px] text-base-content/30">
-                    {{ $t(`file_info.${preferredDateField}`) }}: {{ formatTimestamp(item.file[preferredDateField], 'date_time') }}
+                    {{ preferredDateLabel }}: {{ formatTimestamp(item.file[preferredDateField], 'date_time') }}
                   </div>
                 </div>
-                <div class="shrink-0 w-16 min-h-10 flex items-center justify-center">
+                <div class="shrink-0 w-16 min-h-10 flex flex-col items-center justify-center gap-0.5">
                   <span v-if="item.is_keep === 1" class="thumb-badge">KEEP</span>
                   <PanelActionButton
                     v-else-if="item.can_set_keep !== false"
@@ -504,6 +507,9 @@
                   >
                     {{ $t('info_panel.dedup.keep_label') }}
                   </PanelActionButton>
+                  <div @click.stop @dblclick.stop @keydown.stop>
+                    <ContextMenu :iconMenu="IconMore" :menuItems="() => dedupItemMenuItems(item)" :smallIcon="true" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -545,7 +551,8 @@ import DedupSettings from './DedupSettings.vue';
 import TButton from '@/components/TButton.vue';
 import PanelActionButton from '@/components/PanelActionButton.vue';
 import MessageBox from '@/components/MessageBox.vue';
-import { IconAdjustments, IconSelectAll, IconExclamation, IconDeselect, IconClose, IconFlag, IconFlagFilled, IconFlagOff, IconLivePhoto, IconShield, IconRefresh, IconSplitOn, IconSplitOn4, IconTrash } from '@/common/icons';
+import { IconAdjustments, IconSelectAll, IconExclamation, IconDeselect, IconClose, IconFlag, IconFlagFilled, IconFlagOff, IconLivePhoto, IconShield, IconRefresh, IconSplitOn, IconSplitOn4, IconTrash, IconMore } from '@/common/icons';
+import ContextMenu from '@/components/ContextMenu.vue';
 import {
   dedupStartScan,
   dedupCancelScan,
@@ -569,6 +576,7 @@ import {
   similarHasScan,
   listenSimilarScanProgress,
   setFileCullingFlag,
+  revealPath,
 } from '@/common/api';
 import { config, libConfig } from '@/common/config';
 import { isOriginalUnavailable, setFileAccessibility } from '@/common/availability';
@@ -580,6 +588,16 @@ const dedupPaneGlobalState = ((globalThis as any).__lapDedupPaneState ||= {
 
 const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
 const { t } = useI18n();
+
+function dedupItemMenuItems(item: any) {
+  const filePath = item?.file?.file_path;
+  return [
+    {
+      label: isMac ? t('menu.file.reveal_in_finder') : t('menu.file.reveal_in_file_explorer'),
+      action: () => { if (filePath) revealPath(filePath); },
+    },
+  ];
+}
 
 const props = defineProps({
   selectedFileId: {
@@ -643,7 +661,16 @@ const keepRules = computed(() => ({
   folderIds: libConfig.dedupPreferredFolderIds ?? [],
 }));
 const preferredDateField = computed(() =>
-  ['createdEarliest', 'createdLatest'].includes(keepRules.value.preferredDate) ? 'created_at' : 'modified_at'
+  ['createdEarliest', 'createdLatest'].includes(keepRules.value.preferredDate)
+    ? 'created_at'
+    : ['takenEarliest', 'takenLatest'].includes(keepRules.value.preferredDate)
+      ? 'taken_date'
+      : 'modified_at'
+);
+const preferredDateLabel = computed(() =>
+  preferredDateField.value === 'taken_date'
+    ? t('info_panel.dedup.keep_rules.taken_label')
+    : t(`file_info.${preferredDateField.value}`)
 );
 const similarStatus = ref<any>({ phase: 'idle', current: 0, total: 0 });
 const similarGroups = ref<any[]>([]);
@@ -1857,6 +1884,8 @@ onMounted(async () => {
   });
 
   if (!props.dedupScanKey) {
+    // Mark ready so the dedupScanKey watcher can start the scan once the key arrives.
+    dedupScanReady = true;
     isDedupLoading.value = false;
     return;
   }

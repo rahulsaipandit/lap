@@ -739,7 +739,7 @@
     >
       <div class="space-y-3">
         <p class="text-xs text-base-content/60">{{ $t('settings.advanced.thumbnail_cache.migration_hint') }}</p>
-        <div class="text-xs text-base-content/75 break-all">{{ $t('settings.advanced.thumbnail_cache.new_location', { path: pendingThumbnailCacheDir === null ? $t('settings.database.system_default') : `${pendingThumbnailCacheDir}/lap-thumbnail-cache` }) }}</div>
+        <div class="text-xs text-base-content/75 break-all">{{ $t('settings.advanced.thumbnail_cache.new_location', { path: pendingThumbnailCacheDir === null ? $t('settings.database.system_default') : thumbnailCacheTargetPath(pendingThumbnailCacheDir) }) }}</div>
         <section class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
           <div class="font-bold uppercase text-[10px] tracking-widest text-base-content/30">{{ $t('settings.advanced.thumbnail_cache.migration_progress') }}</div>
           <div class="space-y-2 px-1 text-xs" role="status" aria-live="polite">
@@ -913,6 +913,12 @@ const hasCustomThumbnailCache = ref(false);
 const isChangingThumbnailCache = ref(false);
 const showThumbnailMigrationDialog = ref(false);
 const pendingThumbnailCacheDir = ref<string | null>(null);
+// Display path of the cache folder created inside the chosen directory, using the
+// separator the picker returned (backslash on Windows) instead of a hard-coded '/'.
+const thumbnailCacheTargetPath = (dir: string) => {
+  const sep = dir.includes('\\') ? '\\' : '/';
+  return `${dir.replace(/[\\/]+$/, '')}${sep}lap-thumbnail-cache`;
+};
 const thumbnailMigrationCancelling = ref(false);
 const thumbnailMigrationCancelled = ref(false);
 const thumbnailMigrationError = ref('');

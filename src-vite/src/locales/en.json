@@ -570,7 +570,10 @@
         "created_earliest": "Created earliest",
         "created_latest": "Created latest",
         "modified_earliest": "Modified earliest",
-        "modified_latest": "Modified latest"
+        "modified_latest": "Modified latest",
+        "taken_earliest": "Date taken earliest",
+        "taken_latest": "Date taken latest",
+        "taken_label": "Date taken"
       },
       "title": "Duplicates",
       "tabs": {

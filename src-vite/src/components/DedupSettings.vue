@@ -118,6 +118,8 @@
             <option value="createdLatest">{{ $t('info_panel.dedup.keep_rules.created_latest') }}</option>
             <option value="modifiedEarliest">{{ $t('info_panel.dedup.keep_rules.modified_earliest') }}</option>
             <option value="modifiedLatest">{{ $t('info_panel.dedup.keep_rules.modified_latest') }}</option>
+            <option value="takenEarliest">{{ $t('info_panel.dedup.keep_rules.taken_earliest') }}</option>
+            <option value="takenLatest">{{ $t('info_panel.dedup.keep_rules.taken_latest') }}</option>
           </select>
         </label>
       </section>

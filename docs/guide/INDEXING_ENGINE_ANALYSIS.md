@@ -153,6 +153,39 @@ let _global = thumb_background_generation_permits().acquire_owned().await?;
 - **Moved files / folders:** inode-based path migration (the `inode` column; `album-folder-paths-migrated` event)
 - **Cloud-only files:** recorded as stubs (`cloud_only`, `metadata_pending`) without reading content
 
+#### Adding a New Folder to an Existing Album:
+Indexing is scoped per album, and an album is a root folder. A new folder never triggers a re-index of unrelated albums. What happens depends on how the folder arrives:
+
+| Scenario | Mechanism | Scope |
+|----------|-----------|-------|
+| Added through the UI as a new album | `t_cmds::add_album`, then `index_album` | Only the new album is indexed; existing albums are untouched (each album has its own `indexed` / `total` state) |
+| Folder created on disk (e.g. in Windows Explorer) inside an existing album's path | **Automatic, no full index.** Folder sync by directory mtime (see trace below) | Only dirty folders (changed mtime) plus the new subfolders and their files; the rest of the album is not re-indexed |
+| Same, via the manual "refresh folders" action | `t_cmds::refresh_album_folders` -> `t_utils::sync_single_folder` (UI: `refreshFolders` in `AlbumFolder.vue`) | Refreshed folder's subtree only |
+| Same, but a full album re-scan is triggered | `index_album_worker` | Whole album is re-walked (O(n)). Already-indexed files only get a row update; thumbnails/embeddings are generated only for new or changed files (`AThumb::needs_refresh`) |
+| Folder created on disk outside every album path | Not seen by Lap | Nothing happens until it is added as an album |
+
+**Trace: new folder created on disk inside an existing album.** There is no filesystem watcher (none found in `src-tauri/src`); detection is by directory mtime at two moments:
+
+1. **App start / library switch** (`t_startup.rs` and `t_cmds.rs` call `t_utils::start_folder_mtime_sync`) -> `sync_dirty_folders_by_mtime`:
+   - Loops over every known folder (`AFolder::get_all`), skipping albums with an active scan or an inaccessible root.
+   - Compares each folder's on-disk mtime with the stored `modified_at`; unchanged folders are skipped. Creating a folder changes the **parent's** mtime, so the parent is queued.
+   - For each queued folder, `scan_new_child_folders` does a `read_dir`, and any subfolder with no `afolders` row is inserted with `AFolder::add_to_db` (after an inode check for renames/moves). New children are pushed onto the queue, so the whole new subtree is walked.
+   - `sync_folder_direct_files` then indexes the files directly in each folder (new / updated / deleted / renamed), and `schedule_synced_file_processing` generates thumbnails in the background (`thumbnail_ready` events). New files get thumbnails at `FOLDER_SYNC_THUMBNAIL_SIZE`.
+   - Emits `library-folder-sync-finished` and `library-total-refreshed` if anything changed.
+2. **Opening a folder in the UI** (`Content.vue`, album branch, folder selected) -> `syncAlbumFolderMtimes` -> `t_cmds::sync_album_folder_mtimes` -> `sync_single_folder` with the folder id:
+   - Runs once per folder selection (`lastSyncedAlbumFolder` key) and is debounced through `pendingFolderSyncs`.
+   - It checks the **opened folder only**: `scan_new_child_folders` adds new direct subfolders (`refresh_tree = false`, so it does not recurse and does not remove missing ones), and `sync_folder_direct_files` runs only if the folder mtime changed or `folder_files_changed` finds a new, changed or missing file. Files inside the new subfolder are not indexed until that subfolder is itself opened (or the startup/library-switch sweep runs).
+   - If `dirty_folder_count > 0` the UI reloads the file list and sidebar counts for that folder.
+   - Selecting the **album root** (`libConfig.album.selected`) skips this sync and just lists files from the DB.
+
+**Cost:** none of this goes through `index_album_worker`, so existing files are not re-processed, and there is no album-level progress bar or `indexed` / `total` update. Only the new folder's files are read and thumbnailed. The scan phase is a directory stat for every known folder (startup) or a single `read_dir` plus a one-level file comparison (open).
+
+**Caveats:**
+- Both sync paths are skipped while a full scan of the same album is active (`album_scan_active`) or the album is pending removal.
+- Files synced this way get thumbnails but, as far as the code shows, are not routed through the album indexer's embedding lane; whether AI embeddings are created later was not verified.
+- Because only mtime is checked at startup, a change that leaves a folder's mtime unchanged (for example an in-place edit of an existing file) is caught only when that folder is opened (`folder_files_changed`) or by a full re-scan.
+- Derived from reading the code; not run end to end.
+
 #### Resume Logic:
 ```
 if previous_total == current_total and 0 < previous_indexed < current_total:

@@ -216,6 +216,17 @@ fn scan_and_hash_files(
         files_to_check.extend(AFile::get_files_by_ids(&companion_ids)?
             .into_iter().filter(|file| file.id.is_some_and(|id| seen_ids.insert(id))));
     }
+    // The catalog can lag behind the disk; drop files deleted outside Lap and their cached
+    // hashes so they cannot be grouped as duplicates.
+    let (files_to_check, missing_ids) = split_missing_files(files_to_check);
+    if !missing_ids.is_empty() {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for id in &missing_ids {
+            tx.execute("DELETE FROM file_hashes WHERE file_id = ?1", params![id])
+                .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
     let files_to_check = filter_suspicious_files(files_to_check);
     let scoped_file_ids = if has_scope {
         Some(
@@ -489,6 +500,35 @@ pub fn get_files_by_collection(
     }
 
     Ok(all_files)
+}
+
+/// Splits off files whose path is confirmed gone from disk: NotFound while the parent
+/// folder is still readable. An unplugged drive or unreachable folder also reports
+/// NotFound, so those files are kept. Other errors, files without a path, and cloud
+/// placeholders (which still have metadata) are kept too.
+fn split_missing_files(files: Vec<AFile>) -> (Vec<AFile>, Vec<i64>) {
+    let mut present = Vec::with_capacity(files.len());
+    let mut missing = Vec::new();
+    let mut parent_ok: HashMap<std::path::PathBuf, bool> = HashMap::new();
+    for file in files {
+        let gone = file.file_path.as_deref().is_some_and(|path| {
+            if !matches!(std::fs::metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound) {
+                return false;
+            }
+            match std::path::Path::new(path).parent() {
+                Some(parent) => *parent_ok
+                    .entry(parent.to_path_buf())
+                    .or_insert_with(|| crate::t_utils::directory_accessible(&parent.to_string_lossy())),
+                None => false,
+            }
+        });
+        match (gone, file.id) {
+            (true, Some(id)) => missing.push(id),
+            (true, None) => {}
+            (false, _) => present.push(file),
+        }
+    }
+    (present, missing)
 }
 
 fn filter_suspicious_files(files: Vec<AFile>) -> Vec<AFile> {
@@ -1121,19 +1161,25 @@ pub enum PreferredDate {
     CreatedLatest,
     ModifiedEarliest,
     ModifiedLatest,
+    TakenEarliest,
+    TakenLatest,
 }
 
 impl PreferredDate {
     fn sort_key(self, candidate: &RuleCandidate) -> Option<i64> {
         let timestamp = match self {
             Self::CreatedEarliest | Self::CreatedLatest => candidate.created_at,
+            // Date taken, falling back to creation time when unavailable.
+            Self::TakenEarliest | Self::TakenLatest => {
+                if candidate.taken_date > 0 { candidate.taken_date } else { candidate.created_at }
+            }
             Self::ModifiedEarliest | Self::ModifiedLatest => candidate.modified_at,
         };
         if timestamp <= 0 {
             return None;
         }
         Some(match self {
-            Self::CreatedLatest | Self::ModifiedLatest => -timestamp,
+            Self::CreatedLatest | Self::ModifiedLatest | Self::TakenLatest => -timestamp,
             _ => timestamp,
         })
     }
@@ -1152,6 +1198,7 @@ struct RuleCandidate {
     created_at: i64,
     modified_at: i64,
     file_size: i64,
+    taken_date: i64,
 }
 
 impl RuleCandidate {
@@ -1239,7 +1286,7 @@ pub(crate) fn apply_keep_rules(
     };
     let pair_sql = pair_member_sql(group_raw_pairs);
     let sql = format!(
-        "SELECT i.group_id, i.file_id, i.is_keep, f.path || '/' || a.name, a.file_type, COALESCE(a.width,0), COALESCE(a.height,0), COALESCE(a.created_at,0), ({pair_sql}), a.format_label, COALESCE(a.modified_at,0), COALESCE(a.size,0) FROM {items} i JOIN {groups} g ON g.id=i.group_id JOIN afiles a ON a.id=i.file_id JOIN afolders f ON f.id=a.folder_id{scope} ORDER BY i.group_id, i.file_id"
+        "SELECT i.group_id, i.file_id, i.is_keep, f.path || '/' || a.name, a.file_type, COALESCE(a.width,0), COALESCE(a.height,0), COALESCE(a.created_at,0), ({pair_sql}), a.format_label, COALESCE(a.modified_at,0), COALESCE(a.size,0), COALESCE(a.taken_date,0) FROM {items} i JOIN {groups} g ON g.id=i.group_id JOIN afiles a ON a.id=i.file_id JOIN afolders f ON f.id=a.folder_id{scope} ORDER BY i.group_id, i.file_id"
     );
     let rows = {
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -1258,6 +1305,7 @@ pub(crate) fn apply_keep_rules(
                     format_label: r.get(9)?,
                     modified_at: r.get(10)?,
                     file_size: r.get(11)?,
+                    taken_date: r.get(12)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1978,6 +2026,7 @@ mod keep_rules_tests {
             INSERT INTO afolders VALUES(1,'/archive'),(2,'/imports');
             CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER,name TEXT,file_type INTEGER,width INTEGER,height INTEGER,created_at INTEGER,media_subtype TEXT,live_photo_video_id INTEGER,format_label TEXT,modified_at INTEGER,size INTEGER);
             INSERT INTO afiles VALUES(1,1,'a.jpg',1,100,100,10,NULL,NULL,NULL,50,400),(2,2,'a.raw',3,200,200,20,NULL,NULL,'RAW',20,100),(3,2,'b.png',1,400,400,40,NULL,NULL,'PNG',40,100),(4,2,'b.heic',1,300,300,30,NULL,NULL,'HEIC',25,200);
+            ALTER TABLE afiles ADD COLUMN taken_date INTEGER;
             CREATE TABLE duplicate_groups(id INTEGER PRIMARY KEY);
             INSERT INTO duplicate_groups VALUES(1);
             CREATE TABLE duplicate_group_items(group_id INTEGER,file_id INTEGER,is_keep INTEGER);
@@ -2079,6 +2128,39 @@ mod keep_rules_tests {
     }
 
     #[test]
+    fn taken_date_rules_use_taken_date_and_fall_back_to_created_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE afolders(id INTEGER PRIMARY KEY, path TEXT);
+            INSERT INTO afolders VALUES(1,'/photos');
+            CREATE TABLE afiles(id INTEGER PRIMARY KEY, folder_id INTEGER, name TEXT, file_type INTEGER, width INTEGER, height INTEGER, created_at INTEGER, taken_date INTEGER, media_subtype TEXT, live_photo_video_id INTEGER, format_label TEXT, modified_at INTEGER, size INTEGER);
+            INSERT INTO afiles VALUES
+                (1,1,'a.jpg',1,100,100,50,300,NULL,NULL,'JPG',10,100),
+                (2,1,'b.jpg',1,100,100,60,100,NULL,NULL,'JPG',20,100),
+                (3,1,'c.jpg',1,100,100,70,200,NULL,NULL,'JPG',30,100);
+            CREATE TABLE duplicate_groups(id INTEGER PRIMARY KEY);
+            INSERT INTO duplicate_groups VALUES(1);
+            CREATE TABLE duplicate_group_items(group_id INTEGER, file_id INTEGER, is_keep INTEGER);
+            INSERT INTO duplicate_group_items VALUES(1,1,1),(1,2,0),(1,3,0);").unwrap();
+        let rules = |preferred_date| KeepRules {
+            folder_ids: vec![],
+            prefer_format: PreferredFormat::Ignore,
+            preferred_date,
+            preferred_size: PreferredSize::Ignore,
+        };
+        let winner = |conn: &Connection| {
+            conn.query_row("SELECT file_id FROM duplicate_group_items WHERE is_keep=1", [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        apply_keep_rules_on(&conn, None, rules(PreferredDate::TakenEarliest)).unwrap();
+        assert_eq!(winner(&conn), 2);
+        apply_keep_rules_on(&conn, None, rules(PreferredDate::TakenLatest)).unwrap();
+        assert_eq!(winner(&conn), 1);
+        // A file without a taken date uses its created_at (60) instead.
+        conn.execute("UPDATE afiles SET taken_date=NULL WHERE id=2", []).unwrap();
+        apply_keep_rules_on(&conn, None, rules(PreferredDate::TakenEarliest)).unwrap();
+        assert_eq!(winner(&conn), 2);
+    }
+
+    #[test]
     fn missing_timestamps_rank_last_in_date_fallback() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE afolders(id INTEGER PRIMARY KEY, path TEXT);
@@ -2087,6 +2169,7 @@ mod keep_rules_tests {
             INSERT INTO afiles VALUES
                 (1,1,'a.jpg',1,100,100,10,NULL,NULL,'JPG',NULL,100),
                 (2,1,'b.jpg',1,100,100,10,NULL,NULL,'JPG',50,100);
+            ALTER TABLE afiles ADD COLUMN taken_date INTEGER;
             CREATE TABLE duplicate_groups(id INTEGER PRIMARY KEY);
             INSERT INTO duplicate_groups VALUES(1);
             CREATE TABLE duplicate_group_items(group_id INTEGER, file_id INTEGER, is_keep INTEGER);
@@ -2122,6 +2205,7 @@ mod keep_rules_tests {
                 (1,1,'shot.jpg',1,200,200,10,NULL,NULL,'JPG',5,200),
                 (2,1,'shot.raw',3,200,200,10,'raw_jpeg_pair',3,NULL,20,300),
                 (3,1,'shot.heic',1,200,200,10,NULL,NULL,'HEIC',30,200);
+            ALTER TABLE afiles ADD COLUMN taken_date INTEGER;
             CREATE TABLE similarity_scans(id INTEGER PRIMARY KEY, scope_key TEXT);
             INSERT INTO similarity_scans VALUES(1,'active');
             CREATE TABLE similarity_groups(id INTEGER PRIMARY KEY, scan_id INTEGER, representative_file_id INTEGER);
@@ -2166,6 +2250,7 @@ mod keep_rules_tests {
             INSERT INTO afiles VALUES
                 (1,1,'a.jpg',1,100,100,10,NULL,NULL,'JPG',10,100),
                 (2,1,'a.raw',3,300,300,10,NULL,NULL,NULL,30,200);
+            ALTER TABLE afiles ADD COLUMN taken_date INTEGER;
             CREATE TABLE duplicate_groups(id INTEGER PRIMARY KEY);
             INSERT INTO duplicate_groups VALUES(1);
             CREATE TABLE duplicate_group_items(group_id INTEGER, file_id INTEGER, is_keep INTEGER);
@@ -2201,6 +2286,7 @@ mod keep_rules_tests {
             INSERT INTO afiles VALUES
                 (1,2,'a.jpg',1,100,100,10,NULL,NULL,'JPG',10,100),
                 (2,1,'b.jpg',1,100,100,10,NULL,NULL,'JPG',30,100);
+            ALTER TABLE afiles ADD COLUMN taken_date INTEGER;
             CREATE TABLE duplicate_groups(id INTEGER PRIMARY KEY);
             INSERT INTO duplicate_groups VALUES(1);
             CREATE TABLE duplicate_group_items(group_id INTEGER, file_id INTEGER, is_keep INTEGER);
@@ -2498,5 +2584,25 @@ mod needs_hash_tests {
         assert!(check_if_needs_hash(&conn, &file(1, 200, 10)).unwrap(), "size change with same mtime");
         assert!(check_if_needs_hash(&conn, &file(1, 100, 11)).unwrap(), "mtime change");
         assert!(check_if_needs_hash(&conn, &file(2, 100, 10)).unwrap(), "no stored hash");
+    }
+
+    #[test]
+    fn split_missing_files_separates_deleted_paths() {
+        let path = std::env::temp_dir().join(format!("lap_dedup_exists_{}.bin", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let with_path = |id: i64, p: Option<String>| AFile { file_path: p, ..file(id, 1, 1) };
+        let gone = std::env::temp_dir().join("lap_dedup_definitely_missing.bin");
+        let files = vec![
+            with_path(1, Some(path.to_string_lossy().into_owned())),
+            with_path(2, Some(gone.to_string_lossy().into_owned())),
+            with_path(3, None),
+        ];
+        let offline = std::env::temp_dir().join("lap_dedup_no_such_dir").join("a.bin");
+        let mut files = files;
+        files.push(with_path(4, Some(offline.to_string_lossy().into_owned())));
+        let (present, missing) = split_missing_files(files);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(present.iter().filter_map(|f| f.id).collect::<Vec<_>>(), vec![1, 3, 4], "offline parent is kept");
+        assert_eq!(missing, vec![2]);
     }
 }
