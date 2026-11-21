@@ -203,7 +203,7 @@
 import { getVisibleEditableMetadataFields } from '@/common/fileInfoFields';
 import EditMetadataDialog from "@/components/EditMetadataDialog.vue";
 import { isOriginalStorageUnavailable, isOriginalUnavailable, setAlbumAccessibility, resetFileAccessibility } from '@/common/availability';
-import { ref, watch, computed, onMounted, onUnmounted, reactive } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted, reactive, nextTick } from 'vue';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { emit, listen } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
@@ -1419,7 +1419,13 @@ const clickSaveRotation = async (pane: Pane = 'left') => {
     height: saved.height,
     e_orientation: saved.e_orientation,
   };
+  uiStore.updateFileVersion(saved.file_path);
   applyFileMetaToPanes(currentFileId, changes);
+  // The file's modified time is preserved on save, so the image version prop is
+  // unchanged; briefly blanking the path forces the pane to reload the rewritten file.
+  applyFileMetaToPanes(currentFileId, { file_path: '' });
+  await nextTick();
+  applyFileMetaToPanes(currentFileId, { file_path: saved.file_path });
   // Let the main window refresh its thumbnail and image caches for the changed file.
   emit('message-from-image-viewer', { message: 'rotation-saved', fileId: currentFileId, file: saved });
   if (currentFileId === fileId.value) iconRotate.value = 0;

@@ -4407,11 +4407,22 @@ pub async fn apply_file_rotation(file_id: i64) -> Result<Option<AFile>, String> 
         let target = t_image::orientation_after_rotation(current, rotate);
         t_image::write_jpeg_orientation(&path, target)?;
 
-        // Re-read the file (orientation, size, mtime; stale thumbnails are
-        // invalidated), then clear the now-redundant app-side rotation.
+        // The file now carries the rotation. Clear the app-side rotation immediately,
+        // before anything below can fail, so a partial failure can never display the
+        // photo rotated twice, and invalidate thumbnails built for the old orientation.
+        AFile::update_column(file_id, "rotate", &0)?;
+        AThumb::mark_stale(file_id)?;
+
+        // The file's modified time is preserved, so dedup's size+mtime freshness
+        // check can't see this content change; drop the cached hash explicitly.
+        if let Ok(conn) = crate::t_sqlite::open_conn() {
+            let _ = conn.execute("DELETE FROM file_hashes WHERE file_id = ?1", [file_id]);
+        }
+
+        // Re-read the file (size etc.; stale thumbnails are invalidated because the
+        // orientation changed).
         let now = chrono::Utc::now().timestamp_millis();
         AFile::update_file_info(file_id, &path, now)?;
-        AFile::update_column(file_id, "rotate", &0)?;
         AFile::get_file_info(file_id)
     })
     .await

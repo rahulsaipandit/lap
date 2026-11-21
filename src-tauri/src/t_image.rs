@@ -1150,6 +1150,30 @@ fn exif_field_keys(file_path: &Path) -> Option<std::collections::HashSet<(Tag, I
     )
 }
 
+/// Gives `path` the modified/accessed (and, on Windows, creation) times of the
+/// original file, so saving a rotation doesn't make the photo look edited.
+fn restore_file_times(path: &Path, original: &fs::Metadata) -> Result<(), String> {
+    let mut times = fs::FileTimes::new();
+    if let Ok(modified) = original.modified() {
+        times = times.set_modified(modified);
+    }
+    if let Ok(accessed) = original.accessed() {
+        times = times.set_accessed(accessed);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTimesExt;
+        if let Ok(created) = original.created() {
+            times = times.set_created(created);
+        }
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_times(times))
+        .map_err(|e| format!("Failed to preserve file timestamps: {}", e))
+}
+
 /// Rewrites the EXIF Orientation tag of a JPEG in place without touching the
 /// image data. The change is made on a sibling temp copy, verified, then
 /// swapped in, so a failure never leaves the original damaged.
@@ -1161,6 +1185,9 @@ pub fn write_jpeg_orientation(file_path: &str, orientation: i32) -> Result<(), S
     t_utils::require_local_content(source).map_err(|e| e.to_string())?;
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
     let temp = source.with_file_name(format!(".lap-rotate-{}.{}", Uuid::new_v4(), ext));
+    // Capture the original timestamps before anything reads the file, so the
+    // copy below can't skew the access time.
+    let original_meta = fs::metadata(source).map_err(|e| format!("Failed to read file info: {}", e))?;
     fs::copy(source, &temp).map_err(|e| format!("Failed to create temp copy: {}", e))?;
 
     let before_fields = exif_field_keys(source);
@@ -1187,6 +1214,8 @@ pub fn write_jpeg_orientation(file_path: &str, orientation: i32) -> Result<(), S
                 return Err("Saving the rotation would lose existing EXIF metadata; file left unchanged".to_string());
             }
         }
+        // Stamp the temp copy before the swap, so a failure here leaves the original untouched.
+        restore_file_times(temp_ref, &original_meta)?;
         fs::rename(temp_ref, source).map_err(|e| format!("Failed to replace file: {}", e))
     })();
     if result.is_err() {
@@ -2444,6 +2473,11 @@ mod rotation_tests {
             md.set_tag(ExifTag::Model("TestModel".to_string()));
             md.write_to_file(&path).unwrap();
         }
+        // Backdate the file (after setup) so a rewrite would visibly change its mtime
+        let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 400);
+        fs::OpenOptions::new().write(true).open(&path).unwrap()
+            .set_times(fs::FileTimes::new().set_modified(backdated)).unwrap();
+        let old_mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
         write_jpeg_orientation(p, 6).unwrap();
         let keys = exif_field_keys(&path).unwrap();
@@ -2451,6 +2485,8 @@ mod rotation_tests {
         assert_eq!(get_image_orientation(p), 6);
         write_jpeg_orientation(p, 3).unwrap();
         assert_eq!(get_image_orientation(p), 3);
+        // Timestamps are preserved across both saves
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), old_mtime);
         // Still a decodable JPEG with the same dimensions, and no temp files left behind
         assert_eq!(image::open(&path).unwrap().dimensions(), (8, 4));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);

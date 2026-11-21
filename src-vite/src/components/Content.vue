@@ -10633,6 +10633,12 @@ const applySavedRotation = async (file: any, saved: any, notifyViewer: boolean) 
   Object.assign(file, saved);
   refreshFileGeometryLayout();
   await updateThumbForFile(file);
+  // The file's modified time is preserved on save, so Image.vue's version prop is
+  // unchanged; briefly blanking the path forces it to reload the rewritten file.
+  const savedPath = file.file_path;
+  file.file_path = '';
+  await nextTick();
+  file.file_path = savedPath;
   if (notifyViewer) {
     void syncFileMetaToImageViewer(file.id, {
       rotate: 0,
