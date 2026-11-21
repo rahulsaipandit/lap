@@ -825,7 +825,9 @@
       "tag": "Tags...",
       "collection": "Collections...",
       "comment": "Description…",
-      "rotate": "Rotate view"
+      "rotate": "Rotate view",
+      "rotate_left": "Rotate view left",
+      "save_rotation": "Save rotation to file"
     },
     "sort": {
       "sort_by_name": "Sort by name",
@@ -833,6 +835,15 @@
     }
   },
   "msgbox": {
+    "save_rotation": {
+      "title": "Save rotation to file?",
+      "message": "This writes the new orientation into the image file's EXIF data so other apps, such as File Explorer, show it rotated too. The picture itself is not re-encoded, so there is no quality loss.",
+      "ok": "Save to file",
+      "unsupported_title": "Rotation can't be saved to this file",
+      "unsupported_message": "Only JPEG files can store their rotation in the file. This image stays rotated inside the app only, and other apps will keep showing the original orientation.",
+      "success": "Rotation saved to file",
+      "failed": "Failed to save rotation"
+    },
     "ok": "OK",
     "save": "Save",
     "discard": "Discard",

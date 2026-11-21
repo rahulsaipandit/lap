@@ -3397,6 +3397,8 @@ fn schedule_synced_file_processing(app_handle: tauri::AppHandle, task: SyncedFil
         let orientation = task.orientation;
         let file_id = task.file_id;
         let album_id = task.album_id;
+        // A changed source file (status 2) must not be served its stale cached thumbnail.
+        let force_regenerate = task.invalidate_thumbnail;
         let thumb_result = tauri::async_runtime::spawn_blocking(move || {
             let album_sync_lock = album_sync_lock(album_id);
             let _album_sync_guard = match album_sync_lock.lock() {
@@ -3416,7 +3418,7 @@ fn schedule_synced_file_processing(app_handle: tauri::AppHandle, task: SyncedFil
                 orientation,
                 FOLDER_SYNC_THUMBNAIL_SIZE,
                 RawDisplayOptions::rendered_bright(),
-                false,
+                force_regenerate,
                 None,
                 None,
                 false,

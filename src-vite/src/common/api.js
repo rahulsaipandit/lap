@@ -1493,6 +1493,21 @@ export async function isCloudOnlyFile(filePath) {
   return invoke('is_cloud_only_file', { filePath }).catch(() => true);
 }
 
+// whether a file's rotation can be written into the file itself (EXIF; JPEG only)
+export async function canApplyFileRotation(fileId) {
+  try {
+    return Boolean(await invoke('can_apply_file_rotation', { fileId }));
+  } catch (error) {
+    console.log('Failed to check rotation support:', error);
+    return false;
+  }
+}
+
+// write a file's rotation into the file (EXIF Orientation); returns the refreshed file or throws
+export async function applyFileRotation(fileId) {
+  return invoke('apply_file_rotation', { fileId });
+}
+
 // set file rotate
 export async function setFileRotate(fileId, fileRotate) {
   try {

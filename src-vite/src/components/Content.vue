@@ -835,6 +835,7 @@ import { WebviewWindow, getCurrentWebviewWindow } from '@tauri-apps/api/webviewW
 import { PREVIEW_WINDOW_FOCUS_RESTORED } from '@/common/previewWindow';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
+import { confirmAndSaveRotation } from '@/common/rotation';
 import { useUIStore } from '@/stores/uiStore';
 import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTimeLine, getQueryFiles, getFilesByIds, getGroupedQueryRows, getGroupedFilePosition, getGroupFileIds, getQueryFileIds, syncAlbumFolderMtimes, reconcileRawJpegPairs,
          getSmartQueryCountAndSum, getSmartQueryTimeLine, getSmartQueryFiles, getSmartGroupedQueryRows, getSmartGroupFileIds, getSmartQueryFileIds, getSmartQueryFilePosition,
@@ -4943,6 +4944,8 @@ function handleItemAction(payload: { action: string, index: number }) {
     'remove-selected-from-collection': () => void removeSelectedFromCollection(),
     'favorite': toggleFavorite,
     'rotate': clickRotate,
+    'rotate-left': clickRotateLeft,
+    'save-rotation': () => void clickSaveRotation(),
     'info': toggleInfoPanel,
     'tag': clickTag,
     'add-to-collection': clickAddToCollection,
@@ -6397,6 +6400,12 @@ onMounted( async() => {
           }
         }
         break;
+      case 'rotation-saved': {
+        const savedFile = (event.payload as any).file;
+        const target = fileList.value.find(file => Number(file?.id) === Number(savedFile?.id));
+        if (target && savedFile) await applySavedRotation(target, savedFile, false);
+        break;
+      }
       default:
         break;
     }
@@ -10615,6 +10624,34 @@ watch(() => config.settings.slideShowInterval, () => {
 
 // set file rotate
 const clickRotate = () => rotateSelected(90);
+const clickRotateLeft = () => rotateSelected(-90);
+
+// Refresh grid/preview state after a file's rotation was written into the file.
+const applySavedRotation = async (file: any, saved: any, notifyViewer: boolean) => {
+  uiStore.updateFileVersion(file.file_path);
+  clearPreviewPreloadCache(file.file_path);
+  Object.assign(file, saved);
+  refreshFileGeometryLayout();
+  await updateThumbForFile(file);
+  if (notifyViewer) {
+    void syncFileMetaToImageViewer(file.id, {
+      rotate: 0,
+      modified_at: saved.modified_at,
+      size: saved.size,
+      width: saved.width,
+      height: saved.height,
+      e_orientation: saved.e_orientation,
+    });
+  }
+};
+
+// Write the app-side rotation into the file (EXIF Orientation) after asking the user.
+const clickSaveRotation = async () => {
+  const file = fileList.value[selectedItemIndex.value];
+  if (!file?.id || !file.file_path) return;
+  const saved = await confirmAndSaveRotation(file.id);
+  if (saved) await applySavedRotation(file, saved, true);
+};
 
 const rotateSelected = async (rotateDelta: number, singleFile = false) => {
   if (singleFile !== true && selectMode.value && selectedCount.value === 0) return;

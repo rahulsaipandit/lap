@@ -162,6 +162,7 @@ export { default as IconPalette } from '@/assets/icons/palette.svg';
 export { default as IconResize } from '@/assets/icons/resize.svg';
 export { default as IconRestore } from '@/assets/icons/restore.svg';
 export { default as IconRotate } from '@/assets/icons/rotate-right.svg';
+export { default as IconRotateCounterclockwise } from '@/assets/icons/rotate-left.svg';
 export { default as IconRotateLeft } from '@/assets/icons/rotate-left-90.svg';
 export { default as IconRotateRight } from '@/assets/icons/rotate-right-90.svg';
 

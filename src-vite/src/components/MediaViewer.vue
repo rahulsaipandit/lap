@@ -92,6 +92,14 @@
           @click="$emit('update:isZoomFit', !isZoomFit)"
         />
         <TButton
+          :icon="IconRotateCounterclockwise"
+          :disabled="fileIndex < 0 || isSlideShow || !canInteract"
+          :selected="(file?.rotate ?? 0) % 360 !== 0 && !isSlideShow"
+          :tooltip="$t('menu.meta.rotate_left')"
+          :shortcut="shortcut('meta.rotateCounterclockwise')"
+          @click="$emit('item-action', { action: 'rotate-left', index: fileIndex })"
+        />
+        <TButton
           :icon="IconRotate"
           :disabled="fileIndex < 0 || isSlideShow || !canInteract"
           :iconStyle="{ transform: `rotate(${file?.rotate ?? 0}deg)`, transition: 'transform 0.3s' }"
@@ -99,6 +107,13 @@
           :tooltip="$t('menu.meta.rotate')"
           :shortcut="shortcut('meta.rotate')"
           @click="$emit('item-action', { action: 'rotate', index: fileIndex })"
+        />
+        <TButton
+          v-if="(file?.rotate ?? 0) % 360 !== 0 && [1, 3].includes(Number(file?.file_type))"
+          :icon="IconSave"
+          :disabled="fileIndex < 0 || isSlideShow || !canInteract"
+          :tooltip="$t('menu.meta.save_rotation')"
+          @click="$emit('item-action', { action: 'save-rotation', index: fileIndex })"
         />
         <TButton
           :icon="IconAutoFocus"
@@ -490,6 +505,8 @@ import {
   IconTag,
   IconComment,
   IconRotate,
+  IconRotateCounterclockwise,
+  IconSave,
   IconFileInfo,
   IconDot,
   IconWinMinus,

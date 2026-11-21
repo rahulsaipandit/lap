@@ -26,7 +26,7 @@ Key features:
 
 ### Header Section
 - **Title**: "Duplicate Review" with subtitle "Exact hash matches from LAP albums"
-- **Refresh Button**: Triggers new duplicate scan
+- **Refresh Button**: Triggers new duplicate scan. Files deleted outside the app are detected during the scan (path no longer exists while its folder is still readable) and removed from the results along with their cached hashes; files on unreachable drives are left alone.
 - **Close Button**: Emits close event
 
 ### Statistics Cards (3-column grid)

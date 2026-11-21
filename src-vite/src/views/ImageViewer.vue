@@ -227,6 +227,7 @@ import {
 
 import MediaViewer from '@/components/MediaViewer.vue';
 import MessageBox from '@/components/MessageBox.vue';
+import { confirmAndSaveRotation } from '@/common/rotation';
 import TButton from '@/components/TButton.vue';
 import StatusBar from '@/components/StatusBar.vue';
 import TaggingDialog from '@/components/TaggingDialog.vue';
@@ -1404,6 +1405,26 @@ const clickRotate = async (pane: Pane = 'left', rotateDelta = 90) => {
   syncFileMetaToContent(currentFileId, { rotate });
 };
 
+// Write the app-side rotation into the file (EXIF Orientation) after asking the user.
+const clickSaveRotation = async (pane: Pane = 'left') => {
+  const currentFileId = getFileIdByPane(pane);
+  if (currentFileId <= 0) return;
+  const saved = await confirmAndSaveRotation(currentFileId);
+  if (!saved) return;
+  const changes = {
+    rotate: 0,
+    modified_at: saved.modified_at,
+    size: saved.size,
+    width: saved.width,
+    height: saved.height,
+    e_orientation: saved.e_orientation,
+  };
+  applyFileMetaToPanes(currentFileId, changes);
+  // Let the main window refresh its thumbnail and image caches for the changed file.
+  emit('message-from-image-viewer', { message: 'rotation-saved', fileId: currentFileId, file: saved });
+  if (currentFileId === fileId.value) iconRotate.value = 0;
+};
+
 const clickTag = (pane: Pane = 'left') => {
   const currentFileId = getFileIdByPane(pane);
   if (currentFileId <= 0) return;
@@ -1514,6 +1535,12 @@ const handleItemAction = async (payload: { action: string }) => {
       break;
     case 'rotate':
       await clickRotate(pane);
+      break;
+    case 'rotate-left':
+      await clickRotate(pane, -90);
+      break;
+    case 'save-rotation':
+      await clickSaveRotation(pane);
       break;
     case 'tag':
       clickTag(pane);

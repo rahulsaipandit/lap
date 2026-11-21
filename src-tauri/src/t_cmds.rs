@@ -4377,6 +4377,47 @@ pub fn set_file_rotate(file_id: i64, rotate: i32) -> Result<usize, String> {
         .map_err(|e| format!("Error while setting file rotate: {}", e))
 }
 
+/// Whether a file's viewing rotation can be saved into the file itself
+/// (EXIF Orientation; JPEG only).
+#[tauri::command]
+pub fn can_apply_file_rotation(file_id: i64) -> Result<bool, String> {
+    let file = AFile::get_file_info(file_id)?.ok_or_else(|| "File not found".to_string())?;
+    Ok(file.file_type == Some(1)
+        && file
+            .file_path
+            .as_deref()
+            .is_some_and(t_image::rotation_write_supported))
+}
+
+/// Write a file's viewing rotation into the file as an EXIF Orientation tag
+/// (lossless), then reset the app-side rotation to 0 and refresh the file record.
+#[tauri::command]
+pub async fn apply_file_rotation(file_id: i64) -> Result<Option<AFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file = AFile::get_file_info(file_id)?.ok_or_else(|| "File not found".to_string())?;
+        let path = file.file_path.clone().ok_or_else(|| "File has no path".to_string())?;
+        if file.file_type != Some(1) || !t_image::rotation_write_supported(&path) {
+            return Err("Saving rotation is not supported for this format".to_string());
+        }
+        let rotate = file.rotate.unwrap_or(0).rem_euclid(360);
+        if rotate == 0 {
+            return Ok(Some(file));
+        }
+        let current = t_image::get_image_orientation(&path);
+        let target = t_image::orientation_after_rotation(current, rotate);
+        t_image::write_jpeg_orientation(&path, target)?;
+
+        // Re-read the file (orientation, size, mtime; stale thumbnails are
+        // invalidated), then clear the now-redundant app-side rotation.
+        let now = chrono::Utc::now().timestamp_millis();
+        AFile::update_file_info(file_id, &path, now)?;
+        AFile::update_column(file_id, "rotate", &0)?;
+        AFile::get_file_info(file_id)
+    })
+    .await
+    .map_err(|e| format!("Rotation task failed: {}", e))?
+}
+
 /// get a file's has_tags status (true or false)
 #[tauri::command]
 pub fn get_file_has_tags(file_id: i64) -> Result<bool, String> {
