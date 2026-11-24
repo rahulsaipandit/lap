@@ -228,6 +228,7 @@ import {
 import MediaViewer from '@/components/MediaViewer.vue';
 import MessageBox from '@/components/MessageBox.vue';
 import { confirmAndSaveRotation } from '@/common/rotation';
+import { sendPathsToSmartPhotos } from '@/common/smartPhotos';
 import TButton from '@/components/TButton.vue';
 import StatusBar from '@/components/StatusBar.vue';
 import TaggingDialog from '@/components/TaggingDialog.vue';
@@ -1548,6 +1549,12 @@ const handleItemAction = async (payload: { action: string }) => {
     case 'save-rotation':
       await clickSaveRotation(pane);
       break;
+    case 'send-to-smart-photos': {
+      // Copy only; the original file is never modified.
+      const path = getFileInfoByPane(pane)?.file_path;
+      if (path) await sendPathsToSmartPhotos([path]);
+      break;
+    }
     case 'tag':
       clickTag(pane);
       break;

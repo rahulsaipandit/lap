@@ -836,6 +836,7 @@ import { PREVIEW_WINDOW_FOCUS_RESTORED } from '@/common/previewWindow';
 import { useI18n } from 'vue-i18n';
 import { useToast } from '@/common/toast';
 import { confirmAndSaveRotation } from '@/common/rotation';
+import { sendPathsToSmartPhotos } from '@/common/smartPhotos';
 import { useUIStore } from '@/stores/uiStore';
 import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTimeLine, getQueryFiles, getFilesByIds, getGroupedQueryRows, getGroupedFilePosition, getGroupFileIds, getQueryFileIds, syncAlbumFolderMtimes, reconcileRawJpegPairs,
          getSmartQueryCountAndSum, getSmartQueryTimeLine, getSmartQueryFiles, getSmartGroupedQueryRows, getSmartGroupFileIds, getSmartQueryFileIds, getSmartQueryFilePosition,
@@ -1351,6 +1352,20 @@ const selectionMenuItems = useFileMenuItems(
   },
 );
 
+// RP-CUSTOM[multi-select-menu] BEGIN (not upstream; see docs/custom-changes.md)
+// With exactly one photo ticked (the common state right after using the hover checkbox), the
+// right-click menu is the full single-photo menu instead of the multi-select one. Not bound to
+// the selection panel, which keeps using selectionMenuItems.
+const singleSelectedFile = computed(() => selectedCount.value === 1 ? selectedFiles.value[0] ?? null : null);
+const singleSelectionMenuItems = useFileMenuItems(
+  singleSelectedFile,
+  localeMsg,
+  isMac,
+  t,
+  (action: string) => handleItemAction({ action, index: -1 }),
+);
+// RP-CUSTOM[multi-select-menu] END
+
 const moreActionMenuRef = ref<InstanceType<typeof ContextMenu> | null>(null);
 const moreActionMenuItems = ref<any[] | (() => Promise<any[]>)>([]);
 
@@ -1373,7 +1388,11 @@ function handleSelectionContextMenu(index: number, event: MouseEvent) {
         || selectionVersion !== selectedFilesVersion.value) return [];
 
       const clipboardUnavailable = !files || files.some(isOriginalStorageUnavailable);
-      return selectionMenuItems.value.map(item => item.action?.actionName === 'copy'
+      // RP-CUSTOM[multi-select-menu]: single ticked photo gets the single-photo menu.
+      const menuItems = singleSelectedFile.value && singleSelectionMenuItems.value.length
+        ? singleSelectionMenuItems
+        : selectionMenuItems;
+      return menuItems.value.map(item => item.action?.actionName === 'copy'
         ? { ...item, disabled: item.disabled || clipboardUnavailable }
         : item);
     };
@@ -2381,6 +2400,7 @@ const showUnsavedChangesMsgbox = ref(false);
 const pendingAction = ref<(() => void) | null>(null);
 const fileInfoRef = ref<any>(null);
 const isDedupPanelOpen = computed(() => !selectionPanelOpen.value && config.rightPanel.show && config.rightPanel.mode === 'dedup');
+// RP-CUSTOM: Blurry-photos panel wiring (also BlurryPane/AiFixDialog); not in upstream.
 const isBlurryPanelOpen = computed(() => !selectionPanelOpen.value && config.rightPanel.show && config.rightPanel.mode === 'blurry');
 const isInfoPanelOpen = computed(() => !selectionPanelOpen.value && config.rightPanel.show && config.rightPanel.mode === 'info');
 const rightPanelContent = computed<'selection' | 'dedup' | 'blurry' | 'info' | null>(() => {
@@ -4527,6 +4547,30 @@ async function selectRangeFromSingleSelection(anchorIndex: number, targetIndex: 
 
 async function handleItemSelectToggled(index: number, shiftKey: boolean = false) {
   if (!ensureGroupedFileAtIndex(index)) return;
+  // RP-CUSTOM[hover-checkbox] BEGIN (not upstream; see docs/custom-changes.md)
+  // Upstream only receives this event in select mode. Our hover checkbox can fire it outside
+  // select mode, so this block enters select mode. On upstream sync, keep this block.
+  if (!selectMode.value) {
+    // Hover checkbox clicked outside select mode: enter select mode first.
+    // Shift extends from the previously focused item, matching shift-click.
+    if (isScanStreamingMode.value || isMapVisible.value) return;
+    const anchorIndex = selectedItemIndex.value;
+    if (shiftKey && anchorIndex >= 0 && anchorIndex !== index) {
+      checkUnsavedChanges(() => { void selectRangeFromSingleSelection(anchorIndex, index); });
+      return;
+    }
+    checkUnsavedChanges(() => {
+      handleSelectMode(true);
+      if (!selectMode.value) return;
+      const target = fileList.value[index];
+      if (!isRealFileItem(target)) return;
+      setItemSelected(index, true);
+      selectedItemIndex.value = index;
+      lastSelectedIndex.value = index;
+    });
+    return;
+  }
+  // RP-CUSTOM[hover-checkbox] END
   const targetItem = fileList.value[index];
   if (!targetItem) return;
 
@@ -4938,6 +4982,11 @@ function handleItemAction(payload: { action: string, index: number }) {
           toast.error(t('menu.file.xmp_save_failed', { count: result.failures.length }) + ': ' + result.failures[0].error);
         }
       } catch (error) { toast.error(String(error)); }
+    },
+    // Copies (never moves) to the Smart Photos folder; the originals are not touched.
+    'send-to-smart-photos': () => {
+      const files = selectMode.value ? getActionableSelectedItems() : [fileList.value[selectedItemIndex.value]];
+      void sendPathsToSmartPhotos(files.map(f => f?.file_path).filter(Boolean));
     },
     'favorite-all': () => void selectModeSetFavorites(true),
     'unfavorite-all': () => void selectModeSetFavorites(false),

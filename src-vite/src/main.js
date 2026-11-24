@@ -144,6 +144,9 @@ if (isMainWindow) {
       config.settings.fileDeleteBehavior = event.payload
     }
   })
+  listen('settings-smartPhotosRoot-changed', (event) => {
+    config.settings.smartPhotosRoot = typeof event.payload === 'string' ? event.payload : ''
+  })
   listen('settings-showToolTip-changed', (event) => {
     config.setShowToolTip(event.payload)
   })

@@ -91,6 +91,9 @@
       <div v-else-if="file.cloud_only" class="absolute right-0.5 bottom-0.5 z-20 thumb-badge" :title="cloudOnlyLabel" :aria-label="cloudOnlyLabel">
         <IconCloud class="h-3.5 w-3.5 shrink-0" />
       </div>
+      <div v-else-if="inSmartPhotos" class="pointer-events-none absolute right-0.5 bottom-0.5 z-20 thumb-badge" :title="t('menu.file.send_to_smart_photos')" :aria-label="t('menu.file.send_to_smart_photos')">
+        <IconChecked class="h-3.5 w-3.5 shrink-0 text-success/80" />
+      </div>
 
       <!-- status badges -->
       <div
@@ -99,7 +102,12 @@
       ></div>
       <div
         v-if="statusBadges.length > 0"
-        class="pointer-events-none absolute left-0.5 top-0.5 z-10 flex max-w-[calc(100%-2.5rem)] flex-wrap gap-0.5"
+        :class="[
+          /* RP-CUSTOM[hover-checkbox]: upstream is the constant 'left-0.5 max-w-[calc(100%-2.5rem)]';
+             we shift badges right in select mode so the top-left checkbox doesn't cover them. */
+          'pointer-events-none absolute top-0.5 z-10 flex flex-wrap gap-0.5',
+          selectMode ? 'left-7 max-w-[calc(100%-3.5rem)]' : 'left-0.5 max-w-[calc(100%-2.5rem)]',
+        ]"
       >
         <div
           v-for="badge in statusBadges"
@@ -180,13 +188,22 @@
       </div>
 
       <!-- select checkbox -->
-      <div v-if="selectMode" class="absolute right-0.5 top-0.5">
-        <label class="flex items-center text-primary cursor-pointer" @click.stop @dblclick.stop>
+      <!-- RP-CUSTOM[hover-checkbox] (not upstream; see docs/custom-changes.md)
+           Upstream: checkbox top-right, only in select mode; "⋯" menu otherwise.
+           Ours: checkbox top-left, always in select mode, on hover otherwise
+           (Google Photos style); clicking it enters select mode. -->
+      <div
+        :class="[
+          'absolute left-0.5 top-0.5 z-20 rounded-box',
+          selectMode ? '' : 'invisible group-hover:visible bg-base-300/30',
+        ]"
+      >
+        <label class="flex items-center text-primary cursor-pointer" @click.stop @dblclick.stop @pointerdown.stop>
           <input
             type="checkbox"
-            class="checkbox checkbox-sm border-base-content/30 hover:border-base-content/70"
-            :class="isSelected ? (isContentActive ? 'checkbox-primary' : 'checkbox-primary opacity-50') : ''"
-            :checked="isSelected"
+            class="checkbox checkbox-sm border-base-content/30 bg-base-100/40 hover:border-base-content/70"
+            :class="isSelected && selectMode ? (isContentActive ? 'checkbox-primary' : 'checkbox-primary opacity-50') : ''"
+            :checked="selectMode && isSelected"
             @click.stop="(event: MouseEvent) => $emit('select-toggled', event.shiftKey)"
           />
         </label>
@@ -246,10 +263,12 @@ import ContextMenu from '@/components/ContextMenu.vue';
 import { isOriginalUnavailable } from '@/common/availability';
 import { isCloudOnlyFile } from '@/common/api';
 import { useFileMenuItems } from '@/common/fileMenu';
+import { useInSmartPhotos } from '@/common/smartPhotos';
 
 import { 
   IconMore,
   IconExclamation,
+  IconChecked,
   IconCloud,
   IconPhoto,
   IconVideo,
@@ -317,6 +336,7 @@ const isVideoPreviewReady = ref(false);
 const showAnimatedImagePreview = ref(false);
 const isAnimatedImagePreviewReady = ref(false);
 const originalUnavailable = computed(() => isOriginalUnavailable(props.file));
+const inSmartPhotos = useInSmartPhotos(() => props.file?.file_path);
 const isVideoFile = computed(() => props.file?.file_type === 2);
 const isLivePhoto = computed(() => props.file?.media_subtype === 'live_photo' && !!props.file?.live_photo_video_path);
 const isMotionPhoto = computed(() => props.file?.media_subtype === 'motion_photo');

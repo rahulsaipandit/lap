@@ -206,6 +206,7 @@ import FileConflictDialog from '@/components/FileConflictDialog.vue';
 import { isFolderUnavailable, setFolderAccessibility } from '@/common/availability';
 import { useToast } from '@/common/toast';
 import { ask, open as openDialog } from '@tauri-apps/plugin-dialog';
+import { sendPathsToSmartPhotos } from '@/common/smartPhotos';
 
 import {
   IconRight,
@@ -493,6 +494,12 @@ const getMenuItemsForFolder = async (folder: any) => {
       action: () => {
         revealPath(folder.path);
       }
+    },
+    {
+      // Copies the folder's JPG/JPEG/PNG files to Smart Photos; the folder itself is never changed.
+      label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
+      disabled: unavailable,
+      action: () => { void sendPathsToSmartPhotos([folder.path]); }
     },
     {
       label: "-",

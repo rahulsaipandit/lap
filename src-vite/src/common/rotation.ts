@@ -1,3 +1,4 @@
+// RP-CUSTOM: Rotate-left / save-rotation-to-file helper; entire file is fork-only.
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import { i18n } from '@/common/i18n';
 import { applyFileRotation, canApplyFileRotation } from '@/common/api';

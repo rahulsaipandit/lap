@@ -1,3 +1,4 @@
+# RP-CUSTOM: FastAPI wrapper around PromptFix for the AI-fix feature; fork-only.
 """
 FastAPI wrapper exposing PromptFix's edit pipeline over HTTP for lap to call.
 

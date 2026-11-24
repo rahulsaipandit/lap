@@ -1508,6 +1508,34 @@ export async function applyFileRotation(fileId) {
   return invoke('apply_file_rotation', { fileId });
 }
 
+// Smart Photos: 'ok' | 'unset' | 'missing' | 'readonly'
+export async function getSmartPhotosRootStatus(root) {
+  try {
+    return await invoke('smart_photos_root_status', { root });
+  } catch (error) {
+    return 'missing';
+  }
+}
+
+// Smart Photos: { total, needs_fallback } for the given files/folders
+export async function smartPhotosPreflight(paths) {
+  return invoke('smart_photos_preflight', { paths });
+}
+
+// Smart Photos: copy (never move) to the root; returns { copied, skipped_exists, skipped_layout, failed, errors }
+export async function sendToSmartPhotos(paths, root, allowDateFallback) {
+  return invoke('send_to_smart_photos', { paths, root, allowDateFallback });
+}
+
+// Smart Photos: per input file, whether an identical copy is already there
+export async function checkInSmartPhotos(paths, root) {
+  try {
+    return await invoke('check_in_smart_photos', { paths, root });
+  } catch (error) {
+    return paths.map(() => false);
+  }
+}
+
 // set file rotate
 export async function setFileRotate(fileId, fileRotate) {
   try {

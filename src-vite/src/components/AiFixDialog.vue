@@ -57,6 +57,7 @@
 </template>
 
 <script setup lang="ts">
+  // RP-CUSTOM: PromptFix AI-fix dialog; entire file is fork-only.
 import { ref, onMounted, onBeforeUnmount } from 'vue';
 import ModalDialog from '@/components/ModalDialog.vue';
 import { blurStartFixBatch, blurGetFixStatus, listenBlurFixProgress } from '@/common/api';

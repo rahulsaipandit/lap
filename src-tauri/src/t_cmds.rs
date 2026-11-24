@@ -4380,6 +4380,7 @@ pub fn set_file_rotate(file_id: i64, rotate: i32) -> Result<usize, String> {
 /// Whether a file's viewing rotation can be saved into the file itself
 /// (EXIF Orientation; JPEG only).
 #[tauri::command]
+// RP-CUSTOM: Save-rotation-to-file (EXIF Orientation) command; not in upstream.
 pub fn can_apply_file_rotation(file_id: i64) -> Result<bool, String> {
     let file = AFile::get_file_info(file_id)?.ok_or_else(|| "File not found".to_string())?;
     Ok(file.file_type == Some(1)

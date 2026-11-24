@@ -785,6 +785,7 @@
       "remove_from_collection": "Remove from Collection",
       "create_montage": "Create collage...",
       "save_xmp": "Save Metadata to XMP",
+      "send_to_smart_photos": "Send to Smart Photos",
       "xmp_save_success": "Saved XMP metadata for {count} file(s)",
       "xmp_save_failed": "Failed to save XMP for {count} file(s)",
       "comment": "Description…"
@@ -835,6 +836,38 @@
     }
   },
   "msgbox": {
+    "blurry": {
+      "trash": "Trash",
+      "preview": "Preview",
+      "prev": "Prev",
+      "next": "Next",
+      "fit": "Fit",
+      "actual_size": "100%",
+      "keep": "Keep",
+      "keep_tip": "Not blurry - remove from this list (the file is not touched)",
+      "close_tip": "Close (Esc)",
+      "shortcuts": "← → navigate · Del trash · K keep · Z toggle 100% · Esc close",
+      "confirm_title": "Move to Trash?",
+      "confirm_one": "This photo will be moved to the Trash. You can restore it from there.",
+      "confirm_many": "{count} photos will be moved to the Trash. You can restore them from there.",
+      "confirm_ok": "Move to Trash",
+      "moved": "Moved {count} to Trash",
+      "failed": "{count} could not be moved to Trash."
+    },
+    "smart_photos": {
+      "layout_title": "Use the photo's date for the year?",
+      "layout_message": "{count} photo(s) are not in a <year>\\<event folder> layout, so the year can't be taken from the folder. Use each photo's EXIF date (or its modified date) instead?",
+      "layout_ok": "Use photo date",
+      "no_folder": "Set the Smart Photos folder in Settings > Advanced first.",
+      "unavailable": "The Smart Photos folder is not available. Is the drive connected?",
+      "readonly": "The Smart Photos folder is not writable.",
+      "nothing": "No JPG, JPEG or PNG files in the selection.",
+      "copied": "{count} copied",
+      "skipped_exists": "{count} skipped (already exists)",
+      "skipped_layout": "{count} skipped (no year)",
+      "failed": "{count} failed",
+      "failed_prefix": "Send to Smart Photos failed"
+    },
     "save_rotation": {
       "title": "Save rotation to file?",
       "message": "This writes the new orientation into the image file's EXIF data so other apps, such as File Explorer, show it rotated too. The picture itself is not re-encoded, so there is no quality loss.",
@@ -1736,6 +1769,16 @@
       "file_delete_behavior": "When deleting files",
       "file_delete_trash_hint": "Move a single file to trash without confirmation",
       "file_delete_permanent_hint": "Always confirm before permanent deletion",
+      "smart_photos": {
+        "section": "Smart Photos",
+        "folder": "Smart Photos folder",
+        "hint": "\"Send to Smart Photos\" copies photos into <year>\\<event folder> inside this folder. Originals are never changed.",
+        "clear": "Clear",
+        "not_set": "Not set",
+        "choose": "Choose folder",
+        "unavailable": "This folder is not available. Is the drive connected?",
+        "readonly": "This folder is not writable."
+      },
       "title": "Advanced",
       "external_app": {
         "section_external_apps": "External apps",

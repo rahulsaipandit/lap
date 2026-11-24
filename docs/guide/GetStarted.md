@@ -20,7 +20,7 @@ Use this while changing code. Nothing here creates an installer, so it is the fa
 Open a **new** terminal (so `cargo` is on your PATH), then:
 
 ```powershell
-cd d:\Github\lap\src-vite
+cd src-vite
 pnpm install          # first time, or after dependencies change
 cd ..
 cargo tauri dev
@@ -56,7 +56,6 @@ Sometimes you need the real release exe (embedded frontend, release optimization
 an installer. Skip the bundling step:
 
 ```powershell
-cargo tauri build --no-bundle
 ```
 
 Then close the running app and copy the new exe over the installed one. Models and FFmpeg

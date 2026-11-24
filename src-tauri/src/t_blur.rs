@@ -1,3 +1,4 @@
+// RP-CUSTOM: Blur detection scan + PromptFix AI-fix batch; entire file is fork-only.
 use crate::t_dedup;
 use crate::t_sqlite::{AFile, QueryParams};
 use reqwest::multipart;
@@ -98,6 +99,53 @@ fn resolve_scope(
     }
 }
 
+/// Laplacian-variance score below which a photo is flagged as blurry.
+/// Calibrated for `score_file`: scored at <=1024px with a light Gaussian pre-blur,
+/// where the blurry test photos land at ~2-10 and ordinary sharp photos at ~20-80.
+/// Very flat/hazy shots can also fall below it, so results are for human review.
+// RP-CUSTOM: photo-blur scale differs from t_common::MIN_BLUR_SCORE (200, face-quality blur on full-res crops); don't unify.
+pub const BLUR_THRESHOLD: f32 = 12.0;
+/// Longest side (px) every image is scaled down to before scoring, so scores are
+/// comparable across resolutions.
+const SCORE_LONG_SIDE: u32 = 1024;
+/// Gaussian sigma applied before the Laplacian to suppress sensor noise / JPEG grain.
+const SCORE_PRE_BLUR_SIGMA: f32 = 1.0;
+
+/// Decode a reduced-size copy of the file via the thumbnail pipeline (fast scaled JPEG
+/// decode, plus HEIC/JXL/RAW support) and fall back to a full decode.
+fn load_scoring_image(path: &str, file_type: i64) -> Option<image::DynamicImage> {
+    let thumb = if file_type == 3 {
+        crate::t_image::get_raw_thumbnail(
+            path,
+            1,
+            SCORE_LONG_SIDE,
+            crate::t_raw_display::RawDisplayOptions::rendered_bright(),
+        )
+    } else {
+        crate::t_image::get_image_thumbnail(path, 1, SCORE_LONG_SIDE)
+    };
+    if let Ok(Some(bytes)) = thumb {
+        if let Ok(img) = image::load_from_memory(&bytes) {
+            return Some(img);
+        }
+    }
+    image::open(Path::new(path)).ok()
+}
+
+/// Resolution-normalised, noise-suppressed Laplacian variance. Higher = sharper.
+fn score_file(path: &str, file_type: i64) -> Option<f32> {
+    let mut img = load_scoring_image(path, file_type)?;
+    if img.width().max(img.height()) > SCORE_LONG_SIDE {
+        img = img.resize(
+            SCORE_LONG_SIDE,
+            SCORE_LONG_SIDE,
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let img = image::DynamicImage::ImageLuma8(img.to_luma8()).blur(SCORE_PRE_BLUR_SIGMA);
+    Some(crate::t_common::laplacian_variance(&img, 0, 0, img.width(), img.height()))
+}
+
 pub fn start_scan(
     app: tauri::AppHandle,
     state: tauri::State<'_, BlurState>,
@@ -174,7 +222,7 @@ fn scan(
     let mut conn = get_db_conn()?;
     let images: Vec<AFile> = resolve_scope(params, collection_id, file_ids)?
         .into_iter()
-        .filter(|f| matches!(f.file_type, Some(1)) && f.id.is_some())
+        .filter(|f| matches!(f.file_type, Some(1) | Some(3)) && f.id.is_some())
         .collect();
 
     {
@@ -194,11 +242,10 @@ fn scan(
         let Some(path) = file.file_path.as_ref() else {
             continue;
         };
-        let score = match image::open(Path::new(path)) {
-            Ok(img) => crate::t_common::laplacian_variance(&img, 0, 0, img.width(), img.height()),
-            Err(_) => continue,
+        let Some(score) = score_file(path, file.file_type.unwrap_or(1)) else {
+            continue;
         };
-        let is_blurry = score < crate::t_common::MIN_BLUR_SCORE;
+        let is_blurry = score < BLUR_THRESHOLD;
         results.push((file_id, score, is_blurry));
 
         if i % 20 == 0 {
@@ -464,4 +511,58 @@ async fn fix_batch(
     let mut s = status.lock().unwrap();
     s.current = s.total;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{imageops, Rgb, RgbImage};
+
+    fn textured(w: u32, h: u32) -> RgbImage {
+        // Deterministic high-detail pattern (edges at many scales).
+        RgbImage::from_fn(w, h, |x, y| {
+            let v = ((x * 7 + y * 13) % 251) as u8 ^ (((x / 3) * (y / 5)) % 256) as u8;
+            Rgb([v, v, v])
+        })
+    }
+
+    fn score_of(img: &RgbImage, name: &str) -> f32 {
+        let path = std::env::temp_dir().join(name);
+        img.save(&path).unwrap();
+        let s = score_file(path.to_str().unwrap(), 1).unwrap();
+        let _ = std::fs::remove_file(&path);
+        s
+    }
+
+    #[test]
+    fn sharp_scores_above_threshold_and_blurred_below() {
+        let sharp = textured(2400, 1600);
+        let blurred = imageops::blur(&sharp, 6.0);
+        let s = score_of(&sharp, "lap_blur_test_sharp.jpg");
+        let b = score_of(&blurred, "lap_blur_test_blurred.jpg");
+        assert!(s > BLUR_THRESHOLD, "sharp scored {s}");
+        assert!(b < BLUR_THRESHOLD, "blurred scored {b}");
+    }
+
+    #[test]
+    fn score_is_resolution_independent() {
+        let small = textured(1000, 700);
+        let big = imageops::resize(&small, 3000, 2100, imageops::FilterType::Triangle);
+        let a = score_of(&small, "lap_blur_test_small.png");
+        let b = score_of(&big, "lap_blur_test_big.png");
+        // Same content upscaled should be classified identically (not 9x apart).
+        assert_eq!(a < BLUR_THRESHOLD, b < BLUR_THRESHOLD, "{a} vs {b}");
+    }
+
+    #[test]
+    #[ignore]
+    fn print_scores_for_folder() {
+        let dir = std::env::var("BLUR_DIR").unwrap();
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if let Some(s) = score_file(p.to_str().unwrap(), 1) {
+                println!("{:?}: {s:.1} blurry={}", p.file_name().unwrap(), s < BLUR_THRESHOLD);
+            }
+        }
+    }
 }

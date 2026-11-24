@@ -782,6 +782,7 @@
       "remove_from_collection": "Uit collectie halen",
       "create_montage": "Collage maken...",
       "save_xmp": "Metadata opslaan in XMP",
+      "send_to_smart_photos": "Naar Smart Photos sturen",
       "xmp_save_success": "XMP-metadata opgeslagen voor {count} bestand(en)",
       "xmp_save_failed": "XMP opslaan mislukt voor {count} bestand(en)",
       "comment": "Beschrijving…"
@@ -830,6 +831,38 @@
     }
   },
   "msgbox": {
+    "blurry": {
+      "trash": "Prullenbak",
+      "preview": "Voorbeeld",
+      "prev": "Vorige",
+      "next": "Volgende",
+      "fit": "Passend",
+      "actual_size": "100%",
+      "keep": "Behouden",
+      "keep_tip": "Niet wazig - verwijder uit deze lijst (het bestand blijft ongewijzigd)",
+      "close_tip": "Sluiten (Esc)",
+      "shortcuts": "← → navigeren · Del prullenbak · K behouden · Z 100% · Esc sluiten",
+      "confirm_title": "Naar de prullenbak verplaatsen?",
+      "confirm_one": "Deze foto wordt naar de prullenbak verplaatst. Je kunt hem daar herstellen.",
+      "confirm_many": "{count} foto's worden naar de prullenbak verplaatst. Je kunt ze daar herstellen.",
+      "confirm_ok": "Naar prullenbak",
+      "moved": "{count} naar de prullenbak verplaatst",
+      "failed": "{count} kon(den) niet naar de prullenbak worden verplaatst."
+    },
+    "smart_photos": {
+      "layout_title": "Datum van de foto gebruiken voor het jaar?",
+      "layout_message": "{count} foto's staan niet in een <jaar>\\<gebeurtenismap>-indeling, dus het jaar kan niet uit de map worden gehaald. De EXIF-datum (of wijzigingsdatum) van elke foto gebruiken?",
+      "layout_ok": "Fotodatum gebruiken",
+      "no_folder": "Stel eerst de Smart Photos-map in via Instellingen > Geavanceerd.",
+      "unavailable": "De Smart Photos-map is niet beschikbaar. Is de schijf aangesloten?",
+      "readonly": "De Smart Photos-map is niet beschrijfbaar.",
+      "nothing": "Geen JPG-, JPEG- of PNG-bestanden in de selectie.",
+      "copied": "{count} gekopieerd",
+      "skipped_exists": "{count} overgeslagen (bestaat al)",
+      "skipped_layout": "{count} overgeslagen (geen jaar)",
+      "failed": "{count} mislukt",
+      "failed_prefix": "Naar Smart Photos sturen mislukt"
+    },
     "ok": "OK",
     "save": "Opslaan",
     "discard": "Negeren",
@@ -1722,6 +1755,16 @@
       "file_delete_trash_hint": "Verplaats één bestand zonder bevestiging naar de prullenmand",
       "file_delete_permanent_hint": "Permanent verwijderen vereist altijd bevestiging",
       "file_delete_section": "Bestanden verwijderen",
+      "smart_photos": {
+        "section": "Smart Photos",
+        "folder": "Smart Photos-map",
+        "hint": "\"Naar Smart Photos sturen\" kopieert foto's naar <jaar>\\<gebeurtenismap> in deze map. Originelen worden nooit gewijzigd.",
+        "clear": "Wissen",
+        "not_set": "Niet ingesteld",
+        "choose": "Map kiezen",
+        "unavailable": "Deze map is niet beschikbaar. Is de schijf aangesloten?",
+        "readonly": "Deze map is niet beschrijfbaar."
+      },
       "title": "Geavanceerd",
       "external_app": {
         "section_external_apps": "Externe apps",

@@ -143,7 +143,9 @@ export const useFileMenuItems = (
       {
         label: String(localeMsg.value.menu.file.create_montage || 'Create montage...'),
         icon: markRaw(IconCollage),
-        disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount < 2,
+        // RP-CUSTOM[multi-select-menu]: upstream only checks availability and count. The montage
+        // skips videos, so a video-only selection would just toast "not enough photos"; disable it.
+        disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount < 2 || kind === 'video',
         action: createAction('create-montage'),
       },
       { label: '-', action: null },
@@ -184,6 +186,13 @@ export const useFileMenuItems = (
         icon: markRaw(IconSave),
         disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount === 0,
         action: createAction('save-xmp'),
+      },
+      {
+        label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
+        // RP-CUSTOM[multi-select-menu]: upstream doesn't check media kind here, unlike the
+        // single-photo menu (!isImage). Require an all-image selection (videos/mixed disabled).
+        disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount === 0 || kind !== 'image',
+        action: createAction('send-to-smart-photos'),
       },
       { label: '-', action: null },
       ...batchItems.filter(item => item.action?.actionName === 'trash'),
@@ -388,6 +397,11 @@ export const useFileMenuItems = (
         label: String(localeMsg.value.menu.file.save_xmp || 'Save Metadata to XMP'),
         icon: markRaw(IconSave),
         action: createAction('save-xmp'),
+      },
+      {
+        label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
+        disabled: !isImage,
+        action: createAction('send-to-smart-photos'),
       },
       {
         label: localeMsg.value.menu.file.set_as,

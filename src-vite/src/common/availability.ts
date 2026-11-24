@@ -59,14 +59,14 @@ export function resetLibraryAccessibility() {
 
 const originalActions = new Set([
   'edit', 'print', 'rename', 'move-within-library', 'move-to-folder',
-  'save-xmp', 'copy-to-folder', 'trash', 'reveal', 'refresh-file-info', 'set-desktop-wallpaper', 'create-montage',
+  'save-xmp', 'send-to-smart-photos', 'copy-to-folder', 'trash', 'reveal', 'refresh-file-info', 'set-desktop-wallpaper', 'create-montage',
 ]);
 export function requiresOriginalAction(action: string): boolean {
   return originalActions.has(action) || action.startsWith('open-external-app');
 }
 
 const localContentActions = new Set([
-  'open', 'edit', 'print', 'copy-to-folder', 'save-xmp',
+  'open', 'edit', 'print', 'copy-to-folder', 'save-xmp', 'send-to-smart-photos',
   'set-desktop-wallpaper', 'create-montage', 'compare-selected-images',
 ]);
 

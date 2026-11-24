@@ -190,6 +190,7 @@ fn get_migrations() -> Vec<Migration> {
                   ON afolders(album_id) WHERE is_excluded_from_search = 1;",
         },
         Migration {
+            // RP-CUSTOM: Migration 25 = blur-scan tables for the fork's blurry-photo finder.
             version: 25,
             description: "Create blur detection scan tables",
             sql: "

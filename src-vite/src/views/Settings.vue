@@ -468,6 +468,37 @@
             </label>
           </section>
 
+          <!-- Smart Photos folder -->
+          <section class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm" aria-labelledby="smart-photos-settings">
+            <h2 id="smart-photos-settings" class="font-bold uppercase text-[10px] tracking-widest text-base-content/30">{{ $t('settings.advanced.smart_photos.section') }}</h2>
+            <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
+              <div class="min-w-0 flex flex-col gap-0.5 text-sm leading-5">
+                <div>{{ $t('settings.advanced.smart_photos.folder') }}</div>
+                <div class="text-xs text-base-content/30 truncate" :title="config.settings.smartPhotosRoot">
+                  {{ config.settings.smartPhotosRoot || $t('settings.advanced.smart_photos.not_set') }}
+                </div>
+                <div class="text-xs text-base-content/30">{{ $t('settings.advanced.smart_photos.hint') }}</div>
+                <div v-if="smartPhotosStatus === 'missing' || smartPhotosStatus === 'readonly'" class="text-xs text-warning" role="status">
+                  {{ $t(smartPhotosStatus === 'missing' ? 'settings.advanced.smart_photos.unavailable' : 'settings.advanced.smart_photos.readonly') }}
+                </div>
+              </div>
+              <div class="shrink-0 flex items-center gap-2">
+                <button
+                  class="btn btn-sm btn-ghost rounded-box bg-base-100 border border-base-content/30 text-base-content/70 hover:text-base-content"
+                  @click="chooseSmartPhotosFolder"
+                >
+                  {{ $t('settings.advanced.smart_photos.choose') }}
+                </button>
+                <TButton
+                  v-if="config.settings.smartPhotosRoot"
+                  :icon="IconClose"
+                  :buttonSize="'small'"
+                  :tooltip="$t('settings.advanced.smart_photos.clear')"
+                  @click="config.settings.smartPhotosRoot = ''"
+                />
+              </div>
+            </div>
+          </section>
 
           <!-- thumbnail cache -->
           <div class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm">
@@ -820,6 +851,7 @@ import {
   downloadMultilingualImageSearchModel,
   cancelMultilingualImageSearchModelDownload,
   listenImageSearchModelDownloadProgress,
+  getSmartPhotosRootStatus,
 } from '@/common/api';
 import { formatFileSize, isLinux, isMac, SCALE_VALUES } from '@/common/utils';
 import { useAppearance } from '@/composables/useAppearance';
@@ -1573,6 +1605,7 @@ const cancelMultilingualModelDownload = async () => {
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
+  void refreshSmartPhotosStatus();
   if (!settingsTabs.some(tab => tab.id === config.settings.tabIndex)) {
     config.settings.tabIndex = SETTINGS_TAB.GENERAL;
   }
@@ -1659,6 +1692,33 @@ function changeLanguage(language: string) {
 }
 watch(() => config.settings.fileDeleteBehavior, (behavior) => {
   void emit('settings-fileDeleteBehavior-changed', behavior);
+});
+
+// Smart Photos folder ("Send to Smart Photos" destination): one global path.
+// status: 'ok' | 'unset' | 'missing' (e.g. drive not connected) | 'readonly'
+const smartPhotosStatus = ref('unset');
+async function refreshSmartPhotosStatus() {
+  smartPhotosStatus.value = await getSmartPhotosRootStatus(config.settings.smartPhotosRoot || '');
+}
+async function chooseSmartPhotosFolder() {
+  try {
+    const result = await openDialog({
+      title: t('settings.advanced.smart_photos.folder'),
+      multiple: false,
+      directory: true,
+      defaultPath: config.settings.smartPhotosRoot || undefined,
+    });
+    if (typeof result === 'string') config.settings.smartPhotosRoot = result;
+  } catch (error) {
+    toast.error(String(error));
+  }
+}
+watch(() => config.settings.smartPhotosRoot, (root) => {
+  void emit('settings-smartPhotosRoot-changed', root || '');
+  void refreshSmartPhotosStatus();
+});
+watch(() => config.settings.tabIndex, (tab) => {
+  if (tab === SETTINGS_TAB.ADVANCED) void refreshSmartPhotosStatus();
 });
 watch(() => config.settings.showToolTip, (newValue) => {
   emit('settings-showToolTip-changed', newValue);

@@ -405,6 +405,7 @@ where
 ///
 /// Nothing is written until the end, in a single transaction, so a cancel or error leaves the
 /// previous result intact.
+// RP-CUSTOM: Fork reworked face clustering (see docs/guide/Person_FaceRecognition.md).
 pub fn cluster_faces<F, C>(
     threshold: f32,
     mut progress_fn: F,

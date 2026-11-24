@@ -55,7 +55,16 @@
               {{ isAllSelected ? 'Clear' : 'Select all' }}
             </button>
             <button
-              class="btn btn-xs btn-primary ml-auto"
+              class="btn btn-xs btn-error btn-outline ml-auto"
+              :disabled="selectedIds.size === 0 || isFixing || isDeleting"
+              @click="askDeleteSelected"
+            >
+              <span v-if="isDeleting" class="loading loading-spinner loading-xs"></span>
+              <IconTrash v-else class="w-3.5 h-3.5" />
+              {{ $t('msgbox.blurry.trash') }} {{ selectedIds.size > 0 ? selectedIds.size : '' }}
+            </button>
+            <button
+              class="btn btn-xs btn-primary"
               :disabled="selectedIds.size === 0 || isFixing"
               @click="fixSelected"
             >
@@ -70,6 +79,9 @@
           </div>
           <div v-if="fixError" class="text-[11px] text-error leading-relaxed">
             {{ fixError }}
+          </div>
+          <div v-if="deleteError" class="text-[11px] text-error leading-relaxed">
+            {{ deleteError }}
           </div>
         </div>
       </div>
@@ -86,11 +98,11 @@
 
       <div v-else class="flex-1 min-h-0 overflow-y-auto divide-y divide-base-content/8">
         <button
-          v-for="item in items"
+          v-for="(item, index) in items"
           :key="item.file_id"
           class="w-full p-2.5 text-left transition-colors hover:bg-base-200/70"
           @click="handleFileClick(item.file_id)"
-          @dblclick="$emit('preview-file', item.file_id)"
+          @dblclick="openPreview(index)"
         >
           <div class="flex items-center gap-2">
             <label class="shrink-0 flex items-center" @click.stop>
@@ -113,21 +125,97 @@
                 <span v-if="item.fixed_path" class="badge badge-xs badge-success">Fixed</span>
               </div>
               <div class="mt-0.5 text-[11px] text-base-content/50">
-                Blur score: {{ Math.round(item.blur_score) }}
+                Blur score: {{ formatScore(item.blur_score) }}
               </div>
             </div>
+            <span
+              role="button"
+              class="btn btn-xs btn-ghost btn-square shrink-0"
+              :title="$t('msgbox.blurry.preview')"
+              @click.stop="openPreview(index)"
+            >
+              <IconZoomActual class="w-3.5 h-3.5" />
+            </span>
           </div>
         </button>
       </div>
     </div>
+
+    <Teleport to="body">
+    <!-- Large preview: blur is only visible at 100%, so offer a 1:1 view -->
+    <div
+      v-if="previewItem"
+      class="fixed inset-0 z-[60] bg-black/80 flex flex-col"
+      @click.self="closePreview"
+    >
+      <div class="shrink-0 flex items-center gap-2 px-3 py-2 bg-base-100/95 border-b border-base-content/10">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-bold truncate">{{ previewItem.file?.name }}</div>
+          <div class="text-[11px] text-base-content/55">
+            Blur score {{ formatScore(previewItem.blur_score) }} · {{ previewIndex + 1 }} / {{ items.length }}
+          </div>
+        </div>
+        <button class="btn btn-xs btn-ghost" :disabled="previewIndex <= 0" @click="stepPreview(-1)">
+          <IconLeft class="w-3.5 h-3.5" /> {{ $t('msgbox.blurry.prev') }}
+        </button>
+        <button class="btn btn-xs btn-ghost" :disabled="previewIndex >= items.length - 1" @click="stepPreview(1)">
+          {{ $t('msgbox.blurry.next') }} <IconRight class="w-3.5 h-3.5" />
+        </button>
+        <button class="btn btn-xs btn-ghost" @click="previewActualSize = !previewActualSize">
+          <component :is="previewActualSize ? IconZoomFit : IconZoomActual" class="w-3.5 h-3.5" />
+          {{ previewActualSize ? $t('msgbox.blurry.fit') : $t('msgbox.blurry.actual_size') }}
+        </button>
+        <button class="btn btn-xs btn-ghost" @click="keepPreview" :title="$t('msgbox.blurry.keep_tip')">
+          {{ $t('msgbox.blurry.keep') }}
+        </button>
+        <button class="btn btn-xs btn-error" :disabled="isDeleting" @click="trashPreview">
+          <IconTrash class="w-3.5 h-3.5" /> {{ $t('msgbox.blurry.trash') }}
+        </button>
+        <TButton :icon="IconClose" :tooltip="$t('msgbox.blurry.close_tip')" :buttonSize="'small'" @click.stop="closePreview" />
+      </div>
+      <div
+        ref="previewScroller"
+        class="flex-1 min-h-0 overflow-auto flex"
+        :class="previewActualSize ? '' : 'items-center justify-center'"
+        @click.self="closePreview"
+      >
+        <img
+          :key="previewItem.file_id"
+          :src="previewSrc"
+          :class="previewActualSize ? 'max-w-none m-auto' : 'max-w-full max-h-full object-contain'"
+          draggable="false"
+          @load="onPreviewLoaded"
+        />
+      </div>
+      <div class="shrink-0 px-3 py-1 text-[11px] text-center text-white/60 bg-black/40">
+        {{ $t('msgbox.blurry.shortcuts') }}
+      </div>
+    </div>
+
+    <!-- Trash confirmation (trash only; never permanent) -->
+    <div v-if="confirmIds.length > 0" class="modal modal-open z-[70]">
+      <div class="modal-box max-w-sm">
+        <h3 class="font-bold text-base">{{ $t('msgbox.blurry.confirm_title') }}</h3>
+        <p class="py-3 text-sm text-base-content/70">
+          {{ confirmIds.length === 1 ? $t('msgbox.blurry.confirm_one') : $t('msgbox.blurry.confirm_many', { count: confirmIds.length.toLocaleString() }) }}
+        </p>
+        <div class="modal-action">
+          <button class="btn btn-sm" @click="confirmIds = []">Cancel</button>
+          <button class="btn btn-sm btn-error" @click="confirmTrash">{{ $t('msgbox.blurry.confirm_ok') }}</button>
+        </div>
+      </div>
+      <div class="modal-backdrop bg-black/40" @click="confirmIds = []"></div>
+    </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { getThumbnailDataUrl } from '@/common/utils';
+// RP-CUSTOM: Blurry-photo finder pane; entire file is fork-only.
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { getThumbnailDataUrl, getPreviewUrl } from '@/common/utils';
 import TButton from '@/components/TButton.vue';
-import { IconCheckAll, IconCheckNone, IconClose, IconFocus, IconRefresh, IconSparkles } from '@/common/icons';
+import { IconCheckAll, IconCheckNone, IconClose, IconFocus, IconRefresh, IconSparkles, IconTrash, IconLeft, IconRight, IconZoomActual, IconZoomFit } from '@/common/icons';
 import {
   blurStartScan,
   blurGetScanStatus,
@@ -137,8 +225,19 @@ import {
   blurGetFixStatus,
   listenBlurFixProgress,
   getFileThumb,
+  batchDeleteFiles,
 } from '@/common/api';
 import { config } from '@/common/config';
+import { useToast } from '@/common/toast';
+import { i18n } from '@/common/i18n';
+import { emit as tauriEmit } from '@tauri-apps/api/event';
+
+const toast = useToast();
+
+// Scores are computed at <=1024px with a light pre-blur (v2); results saved by the older
+// full-resolution method live under a different key and are never reused.
+const SCAN_KEY_VERSION = 'blur-v2:';
+const scoped = (key: string) => (key ? SCAN_KEY_VERSION + key : '');
 
 const BLUR_RESULT_LIMIT = 500;
 const thumbnailPlaceholder = new URL('@/assets/images/image-file.png', import.meta.url).href;
@@ -169,6 +268,122 @@ const scanStatus = ref<any>({ current: 0, total: 0 });
 const fixStatus = ref<any>({ current: 0, total: 0, currentFile: '' });
 const unlistenScanProgress = ref<null | (() => void)>(null);
 const unlistenFixProgress = ref<null | (() => void)>(null);
+
+const isDeleting = ref(false);
+const deleteError = ref('');
+const confirmIds = ref<number[]>([]);
+const previewIndex = ref(-1);
+const previewActualSize = ref(false);
+const previewScroller = ref<HTMLElement | null>(null);
+
+const previewItem = computed(() => (previewIndex.value >= 0 ? items.value[previewIndex.value] ?? null : null));
+const previewSrc = computed(() => {
+  const f = previewItem.value?.file;
+  return f ? getPreviewUrl(f.id, f.file_path) : '';
+});
+
+function formatScore(score: number) {
+  return score >= 100 ? String(Math.round(score)) : score.toFixed(1);
+}
+
+function openPreview(index: number) {
+  if (index < 0 || index >= items.value.length) return;
+  previewIndex.value = index;
+  handleFileClick(items.value[index].file_id);
+}
+
+function closePreview() {
+  previewIndex.value = -1;
+}
+
+function stepPreview(delta: number) {
+  const next = previewIndex.value + delta;
+  if (next >= 0 && next < items.value.length) openPreview(next);
+}
+
+// Centre the 1:1 view so the middle of the frame (usually the subject) is visible.
+async function onPreviewLoaded() {
+  if (!previewActualSize.value) return;
+  await nextTick();
+  const el = previewScroller.value;
+  if (!el) return;
+  el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2;
+  el.scrollTop = (el.scrollHeight - el.clientHeight) / 2;
+}
+watch(previewActualSize, () => void onPreviewLoaded());
+
+/** Remove entries from the list without touching the files (also used after trashing). */
+function dropItems(ids: Set<number>) {
+  if (ids.size === 0) return;
+  const current = previewItem.value?.file_id;
+  const remaining = items.value.filter((i: any) => !ids.has(i.file_id));
+  let nextIndex = -1;
+  if (current !== undefined && remaining.length > 0) {
+    const stay = remaining.findIndex((i: any) => i.file_id === current);
+    nextIndex = stay >= 0 ? stay : Math.min(previewIndex.value, remaining.length - 1);
+  }
+  items.value = remaining;
+  for (const id of ids) selectedIds.value.delete(id);
+  previewIndex.value = nextIndex;
+}
+
+function keepPreview() {
+  const item = previewItem.value;
+  if (item) dropItems(new Set([item.file_id]));
+}
+
+function trashPreview() {
+  const item = previewItem.value;
+  if (item) confirmIds.value = [item.file_id];
+}
+
+function askDeleteSelected() {
+  if (selectedIds.value.size > 0) confirmIds.value = Array.from(selectedIds.value);
+}
+
+async function confirmTrash() {
+  const ids = new Set(confirmIds.value);
+  confirmIds.value = [];
+  const files = items.value
+    .filter((i: any) => ids.has(i.file_id) && i.file?.file_path)
+    .map((i: any) => ({ fileId: i.file_id, filePath: i.file.file_path }));
+  if (files.length === 0) return;
+  deleteError.value = '';
+  isDeleting.value = true;
+  try {
+    // Always trash (permanently = false); the pane never offers permanent delete.
+    const result = await batchDeleteFiles(files, false);
+    const deleted = new Set<number>((result?.deletedFileIds ?? []).map((id: any) => Number(id)));
+    const failed = files.filter((f) => !deleted.has(f.fileId)).length;
+    dropItems(deleted);
+    if (deleted.size > 0) {
+      // Let the main grid / image viewer drop the files too.
+      void tauriEmit('files-deleted', { source: 'blurry', fileIds: [...deleted] });
+      toast.success(i18n.global.t('msgbox.blurry.moved', { count: deleted.size }) as string);
+    }
+    if (failed > 0) {
+      deleteError.value = i18n.global.t('msgbox.blurry.failed', { count: failed }) as string;
+    }
+  } catch (error: any) {
+    deleteError.value = String(error?.message || error);
+  } finally {
+    isDeleting.value = false;
+  }
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (!previewItem.value || confirmIds.value.length > 0) return;
+  const key = e.key;
+  if (key === 'Escape') closePreview();
+  else if (key === 'ArrowLeft') stepPreview(-1);
+  else if (key === 'ArrowRight') stepPreview(1);
+  else if (key === 'Delete' || key === 'Backspace') trashPreview();
+  else if (key === 'k' || key === 'K') keepPreview();
+  else if (key === 'z' || key === 'Z') previewActualSize.value = !previewActualSize.value;
+  else return;
+  e.preventDefault();
+  e.stopPropagation();
+}
 
 const isAllSelected = computed(() => items.value.length > 0 && selectedIds.value.size === items.value.length);
 
@@ -212,7 +427,7 @@ async function hydrateThumbnails(list: any[]) {
 
 async function fetchResults() {
   try {
-    const result = await blurListResults(props.scanKey, BLUR_RESULT_LIMIT, 0);
+    const result = await blurListResults(scoped(props.scanKey), BLUR_RESULT_LIMIT, 0);
     const list = Array.isArray(result?.items) ? result.items : [];
     await hydrateThumbnails(list);
     items.value = list;
@@ -235,7 +450,7 @@ async function triggerScan(force = false) {
 
   isScanning.value = true;
   try {
-    await blurStartScan(props.scanKey, Date.now(), props.queryParams || null);
+    await blurStartScan(scoped(props.scanKey), Date.now(), props.queryParams || null);
     await pollScanUntilDone();
   } catch (error) {
     console.error('BlurryPane triggerScan error:', error);
@@ -297,6 +512,7 @@ watch(
 );
 
 onMounted(async () => {
+  window.addEventListener('keydown', onKeydown, true);
   unlistenScanProgress.value = await listenBlurScanProgress((event: any) => {
     scanStatus.value = event?.payload || scanStatus.value;
   });
@@ -306,6 +522,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown, true);
   if (unlistenScanProgress.value) unlistenScanProgress.value();
   if (unlistenFixProgress.value) unlistenFixProgress.value();
 });

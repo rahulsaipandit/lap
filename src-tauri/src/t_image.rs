@@ -1089,6 +1089,7 @@ fn sanitize_edit_output_metadata(metadata: &mut LittleExifMetadata) {
 /// Orientation tag that common viewers (e.g. Windows Explorer) honour. Only
 /// JPEG is accepted: other formats either lack reliable support or would need
 /// a re-encode, which is not lossless.
+// RP-CUSTOM: EXIF Orientation rotation writer (JPEG only, keeps modified date); not in upstream.
 pub fn rotation_write_supported(file_path: &str) -> bool {
     Path::new(file_path)
         .extension()
@@ -1152,7 +1153,7 @@ fn exif_field_keys(file_path: &Path) -> Option<std::collections::HashSet<(Tag, I
 
 /// Gives `path` the modified/accessed (and, on Windows, creation) times of the
 /// original file, so saving a rotation doesn't make the photo look edited.
-fn restore_file_times(path: &Path, original: &fs::Metadata) -> Result<(), String> {
+pub(crate) fn restore_file_times(path: &Path, original: &fs::Metadata) -> Result<(), String> {
     let mut times = fs::FileTimes::new();
     if let Ok(modified) = original.modified() {
         times = times.set_modified(modified);

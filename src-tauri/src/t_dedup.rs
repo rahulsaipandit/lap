@@ -216,6 +216,7 @@ fn scan_and_hash_files(
         files_to_check.extend(AFile::get_files_by_ids(&companion_ids)?
             .into_iter().filter(|file| file.id.is_some_and(|id| seen_ids.insert(id))));
     }
+    // RP-CUSTOM: drop deleted-on-disk files and cached hashes so dedup never groups them.
     // The catalog can lag behind the disk; drop files deleted outside Lap and their cached
     // hashes so they cannot be grouped as duplicates.
     let (files_to_check, missing_ids) = split_missing_files(files_to_check);
@@ -545,6 +546,7 @@ fn filter_suspicious_files(files: Vec<AFile>) -> Vec<AFile> {
         .collect()
 }
 
+// RP-CUSTOM: Stale-hash detection also compares file_size, not just mtime (dedup).
 fn check_if_needs_hash(conn: &Connection, file: &AFile) -> Result<bool, String> {
     let mtime = file.modified_at.unwrap_or(0);
     let id = file.id.unwrap();

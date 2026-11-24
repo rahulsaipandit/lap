@@ -44,6 +44,7 @@ mod t_motion_photo;
 mod t_pasteboard;
 mod t_protocol;
 mod t_similar;
+mod t_smart_photos;
 mod t_sqlite;
 mod t_storage;
 mod t_cache_storage;
@@ -370,6 +371,10 @@ async fn main() {
             t_cmds::set_file_rotate,
             t_cmds::can_apply_file_rotation,
             t_cmds::apply_file_rotation,
+            t_smart_photos::smart_photos_root_status,
+            t_smart_photos::smart_photos_preflight,
+            t_smart_photos::send_to_smart_photos,
+            t_smart_photos::check_in_smart_photos,
             t_cmds::get_file_has_tags,
             // favorite
             t_cmds::get_favorite_folders,
