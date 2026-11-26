@@ -1153,6 +1153,7 @@ fn exif_field_keys(file_path: &Path) -> Option<std::collections::HashSet<(Tag, I
 
 /// Gives `path` the modified/accessed (and, on Windows, creation) times of the
 /// original file, so saving a rotation doesn't make the photo look edited.
+// RP-CUSTOM: made pub(crate) so Send to Smart Photos can stamp its copies.
 pub(crate) fn restore_file_times(path: &Path, original: &fs::Metadata) -> Result<(), String> {
     let mut times = fs::FileTimes::new();
     if let Ok(modified) = original.modified() {

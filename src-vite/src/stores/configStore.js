@@ -149,6 +149,7 @@ export const useConfigStore = defineStore('configStore', {
       showStatusBar: true,        // show status bar
       autoCheckUpdates: true,      // automatically check for updates
       fileDeleteBehavior: 'trash',
+      // RP-CUSTOM: Smart Photos destination folder
       smartPhotosRoot: '',        // 'Send to Smart Photos' destination folder (global)
       debugMode: false,           // debug mode
 

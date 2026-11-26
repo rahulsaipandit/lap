@@ -1508,11 +1508,14 @@ export async function applyFileRotation(fileId) {
   return invoke('apply_file_rotation', { fileId });
 }
 
+// RP-CUSTOM: Smart Photos API wrappers (fork-only feature).
 // Smart Photos: 'ok' | 'unset' | 'missing' | 'readonly'
 export async function getSmartPhotosRootStatus(root) {
   try {
     return await invoke('smart_photos_root_status', { root });
   } catch (error) {
+    // Usually means the running app build predates the command; don't hide it.
+    console.error('smart_photos_root_status failed:', error);
     return 'missing';
   }
 }

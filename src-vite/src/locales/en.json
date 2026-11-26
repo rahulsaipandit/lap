@@ -786,6 +786,7 @@
       "create_montage": "Create collage...",
       "save_xmp": "Save Metadata to XMP",
       "send_to_smart_photos": "Send to Smart Photos",
+      "in_smart_photos": "In Smart Photos",
       "xmp_save_success": "Saved XMP metadata for {count} file(s)",
       "xmp_save_failed": "Failed to save XMP for {count} file(s)",
       "comment": "Description…"

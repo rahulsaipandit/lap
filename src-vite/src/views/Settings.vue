@@ -468,7 +468,7 @@
             </label>
           </section>
 
-          <!-- Smart Photos folder -->
+          <!-- RP-CUSTOM: Smart Photos folder setting -->
           <section class="rounded-box p-2 space-y-2 bg-base-300/30 border border-base-content/5 shadow-sm" aria-labelledby="smart-photos-settings">
             <h2 id="smart-photos-settings" class="font-bold uppercase text-[10px] tracking-widest text-base-content/30">{{ $t('settings.advanced.smart_photos.section') }}</h2>
             <div class="flex items-center justify-between gap-4 px-1 rounded-box hover:bg-base-100/10 transition-colors duration-200">
@@ -1694,7 +1694,7 @@ watch(() => config.settings.fileDeleteBehavior, (behavior) => {
   void emit('settings-fileDeleteBehavior-changed', behavior);
 });
 
-// Smart Photos folder ("Send to Smart Photos" destination): one global path.
+// RP-CUSTOM: Smart Photos folder ("Send to Smart Photos" destination): one global path.
 // status: 'ok' | 'unset' | 'missing' (e.g. drive not connected) | 'readonly'
 const smartPhotosStatus = ref('unset');
 async function refreshSmartPhotosStatus() {

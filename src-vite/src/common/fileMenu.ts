@@ -187,6 +187,7 @@ export const useFileMenuItems = (
         disabled: unavailable || options?.selectionHasCloudOnly?.value || selectionCount === 0,
         action: createAction('save-xmp'),
       },
+      // RP-CUSTOM: Send to Smart Photos menu item
       {
         label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
         // RP-CUSTOM[multi-select-menu]: upstream doesn't check media kind here, unlike the
@@ -398,6 +399,7 @@ export const useFileMenuItems = (
         icon: markRaw(IconSave),
         action: createAction('save-xmp'),
       },
+      // RP-CUSTOM: Send to Smart Photos menu item
       {
         label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
         disabled: !isImage,

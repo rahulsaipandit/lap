@@ -783,6 +783,7 @@
       "create_montage": "Collage maken...",
       "save_xmp": "Metadata opslaan in XMP",
       "send_to_smart_photos": "Naar Smart Photos sturen",
+      "in_smart_photos": "In Smart Photos",
       "xmp_save_success": "XMP-metadata opgeslagen voor {count} bestand(en)",
       "xmp_save_failed": "XMP opslaan mislukt voor {count} bestand(en)",
       "comment": "Beschrijving…"

@@ -144,6 +144,7 @@ if (isMainWindow) {
       config.settings.fileDeleteBehavior = event.payload
     }
   })
+  // RP-CUSTOM: keep the Smart Photos folder in sync from the Settings window
   listen('settings-smartPhotosRoot-changed', (event) => {
     config.settings.smartPhotosRoot = typeof event.payload === 'string' ? event.payload : ''
   })

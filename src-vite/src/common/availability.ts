@@ -57,6 +57,7 @@ export function resetLibraryAccessibility() {
   resetFileAccessibility();
 }
 
+// RP-CUSTOM: 'send-to-smart-photos' added to the original/local-content action sets below.
 const originalActions = new Set([
   'edit', 'print', 'rename', 'move-within-library', 'move-to-folder',
   'save-xmp', 'send-to-smart-photos', 'copy-to-folder', 'trash', 'reveal', 'refresh-file-info', 'set-desktop-wallpaper', 'create-montage',

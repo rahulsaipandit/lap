@@ -496,7 +496,7 @@ const getMenuItemsForFolder = async (folder: any) => {
       }
     },
     {
-      // Copies the folder's JPG/JPEG/PNG files to Smart Photos; the folder itself is never changed.
+      // RP-CUSTOM: copies the folder's JPG/JPEG/PNG files to Smart Photos; the folder itself is never changed.
       label: String(localeMsg.value.menu.file.send_to_smart_photos || 'Send to Smart Photos'),
       disabled: unavailable,
       action: () => { void sendPathsToSmartPhotos([folder.path]); }

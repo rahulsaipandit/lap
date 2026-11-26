@@ -4983,7 +4983,7 @@ function handleItemAction(payload: { action: string, index: number }) {
         }
       } catch (error) { toast.error(String(error)); }
     },
-    // Copies (never moves) to the Smart Photos folder; the originals are not touched.
+    // RP-CUSTOM: Copies (never moves) to the Smart Photos folder; the originals are not touched.
     'send-to-smart-photos': () => {
       const files = selectMode.value ? getActionableSelectedItems() : [fileList.value[selectedItemIndex.value]];
       void sendPathsToSmartPhotos(files.map(f => f?.file_path).filter(Boolean));
@@ -6449,6 +6449,16 @@ onMounted( async() => {
           }
         }
         break;
+      // RP-CUSTOM: viewer toolbar trash button; reuses the normal delete flow for that file
+      case 'request-delete': {
+        const deleteId = Number((event.payload as any).fileId);
+        const deleteIndex = fileList.value.findIndex(file => Number(file?.id) === deleteId);
+        if (deleteIndex >= 0 && !selectMode.value) {
+          selectedItemIndex.value = deleteIndex;
+          await openFileDeletion();
+        }
+        break;
+      }
       case 'rotation-saved': {
         const savedFile = (event.payload as any).file;
         const target = fileList.value.find(file => Number(file?.id) === Number(savedFile?.id));

@@ -201,6 +201,14 @@
             @click="$emit('item-action', { action: 'toggle-sync-viewport' })"
           />
         </template>
+        <!-- RP-CUSTOM: one-click trash/delete button in viewer toolbar (previously only in the ... menu) -->
+        <TButton v-if="mode !== 2"
+          :icon="IconTrash"
+          :disabled="fileIndex < 0 || isSlideShow || !canInteract"
+          :tooltip="config.settings.fileDeleteBehavior === 'permanent' ? $t('menu.file.delete') : $t('msgbox.move_to_trash.title')"
+          :shortcut="shortcut(config.settings.fileDeleteBehavior === 'permanent' ? 'file.deletePermanently' : 'file.trash')"
+          @click="$emit('item-action', { action: 'trash', index: fileIndex })"
+        />
         <ContextMenu v-if="mode !== 2"
           ref="contextMenuRef"
           :iconMenu="IconMore"
@@ -491,6 +499,7 @@ import {
   IconRestoreScreen,
   IconPin,
   IconUnPin,
+  IconTrash, // RP-CUSTOM: toolbar trash button
   IconSeparator,
   IconClose,
   IconMore,

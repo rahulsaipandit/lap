@@ -33,6 +33,10 @@ The first Rust compile takes about 10 minutes; later runs are incremental.
 - If the app is missing AI models or FFmpeg, run `.\scripts\download_models.ps1` and
   `.\scripts\download_ffmpeg_sidecar.ps1`.
 
+**Rust changes not showing up?** The desktop shortcut only starts Vite and runs the existing
+`src-tauri\target\debug\Lap.exe`, so frontend changes load live but new Rust commands need a rebuild.
+Close Lap (Windows locks the exe while it runs), then run `cargo build` in `src-tauri`.
+
 ### 1.2 Desktop shortcut: "Lap (dev)"
 
 The debug `Lap.exe` (`src-tauri\target\debug\Lap.exe`) loads its UI from the Vite dev server,

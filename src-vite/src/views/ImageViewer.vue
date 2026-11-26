@@ -1549,6 +1549,7 @@ const handleItemAction = async (payload: { action: string }) => {
     case 'save-rotation':
       await clickSaveRotation(pane);
       break;
+    // RP-CUSTOM: Send to Smart Photos from the viewer
     case 'send-to-smart-photos': {
       // Copy only; the original file is never modified.
       const path = getFileInfoByPane(pane)?.file_path;
@@ -1593,6 +1594,12 @@ const handleItemAction = async (payload: { action: string }) => {
     case 'toggle-sync-viewport':
       toggleSyncViewport();
       break;
+    // RP-CUSTOM: toolbar trash button; deletion (confirm dialog, DB cleanup) lives in the main window
+    case 'trash': {
+      const trashFileId = Number(getFileInfoByPane(pane)?.id);
+      if (trashFileId > 0) emit('message-from-image-viewer', { message: 'request-delete', fileId: trashFileId });
+      break;
+    }
     default:
       break;
   }

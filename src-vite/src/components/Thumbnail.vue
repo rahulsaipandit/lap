@@ -91,7 +91,8 @@
       <div v-else-if="file.cloud_only" class="absolute right-0.5 bottom-0.5 z-20 thumb-badge" :title="cloudOnlyLabel" :aria-label="cloudOnlyLabel">
         <IconCloud class="h-3.5 w-3.5 shrink-0" />
       </div>
-      <div v-else-if="inSmartPhotos" class="pointer-events-none absolute right-0.5 bottom-0.5 z-20 thumb-badge" :title="t('menu.file.send_to_smart_photos')" :aria-label="t('menu.file.send_to_smart_photos')">
+      <!-- RP-CUSTOM: badge for photos already in Smart Photos; hoverable (no pointer-events-none) so the tooltip shows -->
+      <div v-else-if="inSmartPhotos" class="absolute right-0.5 bottom-0.5 z-20 thumb-badge" :title="t('menu.file.in_smart_photos')" :aria-label="t('menu.file.in_smart_photos')">
         <IconChecked class="h-3.5 w-3.5 shrink-0 text-success/80" />
       </div>
 
@@ -116,11 +117,14 @@
         >
           <template v-if="badge.icons?.length">
             <div class="flex items-center gap-0.5">
+              <!-- RP-CUSTOM: hoverable meta icons with tooltip (tag/collection) -->
               <component
                 :is="entry.icon"
                 v-for="(entry, index) in badge.icons"
                 :key="`${badge.key}-${index}`"
-                class="h-3.5 w-3.5 shrink-0"
+                class="h-3.5 w-3.5 shrink-0 pointer-events-auto"
+                :title="entry.title"
+                :aria-label="entry.title"
               />
             </div>
           </template>
@@ -669,6 +673,7 @@ type ThumbnailBadge = {
   icon?: Component;
   icons?: Array<{
     icon: Component;
+    title?: string;
   }>;
   label?: string;
   iconClass?: string;
@@ -758,8 +763,9 @@ const statusBadges = computed<ThumbnailBadge[]>(() => {
     });
   }
   
-  if (props.file.has_tags) metaIcons.push({ icon: IconTag });
-  if (props.file.has_collections) metaIcons.push({ icon: IconCollection });
+  // RP-CUSTOM: tooltips for tag/collection icons (generic names; the file row only carries booleans)
+  if (props.file.has_tags) metaIcons.push({ icon: IconTag, title: t('tag.title') });
+  if (props.file.has_collections) metaIcons.push({ icon: IconCollection, title: t('collection.title') });
   if (metaIcons.length > 0) {
     badges.push({
       key: 'meta',
